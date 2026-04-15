@@ -440,17 +440,17 @@ async def orquestrar(
     session.commit()
     result.n_novos = len(lotes_ids_novos)
 
-    # 3. Pipeline: lotes coletados que ainda não têm AvaliacaoLote nesta empresa
-    ids_coletados = [c["loteId"] for c in cards]
+    # 3. Pipeline: todos os lotes no banco sem AvaliacaoLote para esta empresa
+    #    (inclui scrape de hoje + lotes já persistidos de dias anteriores)
     ids_ja_avaliados = {
         r.lote_id for r in session.exec(
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
         ).all()
     }
-    ids_a_avaliar = [i for i in ids_coletados if i not in ids_ja_avaliados]
-    lotes_a_avaliar = session.exec(
-        select(Lote).where(Lote.id.in_(ids_a_avaliar))  # type: ignore[arg-type]
-    ).all()
+    lotes_a_avaliar = [
+        l for l in session.exec(select(Lote)).all()
+        if l.id not in ids_ja_avaliados
+    ]
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="carros_sa_"))
 

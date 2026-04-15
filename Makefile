@@ -40,6 +40,9 @@ ifndef WS
 	@echo "Erro: defina WS=<nome-workstream>"; exit 1
 endif
 	git worktree add ../carros-sa-$(WS) -b feat/$(WS)
+	@# Compartilha venv e .env (gitignored) com o worktree
+	ln -s "$$(pwd)/.venv" ../carros-sa-$(WS)/.venv
+	@if [ -f .env ]; then ln -s "$$(pwd)/.env" ../carros-sa-$(WS)/.env; fi
 	@echo ""
 	@echo "✓ Worktree criado em ../carros-sa-$(WS)"
 	@echo "  Próximo passo: cd ../carros-sa-$(WS) && claude"

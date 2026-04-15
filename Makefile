@@ -1,7 +1,7 @@
 # Carros SA — atalhos pra comandos comuns
 # Uso: `make <target>` (ex: `make test`)
 
-.PHONY: help test test-fast ingest extrair-laudo db-reset worktree-new worktree-remove
+.PHONY: help test test-fast ingest extrair-laudo db-reset sheets worktree-new worktree-remove
 
 PY := PYTHONPATH=. .venv/bin/python
 
@@ -12,6 +12,7 @@ help:
 	@echo "  make ingest [FILE=...]             # persiste JSON de listagem no SQLite"
 	@echo "  make extrair-laudo PDF=...         # roda ExtratorLaudo num PDF local"
 	@echo "  make db-reset                      # apaga carros_sa.db e recria schema"
+	@echo "  make sheets EMPRESA=<id>           # exporta triagem pro Google Sheets"
 	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
 	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
 
@@ -29,6 +30,12 @@ ifndef PDF
 	@echo "Erro: defina PDF=data/laudos_amostra/<arquivo>.pdf"; exit 1
 endif
 	$(PY) scripts/extrair_laudo.py $(PDF)
+
+sheets:
+ifndef EMPRESA
+	@echo "Erro: defina EMPRESA=<id> (ex: make sheets EMPRESA=uberlandia_mg)"; exit 1
+endif
+	$(PY) scripts/exportar_sheets.py --empresa $(EMPRESA)
 
 db-reset:
 	rm -f carros_sa.db

@@ -68,6 +68,14 @@ Depende de **A + (B ou similares) + C + D**. Vai em `carros_sa/orquestrador.py`.
 ### F — CLI 🔒 bloqueado
 Depende de E. Vai em `carros_sa/cli.py` com Typer. Comando principal: `carros-sa triagem <url_leilao> --empresa=<id> --top 10`.
 
+### I — Exportador Google Sheets ✅
+- **Branch:** `claude/laughing-dewdney`
+- **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)
+- **Uso:** `make sheets EMPRESA=uberlandia_mg`
+- **O que mudou:** `SheetsExporter` lê `AvaliacaoLote + Lote + LaudoCache` do SQLite e escreve aba `<empresa_id>` no Google Sheets (17 colunas, rankeado por score_roi desc, header congelado). Auth via service account JSON. Sem Orquestrador rodado, exporta 0 linhas — mas módulo e testes estão prontos.
+- **Cobertura:** 6 testes em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) (ROI, ordenação, sem laudo, sem avaliações), todos mockando gspread.
+- **Limitações:** depende de `avaliacao_lote` populado (workstream E). Setup one-time: service account JSON + compartilhar Sheet com e-mail do SA.
+
 ### G — Tracking longitudinal Webmotors 🕐 futuro
 Cron semanal que popula `anuncio_webmotors.sumiu_em`. Só faz sentido depois de ≥2 semanas de coleta contínua.
 

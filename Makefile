@@ -51,6 +51,6 @@ worktree-remove:
 ifndef WS
 	@echo "Erro: defina WS=<nome-workstream>"; exit 1
 endif
-	git worktree remove ../carros-sa-$(WS)
-	git branch -d feat/$(WS) || true
+	git worktree remove --force ../carros-sa-$(WS)
+	git branch -d feat/$(WS) || git branch -D feat/$(WS) || true
 	@echo "✓ Worktree e branch feat/$(WS) removidos"

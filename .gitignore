@@ -1,0 +1,32 @@
+# Credenciais — NUNCA commitar
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Dados locais (PoC)
+*.db
+*.db-journal
+data/scrapes/*.json
+data/laudos_amostra/*.pdf
+# Exceções: dataset de referência — usado como fixture pelos testes/workstreams
+!data/scrapes/2026-04-14_uberlandia_listagem.json
+!data/laudos_amostra/21854782_fiesta.pdf
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code local state
+.claude/settings.local.json

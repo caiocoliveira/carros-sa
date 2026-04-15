@@ -1,0 +1,38 @@
+# Empresa fake pra validar multi-tenancy: pátio em SP, margem mais agressiva.
+empresa_id: empresa_fake_sp
+nome: "Fake Auto - São Paulo"
+patio:
+  cidade: "São Paulo"
+  uf: "SP"
+  cep: "01310-100"
+margem:
+  base: 0.22                    # 22% — operação mais exigente
+  minima_absoluta: 0.15
+raio_max_km: 800                # mais restritivo
+fator_risco_bounds: [1.0, 2.2]
+fator_liquidez_bounds: [1.0, 2.0]
+tabela_frete:
+  "0-300":
+    hatch: 700
+    sedan: 700
+    suv: 1100
+    utilitario: 1400
+    picape: 1400
+    outro: 1100
+  "300-600":
+    hatch: 1300
+    sedan: 1300
+    suv: 1800
+    utilitario: 2200
+    picape: 2200
+    outro: 1800
+  "600-1000":
+    hatch: 2100
+    sedan: 2100
+    suv: 2700
+    utilitario: 3300
+    picape: 3300
+    outro: 2700
+categorias_aceitas: [hatch, sedan, suv, picape]
+taxa_leilao_pct: 0.08
+custo_op_fixo: 650

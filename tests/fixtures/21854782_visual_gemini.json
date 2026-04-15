@@ -1,0 +1,37 @@
+{
+  "pecas": {
+    "painel_frontal": "original",
+    "painel_traseiro": "original",
+    "capo_tampa_motor": "original",
+    "tampa_traseira": "original",
+    "teto_veiculo": "original",
+    "longarina_dianteira_esquerda": "original",
+    "longarina_dianteira_direita": "original",
+    "longarina_traseira_esquerda": "original",
+    "longarina_traseira_direita": "original",
+    "coluna_a_esquerda": "original",
+    "coluna_a_direita": "original",
+    "coluna_b_esquerda": "reparado",
+    "coluna_b_direita": "original",
+    "coluna_c_esquerda": "reparado",
+    "coluna_c_direita": "original",
+    "coluna_d_esquerda": "original",
+    "coluna_d_direita": "original",
+    "paralama_dianteiro_esquerdo": "original",
+    "paralama_dianteiro_direito": "original",
+    "paralama_traseiro_esquerdo": "original",
+    "paralama_traseiro_direito": "original",
+    "porta_dianteira_esquerda": "original",
+    "porta_dianteira_direita": "original",
+    "porta_traseira_esquerda": "original",
+    "porta_traseira_direita": "original"
+  },
+  "severidade_geral": "estrutural",
+  "pecas_reparadas": [
+    "coluna_b_esquerda",
+    "coluna_c_esquerda"
+  ],
+  "pecas_avariadas": [],
+  "confidence": 0.95,
+  "observacao_visual": "Duas colunas estruturais no lado esquerdo do veículo (Coluna B Esquerda e Coluna C Esquerda) apresentam status de reparado/soldado/substituído. As demais peças estruturais marcadas estão originais."
+}

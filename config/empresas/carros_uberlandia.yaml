@@ -1,0 +1,44 @@
+empresa_id: carros_uberlandia
+nome: "Carros SA - Uberlândia"
+patio:
+  cidade: "Uberlândia"
+  uf: "MG"
+  cep: "38400-000"
+margem:
+  base: 0.18                    # 18% alvo
+  minima_absoluta: 0.10         # nunca abaixo disso
+raio_max_km: 1000
+fator_risco_bounds: [1.0, 2.0]
+fator_liquidez_bounds: [1.0, 1.8]
+tabela_frete:                   # R$ por faixa_km × categoria
+  "0-300":
+    hatch: 800
+    sedan: 800
+    suv: 1200
+    utilitario: 1500
+    picape: 1500
+    outro: 1200
+  "300-600":
+    hatch: 1400
+    sedan: 1400
+    suv: 1900
+    utilitario: 2300
+    picape: 2300
+    outro: 1900
+  "600-1000":
+    hatch: 2200
+    sedan: 2200
+    suv: 2800
+    utilitario: 3400
+    picape: 3400
+    outro: 2800
+  "1000-2000":
+    hatch: 3000
+    sedan: 3000
+    suv: 3800
+    utilitario: 4500
+    picape: 4500
+    outro: 3800
+categorias_aceitas: [hatch, sedan, suv, utilitario, picape]
+taxa_leilao_pct: 0.08
+custo_op_fixo: 500

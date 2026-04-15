@@ -1,0 +1,273 @@
+"""Testes dos parsers de Auto Avaliar, usando fixtures reais coletadas via Chrome MCP."""
+
+from datetime import datetime
+
+import pytest
+
+from carros_sa.scraping.parsers import parse_card_lines, parse_detalhe
+
+
+# =============================================================================
+# Fixtures com dados REAIS coletados de b2b.autoavaliar.com.br em 2026-04-14
+# =============================================================================
+
+CARD_FIESTA_LINES = [
+    "Uberlandia/MG",
+    "33%",
+    "anúncio destaque",
+    "FORD",
+    "FIESTA",
+    "22.900,00",
+    "1.6 SE HATCH 16V FLEX 4P MANUAL",
+    "2012/2013",
+    "FLEX",
+    "MANUAL",
+    "171.053",
+    "12:32:19:10",
+    "SN VW UDI MATRIZ",
+    "GRUPO SAGA SEMINOVOS",
+    "4.2",
+    "AVALIE AGORA",
+]
+
+CARD_COMPASS_LINES = [
+    "Uberlandia/MG",
+    "24%",
+    # sem "anúncio destaque"
+    "JEEP",
+    "COMPASS",
+    "72.000,00",
+    "2.0 16V FLEX LONGITUDE AUTOMATICO",
+    "2018/2019",
+    "FLEX",
+    "AUTOMATICO",
+    "137.577",
+    "14:21:16:10",
+    "SN VW UDI MATRIZ",
+    "GRUPO SAGA SEMINOVOS",
+    "4.2",
+    "AVALIE AGORA",
+]
+
+
+def test_parse_card_fiesta_com_anuncio_destaque():
+    lote = parse_card_lines(
+        CARD_FIESTA_LINES,
+        lote_id="21854782",
+        href="https://b2b.autoavaliar.com.br/avaliacoes/saga/21854782/ford-fiesta",
+    )
+    assert lote.lote_id == "21854782"
+    assert lote.marca == "Ford"
+    assert "Fiesta" in lote.modelo
+    assert lote.ano == 2013
+    assert lote.km == 171_053
+    assert lote.lance_atual == 22_900
+    assert lote.origem_cidade == "Uberlandia"
+    assert lote.origem_uf == "MG"
+    assert lote.fim_em is not None
+
+
+CARD_HAVAL_SHOWROOM = [
+    "Uberlândia/MG", "SHOWROOM", "GWM", "HAVAL H6", "162.000,00",
+    "1.5 HEV PREMIUM E-TRACTION", "2023/2024", "HIBRIDO", "AUTOMATICO",
+    "39.731", "20:15:13:92", "EUROVILLE GWM UBERLÂNDIA", "Grupo Auto Japan", "4.2", "AVALIE AGORA",
+]
+
+CARD_EVOQUE_DOIS_PRECOS = [
+    "Uberlândia/MG", "28%", "LAND ROVER", "RANGE ROVER", "EVOQUE",
+    "93.000,00",        # preço original
+    "82.000,00",        # preço atual (menor → é o que conta)
+    "2.0 DYNAMIC 4WD 16V GASOLINA 4P AUTOMATICO",
+    "2014/2015", "GASOLINA", "AUTOMATICO", "97.403",
+    "12:15:13:92", "QUITCAR", "Revendedores Auto Avaliar", "AVALIE AGORA",
+]
+
+CARD_COMPASS_SEM_BADGE = [
+    # Sem linha de % nem "SHOWROOM"
+    "Uberlândia/MG", "JEEP", "COMPASS", "89.000,00",
+    "2.0 16V FLEX LIMITED AUTOMATICO", "2019/2020", "FLEX", "AUTOMATICO",
+    "70.891", "21:15:13:92", "BYD UBERLANDIA", "Grupo Aguia Branca", "3.6", "AVALIE AGORA",
+]
+
+
+def test_parse_card_haval_com_badge_showroom():
+    lote = parse_card_lines(CARD_HAVAL_SHOWROOM, "21867780",
+                            "https://b2b.autoavaliar.com.br/avaliacoes/autojapan/21867780/gwm-haval-h6")
+    assert lote.marca == "Gwm"
+    assert "Haval" in lote.modelo
+    assert lote.ano == 2024
+    assert lote.km == 39_731
+    assert lote.lance_atual == 162_000
+
+
+def test_parse_card_evoque_dois_precos_pega_o_menor():
+    lote = parse_card_lines(CARD_EVOQUE_DOIS_PRECOS, "21860924",
+                            "https://b2b.autoavaliar.com.br/avaliacoes/revendedoresautoavaliar/21860924")
+    # Marca com 2 palavras (LAND ROVER) + modelo de 2 palavras (RANGE ROVER EVOQUE)
+    assert "Land" in lote.marca or "Land" in lote.modelo
+    assert lote.ano == 2015
+    assert lote.km == 97_403
+    # Dois preços → usa o menor (82k)
+    assert lote.lance_atual == 82_000
+    # Versão não deve capturar o segundo preço
+    assert "82.000" not in lote.modelo
+    assert "DYNAMIC" in lote.modelo.upper()
+
+
+def test_parse_card_compass_sem_badge_nem_fipe_pct():
+    lote = parse_card_lines(CARD_COMPASS_SEM_BADGE, "21863111",
+                            "https://b2b.autoavaliar.com.br/avaliacoes/kuruma/21863111")
+    assert lote.marca == "Jeep"
+    assert "Compass" in lote.modelo
+    assert lote.ano == 2020
+    assert lote.km == 70_891
+    assert lote.lance_atual == 89_000
+
+
+def test_parse_card_compass_sem_anuncio_destaque():
+    lote = parse_card_lines(
+        CARD_COMPASS_LINES,
+        lote_id="21866082",
+        href="https://b2b.autoavaliar.com.br/avaliacoes/saga/21866082/jeep-compass",
+    )
+    assert lote.marca == "Jeep"
+    assert "Compass" in lote.modelo
+    assert lote.ano == 2019
+    assert lote.km == 137_577
+    assert lote.lance_atual == 72_000
+
+
+# =============================================================================
+# parse_detalhe — testa o innerText real do Fiesta 21854782
+# =============================================================================
+
+DETALHE_FIESTA_BODY = """Ford Fiesta 1.6 Se Hatch 16v Flex 4p Manual | AutoAvaliar
+SN VW UDI MATRIZ - Uberlandia/MG
+GRUPO SAGA SEMINOVOS - ANÚNCIO Nº 21854782
+fipe
+33%
+Veículo de Repasse
+ULTIMA AVALIAÇÃO
+22.900,00 / FIESTA
+R$
+AVALIE AGORA
+400,00
+800,00
+1.200,00
+Ative lances automáticos para este anúncio
+R$
+ATIVAR
+LAUDO DO VEÍCULO
+SIMULAR FRETE
+FINALIZA EM 15/04/2026 as 08:11:03
+
+12:30:56 :86
+
+ANO
+2012/2013
+COMBUSTÍVEL
+FLEX
+KM
+171.053
+PORTAS
+4P
+COR
+BRANCO
+MOTOR
+1596
+PLACA
+O**-***8
+CÂMBIO
+MANUAL
+ORIGEM
+IMPORTADO
+ANUNCIANTE
+DOCUMENTAÇÃO INFORMADA PELO ANUNCIANTE
+STATUS DO LAUDO
+Laudo não aprovado
+Acessar
+STATUS DO DOCUMENTO
+Recibo/DOC em processo de transferência para a concessionária
+PRAZO ESTIMADO DE TRANSFERÊNCIA
+16 dias
+PRAZO DE LIBERAÇÃO DO VEÍCULO
+7 dias
+OPCIONAIS
+AIR BAG DUPLO
+VIDRO ELÉTRICO
+AR QUENTE
+AR CONDICIONADO
+VIDRO ELETRICO TRASEIRO
+ALARME
+VIDRO ELETRICO DIANTEIRO
+ITENS AVALIADOS
+Está ciente dos itens avaliados e das condições de venda?
+Estou Ciente
+REPROVADO ESTRUTURAL
+
+1 PARCELA IPVA 2026 PAGA
+IPVA 2025 PAGO
+LEIA O ANÚNCIO COM ATENÇÃO, POIS NÃO TEMOS ACESSO PARA EFETUAR CANCELAMENTO
+ATENÇÃO TODOS OS NOSSOS VEICULOS É UTILIZADO PROCURAÇÃO PUBLICA OUTORGADA A PESSOA JURIDICA
+Talvez se interesse por
+FIESTA 1.6 TITANIUM HATCH 16V FLEX 4P POWERSHIFT
+2015/2016
+FLEX
+15:19:17
+45.000,00
+FIESTA 1.0 ROCAM 8V FLEX 4P MANUAL
+2012/2013
+FLEX
+15:19:17
+23.200,00
+"""
+
+
+def test_parse_detalhe_extrai_specs():
+    flags = parse_detalhe(DETALHE_FIESTA_BODY, laudo_pdf_url="https://storage.googleapis.com/doc-b2b/8c9fbea96f.pdf")
+    assert flags.specs["ANO"] == "2012/2013"
+    assert flags.specs["KM"] == "171.053"
+    assert flags.specs["COR"] == "BRANCO"
+    assert flags.specs["CÂMBIO"] == "MANUAL"
+    assert flags.specs["COMBUSTÍVEL"] == "FLEX"
+    assert flags.specs["ORIGEM"] == "IMPORTADO"
+
+
+def test_parse_detalhe_status_e_prazos():
+    flags = parse_detalhe(DETALHE_FIESTA_BODY)
+    assert flags.status_laudo == "Laudo não aprovado"
+    assert "transferência" in (flags.status_documento or "").lower()
+    assert flags.prazo_transferencia_dias == 16
+    assert flags.prazo_liberacao_dias == 7
+
+
+def test_parse_detalhe_reprovado_estrutural_early_exit():
+    flags = parse_detalhe(DETALHE_FIESTA_BODY)
+    assert flags.reprovado_estrutural is True
+    assert flags.laudo_aprovado is False
+    # Early exit primário é o reprovado estrutural (aparece antes)
+    assert flags.early_exit == "reprovado_estrutural"
+
+
+def test_parse_detalhe_opcionais_e_ipva():
+    flags = parse_detalhe(DETALHE_FIESTA_BODY)
+    assert "AIR BAG DUPLO" in flags.opcionais
+    assert "AR CONDICIONADO" in flags.opcionais
+    assert flags.ipva_pago is True
+
+
+def test_parse_detalhe_similares_precos():
+    flags = parse_detalhe(DETALHE_FIESTA_BODY)
+    assert 45_000 in flags.similares_precos
+    assert 23_200 in flags.similares_precos
+
+
+def test_parse_detalhe_laudo_aprovado_sem_early_exit():
+    """Caso feliz: laudo aprovado, sem reprovações, prazos curtos."""
+    body = DETALHE_FIESTA_BODY.replace("Laudo não aprovado", "Laudo aprovado").replace(
+        "REPROVADO ESTRUTURAL", "APROVADO ESTRUTURAL"
+    )
+    flags = parse_detalhe(body)
+    assert flags.laudo_aprovado is True
+    assert flags.reprovado_estrutural is False
+    assert flags.early_exit is None

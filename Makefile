@@ -1,0 +1,53 @@
+# Carros SA — atalhos pra comandos comuns
+# Uso: `make <target>` (ex: `make test`)
+
+.PHONY: help test test-fast ingest extrair-laudo db-reset worktree-new worktree-remove
+
+PY := PYTHONPATH=. .venv/bin/python
+
+help:
+	@echo "Alvos disponíveis:"
+	@echo "  make test                          # roda toda a suíte (baseline obrigatório)"
+	@echo "  make test-fast                     # roda suíte, para no 1o erro"
+	@echo "  make ingest [FILE=...]             # persiste JSON de listagem no SQLite"
+	@echo "  make extrair-laudo PDF=...         # roda ExtratorLaudo num PDF local"
+	@echo "  make db-reset                      # apaga carros_sa.db e recria schema"
+	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
+	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
+
+test:
+	$(PY) -m pytest tests/ -v
+
+test-fast:
+	$(PY) -m pytest tests/ -x
+
+ingest:
+	$(PY) scripts/ingest_listagem.py $(FILE)
+
+extrair-laudo:
+ifndef PDF
+	@echo "Erro: defina PDF=data/laudos_amostra/<arquivo>.pdf"; exit 1
+endif
+	$(PY) scripts/extrair_laudo.py $(PDF)
+
+db-reset:
+	rm -f carros_sa.db
+	$(PY) -c "from carros_sa.db import init_db; init_db()"
+	@echo "carros_sa.db recriado"
+
+worktree-new:
+ifndef WS
+	@echo "Erro: defina WS=<nome-workstream>"; exit 1
+endif
+	git worktree add ../carros-sa-$(WS) -b feat/$(WS)
+	@echo ""
+	@echo "✓ Worktree criado em ../carros-sa-$(WS)"
+	@echo "  Próximo passo: cd ../carros-sa-$(WS) && claude"
+
+worktree-remove:
+ifndef WS
+	@echo "Erro: defina WS=<nome-workstream>"; exit 1
+endif
+	git worktree remove ../carros-sa-$(WS)
+	git branch -d feat/$(WS) || true
+	@echo "✓ Worktree e branch feat/$(WS) removidos"

@@ -38,11 +38,12 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Cobertura:** 4 testes em [`tests/test_avaliador_mercado.py`](tests/test_avaliador_mercado.py) com fixture FIPE real ([`tests/fixtures/fipe_fiesta_2013.json`](tests/fixtures/fipe_fiesta_2013.json)) — Fiesta 2013 FIPE R$ 30.876 + similares reais do lote 21854782, cache persistente em `modelo_fipe_cache` e fallback FIPE-only.
 - **Pendente:** trocar fonte de mediana/p25 por Webmotors quando workstream B chegar (contrato `SinalMercado` já preparado).
 
-### B — Webmotors Scraper 📋 pendente
-- **Branch:** `feat/webmotors-scraper`
-- **Escopo:** `carros_sa/tools/webmotors.py` com Playwright + stealth. Função `estatisticas(marca, modelo, ano) -> (p25, mediana, n_anuncios)` persistindo em `anuncio_webmotors`.
-- **Riscos:** anti-bot agressivo. Antes de atacar, ler CLAUDE.md section "Red flags". Começar com 1 busca manual, cache 24h.
-- **Critério de aceite:** integração marcada `@pytest.mark.slow` roda e popula ≥5 anúncios; unitário cobre parser dos resultados offline.
+### B — Webmotors Scraper ✅
+- **Branch:** `feat/avaliador-mercado` (worktree `amazing-saha`)
+- **Arquivo:** [`carros_sa/tools/webmotors.py`](carros_sa/tools/webmotors.py)
+- **Fixture real:** [`data/scrapes/2026-04-14_webmotors_fiesta.json`](data/scrapes/2026-04-14_webmotors_fiesta.json) — 26 cards coletados via Chrome MCP.
+- **Cobertura:** 18 testes em [`tests/test_webmotors.py`](tests/test_webmotors.py) — gold com dado real (Fiesta 2013: n=11, mediana=35900, p25=33745), parse de badges/variações, `estatisticas()` com `fetch=` injetável.
+- **Coleta ao vivo:** `_fetch_playwright()` é esqueleto que levanta `NotImplementedError` — ligar no workstream G com rate-limit + stealth.
 
 ### C — EstimadorReforma ✅ concluído
 - **Branch:** `claude/charming-newton`
@@ -103,6 +104,7 @@ Já registrado:
 - ✅ **M1** — Scraper listagem + 10 LoteRaw no SQLite
 - ✅ **M2** — ExtratorLaudo validado em lote real (Gemini Flash, custo zero)
 - ✅ **M3** — AvaliadorMercado (FIPE) — _workstream A_
+- ✅ **M3-B** — Webmotors parser + estatísticas (coleta ao vivo pendente, workstream G) — _workstream B_
 - ✅ **M4** — EstimadorReforma + tabela base — _workstream C_
 - ✅ **M5** — ScraperDetalheLote end-to-end (módulo + script + cache de 10 lotes) — _workstream D_
 - 🔒 **M6** — Orquestrador paralelo + top-10 ranking — _workstream E_

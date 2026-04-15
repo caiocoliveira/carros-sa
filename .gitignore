@@ -21,6 +21,7 @@ data/scrapes/*.json
 data/laudos_amostra/*.pdf
 # Exceções: dataset de referência — usado como fixture pelos testes/workstreams
 !data/scrapes/2026-04-14_uberlandia_listagem.json
+!data/scrapes/2026-04-14_webmotors_fiesta.json
 !data/laudos_amostra/21854782_fiesta.pdf
 
 # OS / editor

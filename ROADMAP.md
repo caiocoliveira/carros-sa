@@ -50,11 +50,12 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Implementação:** determinístico, sem LLM. Avarias são casadas a famílias de peça (longarina, coluna, porta, paralama, capô/tampa, teto, painel) por prefixo do nome; custo = célula `(família × severidade)` da tabela YAML. Adicional fixo de chassi quando severidade_geral é ESTRUTURAL; adicional motor isolado quando motor_ok=False sem ser ESTRUTURAL (sem dupla contagem). Range = ±incerteza_pct.
 - **Gold test Fiesta 21854782:** 2 colunas GRAVE + adicional estrutural → R$10.000 em MG (range R$7.500–12.500), R$12.800 em SP (mão de obra metropolitana). Ambos > R$5k confirmando "custo elevado".
 
-### D — ScraperDetalheLote 📋 pendente
-- **Branch:** `feat/scraper-detalhe`
-- **Escopo:** módulo + script que, dada URL de um lote, usa Chrome MCP (ou Playwright) pra: (1) extrair `innerText` do body, (2) passar pelo `parse_detalhe` existente, (3) baixar PDF do laudo, (4) persistir `laudo` + enriquecer `lote.raw_json`.
-- **Early-exit obrigatório:** respeitar `DetalheFlags.early_exit` — se retornar valor, pular PDF e LLM.
-- **Critério de aceite:** rodar nos 10 lotes já em SQLite e imprimir tabela de quantos passaram vs. quantos foram descartados (esperado: ≥1 reprovado estrutural na amostra real).
+### D — ScraperDetalheLote ✅ entregue
+- **Branch:** `claude/kind-goodall` (worktree `kind-goodall`)
+- **Arquivos:** [`carros_sa/scraping/scraper_detalhe.py`](carros_sa/scraping/scraper_detalhe.py), [`scripts/processar_detalhes.py`](scripts/processar_detalhes.py), cache em [`data/detalhes/<lote_id>.json`](data/detalhes/)
+- **Como funciona:** `processar_detalhe(lote_id, body_text, laudo_pdf_url, session, pdf_dir, downloader=...)` aplica `parse_detalhe`, persiste flags em `lote.raw_json["detalhe"]`, baixa o PDF SOMENTE se `DetalheFlags.early_exit is None`. Fetch fica fora do módulo (Auto Avaliar é JS-pesado → coletado via Chrome MCP, salvo em `data/detalhes/`).
+- **Cobertura:** 4 testes em [`tests/test_scraper_detalhe.py`](tests/test_scraper_detalhe.py): (a) Fiesta real → `reprovado_estrutural`, downloader nunca chamado; (b) caso feliz → baixa PDF; (c) sem URL → no-op; (d) lote inexistente → ValueError.
+- **Critério de aceite atingido:** `make ingest && PYTHONPATH=. .venv/bin/python scripts/processar_detalhes.py` nos 10 lotes de Uberlândia → **9 passaram** + **1 descartado** (Fiesta `reprovado_estrutural`) + **7 PDFs baixados** (Gol e Cruze tinham `pdf=null` no DOM — link em modal lazy). innerText dos 9 coletado via Chrome MCP no padrão `PING + read{clear:true} + emit + read` (driblando `console.clear()` anti-debug do AutoAvaliar).
 
 ---
 
@@ -103,7 +104,7 @@ Já registrado:
 - ✅ **M2** — ExtratorLaudo validado em lote real (Gemini Flash, custo zero)
 - ✅ **M3** — AvaliadorMercado (FIPE) — _workstream A_
 - ✅ **M4** — EstimadorReforma + tabela base — _workstream C_
-- 🔄 **M5** — ScraperDetalheLote end-to-end — _workstream D_
+- ✅ **M5** — ScraperDetalheLote end-to-end (módulo + script + cache de 10 lotes) — _workstream D_
 - 🔒 **M6** — Orquestrador paralelo + top-10 ranking — _workstream E_
 - 🔒 **M7** — Frete first-class integrado (já temos tabela YAML; falta wire-up)
 - 🔒 **M8** — Multi-tenancy rodando (schema pronto; falta rodar na prática)

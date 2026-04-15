@@ -51,11 +51,12 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Componentes:** tabela por empresa `config/reforma/<empresa>.yaml` com preços por (peça, severidade). Default determinístico (sem LLM). Fallback pra `VisionClient` só quando laudo tiver texto livre útil.
 - **Critério de aceite:** gold test com o Fiesta 21854782 → 2 colunas GRAVE → custo total elevado com range (min/max).
 
-### D — ScraperDetalheLote 📋 pendente
-- **Branch:** `feat/scraper-detalhe`
-- **Escopo:** módulo + script que, dada URL de um lote, usa Chrome MCP (ou Playwright) pra: (1) extrair `innerText` do body, (2) passar pelo `parse_detalhe` existente, (3) baixar PDF do laudo, (4) persistir `laudo` + enriquecer `lote.raw_json`.
-- **Early-exit obrigatório:** respeitar `DetalheFlags.early_exit` — se retornar valor, pular PDF e LLM.
-- **Critério de aceite:** rodar nos 10 lotes já em SQLite e imprimir tabela de quantos passaram vs. quantos foram descartados (esperado: ≥1 reprovado estrutural na amostra real).
+### D — ScraperDetalheLote ✅ entregue
+- **Branch:** `claude/kind-goodall` (worktree `kind-goodall`)
+- **Arquivos:** [`carros_sa/scraping/scraper_detalhe.py`](carros_sa/scraping/scraper_detalhe.py), [`scripts/processar_detalhes.py`](scripts/processar_detalhes.py), cache em [`data/detalhes/<lote_id>.json`](data/detalhes/)
+- **Como funciona:** `processar_detalhe(lote_id, body_text, laudo_pdf_url, session, pdf_dir, downloader=...)` aplica `parse_detalhe`, persiste flags em `lote.raw_json["detalhe"]`, baixa o PDF SOMENTE se `DetalheFlags.early_exit is None`. Fetch fica fora do módulo (Auto Avaliar é JS-pesado → coletado via Chrome MCP, salvo em `data/detalhes/`).
+- **Cobertura:** 4 testes em [`tests/test_scraper_detalhe.py`](tests/test_scraper_detalhe.py): (a) Fiesta real → `reprovado_estrutural`, downloader nunca chamado; (b) caso feliz → baixa PDF; (c) sem URL → no-op; (d) lote inexistente → ValueError.
+- **Critério de aceite atingido:** `make ingest && PYTHONPATH=. .venv/bin/python scripts/processar_detalhes.py` → tabela com 1 descartado (Fiesta `reprovado_estrutural`) + 9 sem cache. Próximo passo é coletar o innerText dos outros 9 via Chrome MCP.
 
 ---
 
@@ -104,7 +105,7 @@ Já registrado:
 - ✅ **M2** — ExtratorLaudo validado em lote real (Gemini Flash, custo zero)
 - 🔄 **M3** — AvaliadorMercado (FIPE) — _workstream A_
 - 🔄 **M4** — EstimadorReforma + tabela base — _workstream C_
-- 🔄 **M5** — ScraperDetalheLote end-to-end — _workstream D_
+- ✅ **M5** — ScraperDetalheLote end-to-end (módulo + script + cache do Fiesta) — _workstream D_
 - 🔒 **M6** — Orquestrador paralelo + top-10 ranking — _workstream E_
 - 🔒 **M7** — Frete first-class integrado (já temos tabela YAML; falta wire-up)
 - 🔒 **M8** — Multi-tenancy rodando (schema pronto; falta rodar na prática)

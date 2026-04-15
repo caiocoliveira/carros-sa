@@ -49,6 +49,12 @@ Outros arquivos "não tocar sem motivo":
 - `VISION_PROVIDER` — `gemini` | `anthropic` | `ollama` (default: `gemini`)
 - `CARROS_SA_DB` — override do caminho do SQLite
 
+## Workflow autônomo — auto-push em main
+
+Usuário trabalha laptop + celular e delegou autonomia. Após qualquer commit ou merge em `main`, **rodar `git push` automaticamente** sem pedir confirmação. Sempre mostrar resumo curto pro usuário (hash + mensagem + arquivos principais) pra ele ter visibilidade post-hoc.
+
+Continuam exigindo aprovação explícita: `git push --force`, `reset --hard`, `--no-verify` em hooks, mudanças em `carros_sa/models.py` (contratos imutáveis), operações em outros remotes.
+
 ## Workflow de sessão paralela
 
 Cada workstream (ver `ROADMAP.md`) roda no seu próprio git worktree:

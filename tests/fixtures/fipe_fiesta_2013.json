@@ -1,0 +1,34 @@
+{
+  "/carros/marcas": [
+    {"codigo": "21", "nome": "Ford"},
+    {"codigo": "59", "nome": "VW - VolksWagen"},
+    {"codigo": "23", "nome": "GM - Chevrolet"}
+  ],
+  "/carros/marcas/21/modelos": {
+    "modelos": [
+      {"codigo": 4828, "nome": "Fiesta 1.6 SE Hatch 16V Flex 4p Mec."},
+      {"codigo": 4829, "nome": "Fiesta 1.5 SE Hatch 16V Flex 4p Mec."},
+      {"codigo": 4830, "nome": "Fiesta 1.6 Sedan SE Hatch 16V Flex 4p Mec."},
+      {"codigo": 4831, "nome": "Ka 1.0 Hatch SE Plus 12V Flex 4p"},
+      {"codigo": 4900, "nome": "EcoSport XLT 1.6 Flex 8V 5p"}
+    ],
+    "anos": []
+  },
+  "/carros/marcas/21/modelos/4828/anos": [
+    {"codigo": "2014-1", "nome": "2014 Gasolina"},
+    {"codigo": "2013-1", "nome": "2013 Gasolina"},
+    {"codigo": "2013-3", "nome": "2013 Flex"},
+    {"codigo": "2012-3", "nome": "2012 Flex"}
+  ],
+  "/carros/marcas/21/modelos/4828/anos/2013-1": {
+    "Valor": "R$ 30.876,00",
+    "Marca": "Ford",
+    "Modelo": "Fiesta 1.6 SE Hatch 16V Flex 4p Mec.",
+    "AnoModelo": 2013,
+    "Combustivel": "Gasolina",
+    "CodigoFipe": "003343-7",
+    "MesReferencia": "abril de 2026",
+    "TipoVeiculo": 1,
+    "SiglaCombustivel": "G"
+  }
+}

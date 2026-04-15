@@ -32,12 +32,11 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestrador (E).
 
-### A — AvaliadorMercado 📋 pendente
+### A — AvaliadorMercado ✅
 - **Branch:** `feat/avaliador-mercado`
-- **Escopo:** `carros_sa/agents/avaliador_mercado.py` — `avaliar(marca, modelo, ano, km) -> SinalMercado`
-- **Componentes:** cliente FIPE (`fipe.parallelum.com.br`) em `carros_sa/tools/fipe.py` + uso dos similares da própria plataforma Auto Avaliar (parser `parse_detalhe` já expõe em `similares_precos`)
-- **Não escopo:** Webmotors (workstream B).
-- **Critério de aceite:** gold test comparando FIPE de Fiesta 2013 vs. preços de similares que a plataforma mostrou (45k, 23.2k, 27k, etc). Cache em tabela `modelo_fipe_cache`.
+- **Arquivos:** [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py), [`carros_sa/tools/fipe.py`](carros_sa/tools/fipe.py)
+- **Cobertura:** 4 testes em [`tests/test_avaliador_mercado.py`](tests/test_avaliador_mercado.py) com fixture FIPE real ([`tests/fixtures/fipe_fiesta_2013.json`](tests/fixtures/fipe_fiesta_2013.json)) — Fiesta 2013 FIPE R$ 30.876 + similares reais do lote 21854782, cache persistente em `modelo_fipe_cache` e fallback FIPE-only.
+- **Pendente:** trocar fonte de mediana/p25 por Webmotors quando workstream B chegar (contrato `SinalMercado` já preparado).
 
 ### B — Webmotors Scraper 📋 pendente
 - **Branch:** `feat/webmotors-scraper`
@@ -102,7 +101,7 @@ Já registrado:
 
 - ✅ **M1** — Scraper listagem + 10 LoteRaw no SQLite
 - ✅ **M2** — ExtratorLaudo validado em lote real (Gemini Flash, custo zero)
-- 🔄 **M3** — AvaliadorMercado (FIPE) — _workstream A_
+- ✅ **M3** — AvaliadorMercado (FIPE) — _workstream A_
 - 🔄 **M4** — EstimadorReforma + tabela base — _workstream C_
 - 🔄 **M5** — ScraperDetalheLote end-to-end — _workstream D_
 - 🔒 **M6** — Orquestrador paralelo + top-10 ranking — _workstream E_

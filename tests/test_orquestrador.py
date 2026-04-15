@@ -176,7 +176,9 @@ class TestPipelineLote:
             import asyncio
             loop = asyncio.new_event_loop()
             try:
-                res = _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"), loop)
+                res = loop.run_until_complete(
+                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+                )
             finally:
                 loop.close()
 
@@ -215,7 +217,9 @@ class TestPipelineLote:
         loop = asyncio.new_event_loop()
         try:
             with patch("carros_sa.orquestrador.coletar_detalhe", new_callable=AsyncMock) as mock_det:
-                res = _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"), loop)
+                res = loop.run_until_complete(
+                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+                )
                 # coletar_detalhe NÃO deve ter sido chamado
                 mock_det.assert_not_called()
         finally:

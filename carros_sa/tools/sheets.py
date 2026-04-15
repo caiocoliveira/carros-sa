@@ -27,6 +27,7 @@ HEADER = [
     "Rank",
     "Lote ID",
     "Modelo",
+    "Fim do Leilão",
     "KM",
     "Lance Atual (R$)",
     "Preço-Alvo (R$)",
@@ -90,9 +91,17 @@ class SheetsExporter:
                 continue
             laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)
 
+            fim_em_str = "—"
+            if lote.fim_em is not None:
+                try:
+                    fim_em_str = lote.fim_em.strftime("%d/%m/%Y %H:%M")
+                except Exception:
+                    fim_em_str = str(lote.fim_em)
+
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo} {lote.ano}",
+                "fim_em": fim_em_str,
                 "km": lote.km,
                 "lance_atual": lote.lance_atual,
                 "preco_alvo": av.preco_alvo,
@@ -128,6 +137,7 @@ class SheetsExporter:
                 rank,
                 r["lote_id"],
                 r["modelo"],
+                r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
                 r["preco_alvo"],

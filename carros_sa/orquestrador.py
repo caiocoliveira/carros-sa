@@ -102,18 +102,70 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
 
 
 # ---------------------------------------------------------------------------
-# Laudo fallback (quando não há PDF)
+# Laudo fallback (quando não há PDF ou visão falha)
 # ---------------------------------------------------------------------------
 
-def _laudo_sem_pdf() -> LaudoEstruturado:
-    """Laudo padrão conservador quando não há PDF disponível."""
+def _laudo_de_textual(txt, flags=None) -> LaudoEstruturado:
+    """Constrói LaudoEstruturado a partir da camada textual do PDF (sem diagrama visual).
+
+    Usado quando o PDF existe mas tem <2 páginas ou a visão falha.
+    confidence=0.6 — melhor que sem PDF (0.5), pior que extração completa.
+    """
+    # Documentação: prioriza dados textuais do PDF
+    if txt.roubo_furto_ativo or txt.comunicado_venda:
+        documentacao = StatusDocumentacao.PENDENCIA_GRAVE
+    elif txt.licenciado is False:
+        documentacao = StatusDocumentacao.PENDENCIA_LEVE
+    elif txt.licenciado is True:
+        documentacao = StatusDocumentacao.OK
+    else:
+        # Fallback: usa flags da página de detalhe
+        documentacao = StatusDocumentacao.OK
+        if flags is not None:
+            sd = (flags.status_documento or "").lower()
+            if "pendente" in sd or "irregular" in sd or "débito" in sd:
+                documentacao = StatusDocumentacao.PENDENCIA_LEVE
+            elif "grave" in sd or "judicial" in sd or "bloqueio" in sd:
+                documentacao = StatusDocumentacao.PENDENCIA_GRAVE
+
+    # Motor: usa dado textual se disponível, senão assume OK
+    motor_ok = txt.motor_original if txt.motor_original is not None else True
+
+    # Sem diagrama estrutural não sabemos as avarias visuais — severity=NENHUMA
+    # mas confidence reflete incerteza
+    return LaudoEstruturado(
+        avarias=[],
+        severidade_geral=SeveridadeAvaria.NENHUMA,
+        motor_ok=motor_ok,
+        documentacao=documentacao,
+        categoria_veiculo=CategoriaVeiculo.OUTRO,
+        confidence=0.6,
+    )
+
+
+def _laudo_sem_pdf(flags=None) -> LaudoEstruturado:
+    """Laudo neutro quando não há PDF disponível.
+
+    Usa informações da página de detalhe se disponíveis (flags).
+    confidence=0.5 = neutro (não pune ausência de PDF como pior caso).
+    """
+    from carros_sa.scraping.parsers import DetalheFlags
+
+    documentacao = StatusDocumentacao.OK
+    if flags is not None:
+        sd = (flags.status_documento or "").lower()
+        if "pendente" in sd or "irregular" in sd or "débito" in sd:
+            documentacao = StatusDocumentacao.PENDENCIA_LEVE
+        elif "grave" in sd or "judicial" in sd or "bloqueio" in sd:
+            documentacao = StatusDocumentacao.PENDENCIA_GRAVE
+
     return LaudoEstruturado(
         avarias=[],
         severidade_geral=SeveridadeAvaria.NENHUMA,
         motor_ok=True,
-        documentacao=StatusDocumentacao.DESCONHECIDO,
+        documentacao=documentacao,
         categoria_veiculo=CategoriaVeiculo.OUTRO,
-        confidence=0.0,
+        confidence=0.5,  # neutro — não sabemos, mas não assumimos pior caso
     )
 
 
@@ -275,12 +327,19 @@ async def _pipeline_lote(
             cookies = await page.context.cookies()
             await baixar_pdf(pdf_url, pdf_dest, cookies)
             try:
+                # Tentativa 1: extração completa (textual + visão)
                 laudo = extrair_laudo(pdf_dest, vision_client)
-            except Exception as pdf_exc:
-                # PDF inválido, incompleto ou sem diagrama estrutural — continua sem laudo visual
-                laudo = _laudo_sem_pdf()
+            except Exception:
+                # Tentativa 2: só camada textual (quando PDF tem <2 páginas ou visão falha)
+                try:
+                    from carros_sa.agents.extrator_laudo import parse_laudo_textual
+                    txt = parse_laudo_textual(pdf_dest)
+                    laudo = _laudo_de_textual(txt, flags)
+                except Exception:
+                    # Último recurso: sem PDF
+                    laudo = _laudo_sem_pdf(flags)
         else:
-            laudo = _laudo_sem_pdf()
+            laudo = _laudo_sem_pdf(flags)
 
         # 4. Persist laudo cache
         _upsert_laudo_cache(lote.id, laudo, session)

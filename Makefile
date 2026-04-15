@@ -1,7 +1,7 @@
 # Carros SA — atalhos pra comandos comuns
 # Uso: `make <target>` (ex: `make test`)
 
-.PHONY: help test test-fast ingest extrair-laudo db-reset sheets worktree-new worktree-remove
+.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug setup-cron worktree-new worktree-remove
 
 PY := PYTHONPATH=. .venv/bin/python
 
@@ -13,6 +13,9 @@ help:
 	@echo "  make extrair-laudo PDF=...         # roda ExtratorLaudo num PDF local"
 	@echo "  make db-reset                      # apaga carros_sa.db e recria schema"
 	@echo "  make sheets EMPRESA=<id>           # exporta triagem pro Google Sheets"
+	@echo "  make triagem [EMPRESA=<id>]        # pipeline completo: scraping→avaliação→sheets"
+	@echo "  make triagem-debug [EMPRESA=<id>]  # idem com browser visível"
+	@echo "  make setup-cron                    # ativa cron diário às 7h"
 	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
 	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
 
@@ -30,6 +33,15 @@ ifndef PDF
 	@echo "Erro: defina PDF=data/laudos_amostra/<arquivo>.pdf"; exit 1
 endif
 	$(PY) scripts/extrair_laudo.py $(PDF)
+
+triagem:
+	$(PY) scripts/triagem_diaria.py --empresa $(or $(EMPRESA),carros_uberlandia)
+
+triagem-debug:
+	$(PY) scripts/triagem_diaria.py --empresa $(or $(EMPRESA),carros_uberlandia) --no-headless
+
+setup-cron:
+	bash scripts/setup_cron.sh
 
 sheets:
 ifndef EMPRESA

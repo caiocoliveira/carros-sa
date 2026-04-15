@@ -86,13 +86,32 @@ class FipeClient:
     def _resolve_marca(self, marca_query: str) -> Tuple[str, str]:
         marcas: List[dict] = self._get("/carros/marcas")  # type: ignore[assignment]
         alvo = _normalizar(marca_query)
+        alvo_tokens = set(alvo.split())
+
+        # 1. Match exato
         for m in marcas:
             if _normalizar(m["nome"]) == alvo:
                 return m["codigo"], m["nome"]
-        # fallback: prefixo
+
+        # 2. Prefixo (ex: "ford" bate "ford")
         for m in marcas:
-            if _normalizar(m["nome"]).startswith(alvo) or alvo.startswith(_normalizar(m["nome"])):
+            nome_n = _normalizar(m["nome"])
+            if nome_n.startswith(alvo) or alvo.startswith(nome_n):
                 return m["codigo"], m["nome"]
+
+        # 3. Token overlap — resolve "Volkswagen" → "VW - VolksWagen",
+        #    "Chevrolet" → "GM - Chevrolet", "Chery" → "CAOA Chery", etc.
+        melhor_score = 0
+        melhor = None
+        for m in marcas:
+            nome_tokens = set(_normalizar(m["nome"]).split())
+            score = len(alvo_tokens & nome_tokens)
+            if score > melhor_score:
+                melhor_score = score
+                melhor = m
+        if melhor_score > 0 and melhor:
+            return melhor["codigo"], melhor["nome"]
+
         raise LookupError(f"marca não encontrada na FIPE: {marca_query!r}")
 
     def _resolve_modelo(self, cod_marca: str, modelo_query: str) -> Tuple[str, str]:

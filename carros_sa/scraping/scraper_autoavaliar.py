@@ -126,15 +126,27 @@ async def login(page, email: str, password: str) -> None:
     await page.goto(LOGIN_URL, wait_until="networkidle")
     await page.wait_for_timeout(1000)
 
-    # Tenta selectors comuns de formulário de login
-    for email_sel in ["input[type='email']", "input[name='email']", "#email", "input[placeholder*='e-mail' i]"]:
+    # Tenta selectors — Auto Avaliar usa name/id como hash, então priorizamos placeholder
+    for email_sel in [
+        "input[placeholder*='E-mail' i]",
+        "input[placeholder*='email' i]",
+        "input[type='email']",
+        "input[name='email']",
+        "#email",
+    ]:
         try:
             await page.fill(email_sel, email, timeout=3000)
             break
         except Exception:
             continue
 
-    for pwd_sel in ["input[type='password']", "input[name='password']", "#password", "input[placeholder*='senha' i]"]:
+    for pwd_sel in [
+        "input[placeholder*='Senha' i]",
+        "input[placeholder*='senha' i]",
+        "input[type='password']",
+        "input[name='password']",
+        "#password",
+    ]:
         try:
             await page.fill(pwd_sel, password, timeout=3000)
             break
@@ -152,10 +164,10 @@ async def login(page, email: str, password: str) -> None:
     # Aguarda navegação pós-login
     await page.wait_for_timeout(3000)
 
-    # Verifica se ainda está na página de login (falha)
-    if "/login" in page.url or "/entrar" in page.url:
+    # Verifica se saiu da página de login
+    if "/login" in page.url or "/entrar" in page.url or "dados-invalidos" in page.url:
         raise RuntimeError(
-            f"Login falhou — ainda em {page.url}. "
+            f"Login falhou — URL pós-submit: {page.url}. "
             "Verifique AUTOAVALIAR_EMAIL e AUTOAVALIAR_PASSWORD no .env"
         )
 
@@ -165,11 +177,17 @@ async def login(page, email: str, password: str) -> None:
 
 
 async def sessao_valida(page) -> bool:
-    """Verifica se a sessão atual é válida (sem redirect para login)."""
+    """Verifica se a sessão atual é válida (sem redirect para login ou logout)."""
     try:
         await page.goto(LISTAGEM_URL, wait_until="domcontentloaded", timeout=10000)
         await page.wait_for_timeout(1000)
-        return "/login" not in page.url and "/entrar" not in page.url
+        url = page.url
+        return (
+            "/login" not in url
+            and "/entrar" not in url
+            and "logout" not in url
+            and "dados-invalidos" not in url
+        )
     except Exception:
         return False
 

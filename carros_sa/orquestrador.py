@@ -18,6 +18,7 @@ mas nesse MVP roda sequencial para simplicidade.
 from __future__ import annotations
 
 import asyncio
+import random
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,7 +48,6 @@ from carros_sa.scraping.scraper_autoavaliar import (
     baixar_pdf,
     coletar_detalhe,
     coletar_listagem,
-    _sleep_aleatorio,
 )
 from carros_sa.tenancy import EmpresaConfig, carregar_empresa
 
@@ -231,17 +231,16 @@ class OrquestradorResult:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline por lote (síncrono — chamado dentro do loop async)
+# Pipeline por lote (async — roda dentro do event loop do orquestrador)
 # ---------------------------------------------------------------------------
 
-def _pipeline_lote(
+async def _pipeline_lote(
     lote: Lote,
-    page_sync,          # referência à page (usada de forma sync via asyncio)
+    page,
     vision_client,
     empresa: EmpresaConfig,
     session: Session,
     tmp_dir: Path,
-    loop: asyncio.AbstractEventLoop,
 ) -> ResultadoLote:
     """Roda pipeline completo para um lote. Retorna ResultadoLote."""
 
@@ -259,9 +258,9 @@ def _pipeline_lote(
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))
 
     try:
-        # 1. Detalhe
-        _sleep_aleatorio(2.0, 4.0)
-        body_text, pdf_url = loop.run_until_complete(coletar_detalhe(page_sync, lote.url))
+        # 1. Detalhe (sleep anti-bot antes de cada request)
+        await asyncio.sleep(random.uniform(2.0, 4.0))
+        body_text, pdf_url = await coletar_detalhe(page, lote.url)
         flags = parse_detalhe(body_text, pdf_url)
 
         # 2. Early exit
@@ -273,9 +272,13 @@ def _pipeline_lote(
         laudo: LaudoEstruturado
         if pdf_url:
             pdf_dest = tmp_dir / f"{lote.id}.pdf"
-            cookies = loop.run_until_complete(page_sync.context.cookies())
-            loop.run_until_complete(baixar_pdf(pdf_url, pdf_dest, cookies))
-            laudo = extrair_laudo(pdf_dest, vision_client)
+            cookies = await page.context.cookies()
+            await baixar_pdf(pdf_url, pdf_dest, cookies)
+            try:
+                laudo = extrair_laudo(pdf_dest, vision_client)
+            except Exception as pdf_exc:
+                # PDF inválido, incompleto ou sem diagrama estrutural — continua sem laudo visual
+                laudo = _laudo_sem_pdf()
         else:
             laudo = _laudo_sem_pdf()
 
@@ -378,16 +381,22 @@ async def orquestrar(
     session.commit()
     result.n_novos = len(lotes_ids_novos)
 
-    # 3. Pipeline: só lotes novos (sem avaliação existente)
+    # 3. Pipeline: lotes coletados que ainda não têm AvaliacaoLote nesta empresa
+    ids_coletados = [c["loteId"] for c in cards]
+    ids_ja_avaliados = {
+        r.lote_id for r in session.exec(
+            select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
+        ).all()
+    }
+    ids_a_avaliar = [i for i in ids_coletados if i not in ids_ja_avaliados]
     lotes_a_avaliar = session.exec(
-        select(Lote).where(Lote.id.in_(lotes_ids_novos))  # type: ignore[arg-type]
+        select(Lote).where(Lote.id.in_(ids_a_avaliar))  # type: ignore[arg-type]
     ).all()
 
-    loop = asyncio.get_event_loop()
     tmp_dir = Path(tempfile.mkdtemp(prefix="carros_sa_"))
 
     for lote in lotes_a_avaliar:
-        res = _pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir, loop)
+        res = await _pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir)
         result.lotes.append(res)
         if res.erro:
             result.n_erros += 1

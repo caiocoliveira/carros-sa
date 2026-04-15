@@ -1,7 +1,7 @@
 # Carros SA — atalhos pra comandos comuns
 # Uso: `make <target>` (ex: `make test`)
 
-.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug setup-cron worktree-new worktree-remove
+.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove
 
 PY := PYTHONPATH=. .venv/bin/python
 
@@ -15,6 +15,8 @@ help:
 	@echo "  make sheets EMPRESA=<id>           # exporta triagem pro Google Sheets"
 	@echo "  make triagem [EMPRESA=<id>]        # pipeline completo: scraping→avaliação→sheets"
 	@echo "  make triagem-debug [EMPRESA=<id>]  # idem com browser visível"
+	@echo "  make top [EMPRESA=<id>] [N=10]     # ranking offline das melhores avaliações"
+	@echo "  make empresas                      # lista empresas configuradas"
 	@echo "  make setup-cron                    # ativa cron diário às 7h"
 	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
 	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
@@ -35,19 +37,25 @@ endif
 	$(PY) scripts/extrair_laudo.py $(PDF)
 
 triagem:
-	$(PY) scripts/triagem_diaria.py --empresa $(or $(EMPRESA),carros_uberlandia)
+	$(PY) -m carros_sa.cli triagem --empresa $(or $(EMPRESA),carros_uberlandia)
 
 triagem-debug:
-	$(PY) scripts/triagem_diaria.py --empresa $(or $(EMPRESA),carros_uberlandia) --no-headless
+	$(PY) -m carros_sa.cli triagem --empresa $(or $(EMPRESA),carros_uberlandia) --no-headless
+
+top:
+	$(PY) -m carros_sa.cli top --empresa $(or $(EMPRESA),carros_uberlandia) --n $(or $(N),10)
+
+empresas:
+	$(PY) -m carros_sa.cli empresas
 
 setup-cron:
 	bash scripts/setup_cron.sh
 
 sheets:
 ifndef EMPRESA
-	@echo "Erro: defina EMPRESA=<id> (ex: make sheets EMPRESA=uberlandia_mg)"; exit 1
+	@echo "Erro: defina EMPRESA=<id> (ex: make sheets EMPRESA=carros_uberlandia)"; exit 1
 endif
-	$(PY) scripts/exportar_sheets.py --empresa $(EMPRESA)
+	$(PY) -m carros_sa.cli sheets --empresa $(EMPRESA)
 
 db-reset:
 	rm -f carros_sa.db

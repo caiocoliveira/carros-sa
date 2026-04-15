@@ -1,0 +1,392 @@
+"""CLI unificada do Carros SA.
+
+Instalado como entry point `carros-sa` via pyproject.toml.
+
+Subcomandos:
+    triagem        — pipeline completo (scraping → avaliação → Sheets)
+    top            — ranking das melhores avaliações do DB (offline)
+    ingest         — ingere JSON de listagem no SQLite
+    extrair-laudo  — ExtratorLaudo standalone num PDF
+    sheets         — exporta avaliações pro Google Sheets
+    empresas       — lista empresas configuradas em config/empresas/
+
+Uso:
+    carros-sa triagem --empresa carros_uberlandia --top 10
+    carros-sa top --empresa carros_uberlandia --n 10
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import typer
+from dotenv import load_dotenv
+from rich.console import Console
+from rich.table import Table
+
+load_dotenv()
+
+app = typer.Typer(
+    add_completion=False,
+    help="Carros SA — triagem automática de lotes em leilão de carro.",
+    no_args_is_help=True,
+)
+console = Console()
+
+
+# ---------------------------------------------------------------------------
+# top — ranking offline a partir do SQLite
+# ---------------------------------------------------------------------------
+
+@app.command()
+def top(
+    empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
+    n: int = typer.Option(10, "--n", "--top", help="Quantos lotes mostrar (top N por ROI)"),
+) -> None:
+    """Lista as top N avaliações da empresa já persistidas no SQLite."""
+    from sqlmodel import select
+
+    from carros_sa.db import get_session, init_db
+    from carros_sa.models import AvaliacaoLote, Lote
+
+    init_db()
+
+    with get_session() as session:
+        stmt = (
+            select(AvaliacaoLote, Lote)
+            .join(Lote, Lote.id == AvaliacaoLote.lote_id)  # type: ignore[arg-type]
+            .where(AvaliacaoLote.empresa_id == empresa)
+            .order_by(AvaliacaoLote.score_roi.desc())  # type: ignore[union-attr]
+            .limit(n)
+        )
+        rows = session.exec(stmt).all()
+
+    if not rows:
+        console.print(
+            f"[yellow]Nenhuma avaliação para empresa '{empresa}'. "
+            "Rode [bold]carros-sa triagem[/bold] primeiro.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    tbl = Table(title=f"Top {len(rows)} lotes — {empresa}")
+    tbl.add_column("Lote")
+    tbl.add_column("Modelo")
+    tbl.add_column("Ano", justify="right")
+    tbl.add_column("Lance", justify="right")
+    tbl.add_column("Preço-Alvo", justify="right")
+    tbl.add_column("ROI%", justify="right")
+    tbl.add_column("Risco", justify="right")
+    for av, lote in rows:
+        tbl.add_row(
+            lote.id,
+            f"{lote.marca} {lote.modelo[:30]}",
+            str(lote.ano),
+            f"R$ {lote.lance_atual:,}",
+            f"R$ {av.preco_alvo:,}",
+            f"{av.score_roi * 100:.1f}%",
+            f"{av.fator_risco:.2f}",
+        )
+    console.print(tbl)
+
+
+# ---------------------------------------------------------------------------
+# empresas — listar configs
+# ---------------------------------------------------------------------------
+
+@app.command()
+def empresas() -> None:
+    """Lista empresas configuradas em config/empresas/*.yaml."""
+    config_dir = Path("config/empresas")
+    if not config_dir.exists():
+        console.print("[red]config/empresas/ não encontrado (rode do root do repo)[/red]")
+        raise typer.Exit(1)
+
+    yamls = sorted(config_dir.glob("*.yaml"))
+    if not yamls:
+        console.print("[yellow]Nenhuma empresa configurada[/yellow]")
+        raise typer.Exit(0)
+
+    from carros_sa.tenancy import carregar_empresa
+
+    tbl = Table(title="Empresas configuradas")
+    tbl.add_column("ID")
+    tbl.add_column("Pátio")
+    tbl.add_column("Margem-alvo", justify="right")
+    tbl.add_column("Config")
+    for y in yamls:
+        empresa_id = y.stem
+        try:
+            emp = carregar_empresa(empresa_id)
+            tbl.add_row(
+                empresa_id,
+                f"{emp.patio.cidade}/{emp.patio.uf}",
+                f"{emp.margem.base:.0%}",
+                str(y.relative_to(Path.cwd())) if y.is_absolute() else str(y),
+            )
+        except Exception as exc:
+            tbl.add_row(empresa_id, "[red]erro[/red]", "-", f"[red]{exc}[/red]")
+    console.print(tbl)
+
+
+# ---------------------------------------------------------------------------
+# ingest — JSON de listagem → SQLite
+# ---------------------------------------------------------------------------
+
+@app.command()
+def ingest(
+    arquivo: Path = typer.Argument(..., help="JSON de listagem (ex: data/scrapes/*.json)"),
+) -> None:
+    """Ingere um JSON de listagem coletada no SQLite (upsert em lote)."""
+    if not arquivo.exists():
+        console.print(f"[red]Arquivo não encontrado: {arquivo}[/red]")
+        raise typer.Exit(1)
+
+    from sqlmodel import select
+
+    from carros_sa.db import get_session, init_db
+    from carros_sa.models import Lote
+    from carros_sa.scraping.parsers import parse_card_lines
+
+    init_db()
+    data = json.loads(arquivo.read_text())
+    lotes_raw = data.get("lotes_amostra", [])
+    parsed = []
+    falhas = 0
+    for entry in lotes_raw:
+        try:
+            parsed.append(parse_card_lines(entry["lines"], entry["loteId"], entry["href"]))
+        except Exception:
+            falhas += 1
+
+    with get_session() as session:
+        for lote in parsed:
+            existente = session.get(Lote, lote.lote_id)
+            row = Lote(
+                id=lote.lote_id,
+                leilao=lote.leilao,
+                url=lote.url,
+                marca=lote.marca,
+                modelo=lote.modelo,
+                ano=lote.ano,
+                km=lote.km,
+                lance_atual=lote.lance_atual,
+                fim_em=lote.fim_em,
+                origem_cidade=lote.origem_cidade,
+                origem_uf=lote.origem_uf,
+                raw_json=lote.model_dump(mode="json"),
+            )
+            if existente:
+                for k, v in row.model_dump(exclude={"id"}).items():
+                    setattr(existente, k, v)
+            else:
+                session.add(row)
+        session.commit()
+        total = len(session.exec(select(Lote)).all())
+
+    console.print(
+        f"[green]✓ {len(parsed)}/{len(lotes_raw)} lotes ingeridos[/green]"
+        + (f" ([red]{falhas} falhas[/red])" if falhas else "")
+    )
+    console.print(f"Total em `lote`: {total}")
+
+
+# ---------------------------------------------------------------------------
+# extrair-laudo — PDF → LaudoEstruturado
+# ---------------------------------------------------------------------------
+
+@app.command("extrair-laudo")
+def extrair_laudo_cmd(
+    pdf: Path = typer.Argument(..., help="Caminho do PDF de laudo"),
+) -> None:
+    """Roda ExtratorLaudo num PDF local e imprime o LaudoEstruturado."""
+    if not pdf.exists():
+        console.print(f"[red]PDF não encontrado: {pdf}[/red]")
+        raise typer.Exit(1)
+
+    from carros_sa.agents.extrator_laudo import extrair_laudo
+    from carros_sa.agents.vision_clients import build_default_client
+
+    client = build_default_client()
+    console.print(f"[cyan]Vision provider:[/cyan] {type(client).__name__}")
+    laudo = extrair_laudo(pdf, client)
+    console.print_json(laudo.model_dump_json(indent=2))
+
+
+# ---------------------------------------------------------------------------
+# sheets — exporta avaliações pro Google Sheets
+# ---------------------------------------------------------------------------
+
+@app.command()
+def sheets(
+    empresa: str = typer.Option(..., help="ID da empresa"),
+    sheet_id: Optional[str] = typer.Option(None, help="Override do GOOGLE_SHEETS_ID"),
+    credentials: Optional[str] = typer.Option(None, help="Override do GOOGLE_SERVICE_ACCOUNT_PATH"),
+) -> None:
+    """Exporta avaliações da empresa para uma aba no Google Sheets."""
+    sheet_id = sheet_id or os.environ.get("GOOGLE_SHEETS_ID")
+    credentials = credentials or os.environ.get("GOOGLE_SERVICE_ACCOUNT_PATH")
+
+    if not sheet_id:
+        console.print("[red]Erro: defina GOOGLE_SHEETS_ID no .env ou passe --sheet-id[/red]")
+        raise typer.Exit(1)
+    if not credentials:
+        console.print("[red]Erro: defina GOOGLE_SERVICE_ACCOUNT_PATH no .env ou passe --credentials[/red]")
+        raise typer.Exit(1)
+    if not Path(credentials).exists():
+        console.print(f"[red]Arquivo de credenciais não encontrado: {credentials}[/red]")
+        raise typer.Exit(1)
+
+    from carros_sa.db import get_session, init_db
+    from carros_sa.tools.sheets import SheetsExporter
+
+    init_db()
+    exporter = SheetsExporter(spreadsheet_id=sheet_id, credentials_path=credentials)
+    with get_session() as session:
+        n = exporter.exportar(empresa_id=empresa, session=session)
+
+    console.print(f"[green]✓ {n} lotes exportados → aba \"{empresa}\"[/green]")
+    console.print(f"  Sheet: {exporter.sheet_url}")
+
+
+# ---------------------------------------------------------------------------
+# triagem — pipeline completo (thin wrapper do scripts/triagem_diaria.py)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def triagem(
+    empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
+    horizonte_dias: int = typer.Option(7, help="Lotes com fim nos próximos N dias"),
+    headless: bool = typer.Option(True, help="False = abre browser visível (debug)"),
+    sem_sheets: bool = typer.Option(False, help="Pular exportação para Sheets"),
+    top_n: int = typer.Option(10, "--top", help="Quantos lotes mostrar no ranking final"),
+) -> None:
+    """Roda pipeline completo: scraping → avaliação → Google Sheets."""
+    import asyncio
+
+    email = os.environ.get("AUTOAVALIAR_EMAIL")
+    password = os.environ.get("AUTOAVALIAR_PASSWORD")
+    if not email or not password:
+        console.print("[red]Erro: AUTOAVALIAR_EMAIL e AUTOAVALIAR_PASSWORD devem estar no .env[/red]")
+        raise typer.Exit(1)
+
+    asyncio.run(_run_triagem(empresa, horizonte_dias, headless, sem_sheets, top_n, email, password))
+
+
+async def _run_triagem(
+    empresa_id: str,
+    horizonte_dias: int,
+    headless: bool,
+    sem_sheets: bool,
+    top_n: int,
+    email: str,
+    password: str,
+) -> None:
+    from playwright.async_api import async_playwright
+
+    from carros_sa.agents.vision_clients import build_default_client
+    from carros_sa.db import get_session, init_db
+    from carros_sa.orquestrador import orquestrar
+    from carros_sa.scraping.scraper_autoavaliar import garantir_autenticado
+
+    init_db()
+    vision_client = build_default_client()
+    console.print(f"[cyan]Vision provider:[/cyan] {type(vision_client).__name__}")
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=headless)
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
+        page = await context.new_page()
+
+        console.print("\n[bold]Autenticando no Auto Avaliar...[/bold]")
+        try:
+            await garantir_autenticado(page, email, password)
+            console.print("[green]✓ Sessão ativa[/green]")
+        except Exception as exc:
+            console.print(f"[red]Erro de autenticação: {exc}[/red]")
+            await browser.close()
+            raise typer.Exit(1)
+
+        console.print(
+            f"\n[bold]Coletando leilões ({empresa_id}, horizonte {horizonte_dias}d)...[/bold]"
+        )
+        with get_session() as session:
+            result = await orquestrar(
+                empresa_id=empresa_id,
+                session=session,
+                page=page,
+                vision_client=vision_client,
+                horizonte_dias=horizonte_dias,
+            )
+
+        await browser.close()
+
+    console.print(
+        f"\n[green]✓ {result.n_coletados} coletados ({result.n_novos} novos) | "
+        f"{result.n_avaliados} avaliados | {result.n_descartados} descartados | "
+        f"{result.n_erros} erros[/green]"
+    )
+
+    if result.lotes:
+        rankeados = sorted(result.lotes, key=lambda x: (x.roi_pct or -1), reverse=True)[:top_n]
+        tbl = Table(title=f"Top {len(rankeados)} da rodada")
+        tbl.add_column("Lote")
+        tbl.add_column("Modelo")
+        tbl.add_column("Status")
+        tbl.add_column("Preço-Alvo", justify="right")
+        tbl.add_column("ROI%", justify="right")
+        for r in rankeados:
+            if r.erro:
+                status = f"[red]ERRO: {r.erro[:40]}[/red]"
+            elif r.motivo_descarte:
+                status = f"[yellow]descartado: {r.motivo_descarte}[/yellow]"
+            elif r.preco_alvo:
+                status = "[green]avaliado[/green]"
+            else:
+                status = "[dim]já avaliado[/dim]"
+            tbl.add_row(
+                r.lote_id,
+                r.modelo[:35],
+                status,
+                f"R$ {r.preco_alvo:,}" if r.preco_alvo else "—",
+                f"{r.roi_pct:.1f}%" if r.roi_pct is not None else "—",
+            )
+        console.print(tbl)
+
+    if sem_sheets:
+        console.print("\n[dim]--sem-sheets: exportação pulada[/dim]")
+        return
+
+    sheet_id = os.environ.get("GOOGLE_SHEETS_ID")
+    creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_PATH")
+    if not sheet_id or not creds_path:
+        console.print(
+            "\n[yellow]GOOGLE_SHEETS_ID / GOOGLE_SERVICE_ACCOUNT_PATH não setados — "
+            "exportação pulada.[/yellow]"
+        )
+        return
+
+    from carros_sa.tools.sheets import SheetsExporter
+
+    console.print("\n[bold]Exportando para Google Sheets...[/bold]")
+    try:
+        exporter = SheetsExporter(spreadsheet_id=sheet_id, credentials_path=creds_path)
+        with get_session() as session:
+            n = exporter.exportar(empresa_id=empresa_id, session=session)
+        console.print(f"[green]✓ {n} lotes exportados → aba \"{empresa_id}\"[/green]")
+        console.print(f"  Sheet: {exporter.sheet_url}")
+    except Exception as exc:
+        console.print(f"[red]Erro ao exportar: {exc}[/red]")
+
+
+if __name__ == "__main__":
+    app()

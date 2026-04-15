@@ -69,8 +69,18 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Cobertura:** 6 testes em [`tests/test_orquestrador.py`](tests/test_orquestrador.py) — frete por UF (mesmo/adjacente/distante), categoria de veículo inferida do modelo, `_laudo_sem_pdf` conservador, idempotência (lote já avaliado não re-processa), upsert de Lote.
 - **Limitações:** processamento pós-PDF ainda sequencial (não usa `Semaphore(8)` como previa o plano original) — scraping é naturalmente sequencial por anti-bot, e o resto foi mantido sync por simplicidade no MVP. Destravar paralelismo só quando houver volume que justifique.
 
-### F — CLI 🔒 bloqueado
-Depende de E. Vai em `carros_sa/cli.py` com Typer. Comando principal: `carros-sa triagem <url_leilao> --empresa=<id> --top 10`.
+### F — CLI ✅
+- **Branch:** `claude/awesome-rosalind`
+- **Arquivo:** [`carros_sa/cli.py`](carros_sa/cli.py) + entry point `carros-sa` em [`pyproject.toml`](pyproject.toml)
+- **Subcomandos:**
+  - `carros-sa triagem --empresa <id> [--horizonte-dias 7] [--no-headless] [--sem-sheets] [--top 10]` — pipeline completo (thin wrapper sobre `orquestrador.orquestrar`)
+  - `carros-sa top --empresa <id> [--n 10]` — ranking offline via SELECT no SQLite (não depende de scraping)
+  - `carros-sa ingest <arquivo.json>` — JSON de listagem → SQLite (upsert)
+  - `carros-sa extrair-laudo <pdf>` — ExtratorLaudo standalone
+  - `carros-sa sheets --empresa <id>` — exporta avaliações pro Google Sheets
+  - `carros-sa empresas` — lista configs em `config/empresas/`
+- **Cobertura:** 11 testes em [`tests/test_cli.py`](tests/test_cli.py) via `typer.testing.CliRunner` — help lista subcomandos, `top` ranqueia por ROI desc + filtra por empresa + respeita `--n`, `empresas` lê YAML sem erro, validação de credenciais de `triagem`/`sheets`, ingest real dos 10 lotes de Uberlândia.
+- **Makefile:** alvos `make triagem`, `make triagem-debug`, `make top`, `make empresas`, `make sheets` agora usam `python -m carros_sa.cli` (scripts/ mantidos como libs, CLI é a interface pública).
 
 ### J — Pipeline Diário Automatizado ✅
 - **Branch:** `claude/laughing-dewdney`
@@ -128,6 +138,7 @@ Já registrado:
 - ✅ **M4** — EstimadorReforma + tabela base — _workstream C_
 - ✅ **M5** — ScraperDetalheLote end-to-end (módulo + script + cache de 10 lotes) — _workstream D_
 - ✅ **M6** — Orquestrador end-to-end + ranking (paralelismo parcial — scraping sequencial por anti-bot) — _workstream E_
+- ✅ **M6-B** — CLI unificada (`carros-sa` com 6 subcomandos + 11 testes) — _workstream F_
 - 🔒 **M7** — Frete first-class integrado (já temos tabela YAML; falta wire-up)
 - 🔒 **M8** — Multi-tenancy rodando (schema pronto; falta rodar na prática)
 - 🕐 **M9** — Re-check semanal Webmotors — _workstream G_

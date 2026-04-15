@@ -62,8 +62,12 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 
 ## Workstreams sequenciais
 
-### E — Orquestrador 🔒 bloqueado
-Depende de **A + (B ou similares) + C + D**. Vai em `carros_sa/orquestrador.py`. Usa `asyncio` com `Semaphore(8)`, parametriza por `empresa_id`.
+### E — Orquestrador ✅
+- **Branch:** entregue dentro do merge do workstream J (`claude/laughing-dewdney`)
+- **Arquivo:** [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py)
+- **Como funciona:** `orquestrar(empresa_id, session, page, vision_client, horizonte_dias=7)` coleta listagem via Playwright, faz upsert de `Lote`, e para cada lote novo roda pipeline completo: `coletar_detalhe` → `parse_detalhe` (early_exit curto-circuita) → `baixar_pdf` → `extrair_laudo` → `avaliar_mercado` (FIPE + similares) → `estimar_reforma` → `_calcular_frete` (heurística UF + tabela da empresa) → `precificar` → upsert `AvaliacaoLote + LaudoCache`. Retorna `OrquestradorResult` com contagens de coletados/novos/avaliados/descartados/erros + `List[ResultadoLote]`.
+- **Cobertura:** 6 testes em [`tests/test_orquestrador.py`](tests/test_orquestrador.py) — frete por UF (mesmo/adjacente/distante), categoria de veículo inferida do modelo, `_laudo_sem_pdf` conservador, idempotência (lote já avaliado não re-processa), upsert de Lote.
+- **Limitações:** processamento pós-PDF ainda sequencial (não usa `Semaphore(8)` como previa o plano original) — scraping é naturalmente sequencial por anti-bot, e o resto foi mantido sync por simplicidade no MVP. Destravar paralelismo só quando houver volume que justifique.
 
 ### F — CLI 🔒 bloqueado
 Depende de E. Vai em `carros_sa/cli.py` com Typer. Comando principal: `carros-sa triagem <url_leilao> --empresa=<id> --top 10`.
@@ -123,7 +127,7 @@ Já registrado:
 - ✅ **M3-B** — Webmotors parser + estatísticas (coleta ao vivo pendente, workstream G) — _workstream B_
 - ✅ **M4** — EstimadorReforma + tabela base — _workstream C_
 - ✅ **M5** — ScraperDetalheLote end-to-end (módulo + script + cache de 10 lotes) — _workstream D_
-- 🔒 **M6** — Orquestrador paralelo + top-10 ranking — _workstream E_
+- ✅ **M6** — Orquestrador end-to-end + ranking (paralelismo parcial — scraping sequencial por anti-bot) — _workstream E_
 - 🔒 **M7** — Frete first-class integrado (já temos tabela YAML; falta wire-up)
 - 🔒 **M8** — Multi-tenancy rodando (schema pronto; falta rodar na prática)
 - 🕐 **M9** — Re-check semanal Webmotors — _workstream G_

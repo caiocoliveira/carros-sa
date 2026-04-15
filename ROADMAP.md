@@ -4,7 +4,7 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação da PoC rodando** — 25/25 testes passando
+✅ **Fundação + EstimadorReforma** — 35/35 testes passando
 
 | Componente | Arquivo | Cobertura |
 |---|---|---|
@@ -45,11 +45,11 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Riscos:** anti-bot agressivo. Antes de atacar, ler CLAUDE.md section "Red flags". Começar com 1 busca manual, cache 24h.
 - **Critério de aceite:** integração marcada `@pytest.mark.slow` roda e popula ≥5 anúncios; unitário cobre parser dos resultados offline.
 
-### C — EstimadorReforma 📋 pendente
-- **Branch:** `feat/estimador-reforma`
-- **Escopo:** `carros_sa/agents/estimador_reforma.py` — `estimar(laudo: LaudoEstruturado, empresa: EmpresaConfig) -> CustoReforma`
-- **Componentes:** tabela por empresa `config/reforma/<empresa>.yaml` com preços por (peça, severidade). Default determinístico (sem LLM). Fallback pra `VisionClient` só quando laudo tiver texto livre útil.
-- **Critério de aceite:** gold test com o Fiesta 21854782 → 2 colunas GRAVE → custo total elevado com range (min/max).
+### C — EstimadorReforma ✅ concluído
+- **Branch:** `claude/charming-newton`
+- **Arquivos:** [`carros_sa/agents/estimador_reforma.py`](carros_sa/agents/estimador_reforma.py) + tabelas em [`config/reforma/`](config/reforma/) (Uberlândia + SP) + [`tests/test_estimador_reforma.py`](tests/test_estimador_reforma.py) (10 testes)
+- **Implementação:** determinístico, sem LLM. Avarias são casadas a famílias de peça (longarina, coluna, porta, paralama, capô/tampa, teto, painel) por prefixo do nome; custo = célula `(família × severidade)` da tabela YAML. Adicional fixo de chassi quando severidade_geral é ESTRUTURAL; adicional motor isolado quando motor_ok=False sem ser ESTRUTURAL (sem dupla contagem). Range = ±incerteza_pct.
+- **Gold test Fiesta 21854782:** 2 colunas GRAVE + adicional estrutural → R$10.000 em MG (range R$7.500–12.500), R$12.800 em SP (mão de obra metropolitana). Ambos > R$5k confirmando "custo elevado".
 
 ### D — ScraperDetalheLote 📋 pendente
 - **Branch:** `feat/scraper-detalhe`
@@ -103,7 +103,7 @@ Já registrado:
 - ✅ **M1** — Scraper listagem + 10 LoteRaw no SQLite
 - ✅ **M2** — ExtratorLaudo validado em lote real (Gemini Flash, custo zero)
 - 🔄 **M3** — AvaliadorMercado (FIPE) — _workstream A_
-- 🔄 **M4** — EstimadorReforma + tabela base — _workstream C_
+- ✅ **M4** — EstimadorReforma + tabela base — _workstream C_
 - 🔄 **M5** — ScraperDetalheLote end-to-end — _workstream D_
 - 🔒 **M6** — Orquestrador paralelo + top-10 ranking — _workstream E_
 - 🔒 **M7** — Frete first-class integrado (já temos tabela YAML; falta wire-up)

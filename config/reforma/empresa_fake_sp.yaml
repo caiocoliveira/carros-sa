@@ -1,0 +1,54 @@
+# Tabela de custos de reforma — Fake Auto SP (mais cara que MG: mão de obra metropolitana).
+empresa_id: empresa_fake_sp
+
+pecas:
+  longarina:
+    leve: 1000
+    media: 2200
+    grave: 6000
+    estrutural: 11000
+  coluna:
+    leve: 900
+    media: 1900
+    grave: 4400
+    estrutural: 8500
+  porta:
+    leve: 500
+    media: 1100
+    grave: 2700
+    estrutural: 4800
+  paralama:
+    leve: 450
+    media: 950
+    grave: 2200
+    estrutural: 4200
+  capo_tampa:
+    leve: 500
+    media: 1100
+    grave: 2700
+    estrutural: 4800
+  tampa:
+    leve: 500
+    media: 1100
+    grave: 2700
+    estrutural: 4800
+  teto:
+    leve: 650
+    media: 1400
+    grave: 3700
+    estrutural: 7200
+  painel:
+    leve: 650
+    media: 1500
+    grave: 4200
+    estrutural: 7800
+
+default:
+  leve: 400
+  media: 900
+  grave: 1900
+  estrutural: 3800
+
+adicional_estrutural: 4000
+adicional_motor_nao_ok: 5000
+incerteza_pct: 0.25

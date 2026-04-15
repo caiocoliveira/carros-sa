@@ -1,0 +1,64 @@
+# Tabela de custos de reforma — Carros SA Uberlândia.
+# Preços em reais por família de peça × severidade da intervenção.
+# Famílias casadas por prefixo no nome da `Avaria.parte` (ver estimador_reforma.py).
+empresa_id: carros_uberlandia
+
+pecas:
+  longarina:
+    leve: 800
+    media: 1800
+    grave: 5000
+    estrutural: 9000
+  coluna:
+    leve: 700
+    media: 1500
+    grave: 3500
+    estrutural: 7000
+  porta:
+    leve: 400
+    media: 900
+    grave: 2200
+    estrutural: 4000
+  paralama:
+    leve: 350
+    media: 750
+    grave: 1800
+    estrutural: 3500
+  capo_tampa:
+    leve: 400
+    media: 900
+    grave: 2200
+    estrutural: 4000
+  tampa:
+    leve: 400
+    media: 900
+    grave: 2200
+    estrutural: 4000
+  teto:
+    leve: 500
+    media: 1100
+    grave: 3000
+    estrutural: 6000
+  painel:
+    leve: 500
+    media: 1200
+    grave: 3500
+    estrutural: 6500
+
+# Fallback quando o nome da peça não casa em nenhuma família acima.
+default:
+  leve: 300
+  media: 700
+  grave: 1500
+  estrutural: 3000
+
+# Adicional fixo quando severidade_geral do laudo é "estrutural"
+# (alinhamento de chassi, retrabalho de solda, calibração de airbag/ADAS).
+adicional_estrutural: 3000
+
+# Adicional quando motor_ok = False E severidade não-estrutural
+# (i.e., motor numerado divergente / pendência mecânica isolada).
+adicional_motor_nao_ok: 4000
+
+# Range de incerteza aplicado em cima do custo_total para min/max.
+incerteza_pct: 0.25

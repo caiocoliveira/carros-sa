@@ -32,18 +32,18 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestrador (E).
 
-### A — AvaliadorMercado 📋 pendente
-- **Branch:** `feat/avaliador-mercado`
-- **Escopo:** `carros_sa/agents/avaliador_mercado.py` — `avaliar(marca, modelo, ano, km) -> SinalMercado`
-- **Componentes:** cliente FIPE (`fipe.parallelum.com.br`) em `carros_sa/tools/fipe.py` + uso dos similares da própria plataforma Auto Avaliar (parser `parse_detalhe` já expõe em `similares_precos`)
-- **Não escopo:** Webmotors (workstream B).
-- **Critério de aceite:** gold test comparando FIPE de Fiesta 2013 vs. preços de similares que a plataforma mostrou (45k, 23.2k, 27k, etc). Cache em tabela `modelo_fipe_cache`.
+### A — AvaliadorMercado ✅
+- **Branch:** `feat/avaliador-mercado` (worktree `amazing-saha`)
+- **Arquivos:** [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py) + [`carros_sa/tools/fipe.py`](carros_sa/tools/fipe.py)
+- **Cobertura:** 11 testes em [`tests/test_avaliador_mercado.py`](tests/test_avaliador_mercado.py) — gold com similares reais do Fiesta 21854782, cache hit-first em SQLite, fakes pra HTTP/sessão.
+- **Notas:** Webmotors (workstream B) entra depois substituindo `similares_precos`; contrato `SinalMercado` não muda. `dias_giro_estimado` é heurística por nº de competidores — calibrar com workstream G.
 
-### B — Webmotors Scraper 📋 pendente
-- **Branch:** `feat/webmotors-scraper`
-- **Escopo:** `carros_sa/tools/webmotors.py` com Playwright + stealth. Função `estatisticas(marca, modelo, ano) -> (p25, mediana, n_anuncios)` persistindo em `anuncio_webmotors`.
-- **Riscos:** anti-bot agressivo. Antes de atacar, ler CLAUDE.md section "Red flags". Começar com 1 busca manual, cache 24h.
-- **Critério de aceite:** integração marcada `@pytest.mark.slow` roda e popula ≥5 anúncios; unitário cobre parser dos resultados offline.
+### B — Webmotors Scraper ✅
+- **Branch:** `feat/avaliador-mercado` (worktree `amazing-saha`)
+- **Arquivo:** [`carros_sa/tools/webmotors.py`](carros_sa/tools/webmotors.py)
+- **Fixture real:** [`data/scrapes/2026-04-14_webmotors_fiesta.json`](data/scrapes/2026-04-14_webmotors_fiesta.json) — 26 cards coletados via Chrome MCP.
+- **Cobertura:** 18 testes em [`tests/test_webmotors.py`](tests/test_webmotors.py) — gold com dado real (Fiesta 2013: n=11, mediana=35900, p25=33745), parse de badges/variações, `estatisticas()` com `fetch=` injetável.
+- **Coleta ao vivo:** `_fetch_playwright()` é esqueleto que levanta `NotImplementedError` — ligar no workstream G com rate-limit + stealth.
 
 ### C — EstimadorReforma 📋 pendente
 - **Branch:** `feat/estimador-reforma`
@@ -102,7 +102,8 @@ Já registrado:
 
 - ✅ **M1** — Scraper listagem + 10 LoteRaw no SQLite
 - ✅ **M2** — ExtratorLaudo validado em lote real (Gemini Flash, custo zero)
-- 🔄 **M3** — AvaliadorMercado (FIPE) — _workstream A_
+- ✅ **M3** — AvaliadorMercado (FIPE + similares plataforma) — _workstream A_
+- ✅ **M4-pre** — Webmotors parser + estatísticas (coleta ao vivo pendente, workstream G) — _workstream B_
 - 🔄 **M4** — EstimadorReforma + tabela base — _workstream C_
 - 🔄 **M5** — ScraperDetalheLote end-to-end — _workstream D_
 - 🔒 **M6** — Orquestrador paralelo + top-10 ranking — _workstream E_

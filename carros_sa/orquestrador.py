@@ -131,9 +131,15 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
 def _laudo_de_textual(txt, flags=None) -> LaudoEstruturado:
     """Constrói LaudoEstruturado a partir da camada textual do PDF (sem diagrama visual).
 
-    Usado quando o PDF existe mas tem <2 páginas ou a visão falha.
-    confidence=0.6 — melhor que sem PDF (0.5), pior que extração completa.
+    Usado quando o PDF existe mas tem <2 páginas ou a visão falha (ex.: Gemini
+    503 UNAVAILABLE). Agora extrai avarias do bloco "Observações" do inspetor —
+    menções como "VEÍCULO POSSUI REPARO NAS COLUNAS B e C" viram Avaria concreta
+    e a severidade é derivada das peças detectadas.
     """
+    from carros_sa.agents.extrator_laudo import (
+        extrair_avarias_textuais, _severidade_consolidada,
+    )
+
     # Documentação: prioriza dados textuais do PDF
     if txt.roubo_furto_ativo or txt.comunicado_venda:
         documentacao = StatusDocumentacao.PENDENCIA_GRAVE
@@ -151,18 +157,24 @@ def _laudo_de_textual(txt, flags=None) -> LaudoEstruturado:
             elif "grave" in sd or "judicial" in sd or "bloqueio" in sd:
                 documentacao = StatusDocumentacao.PENDENCIA_GRAVE
 
-    # Motor: usa dado textual se disponível, senão assume OK
-    motor_ok = txt.motor_original if txt.motor_original is not None else True
+    # Avarias do bloco Observações (texto livre do inspetor) — novo no workstream L
+    avarias = extrair_avarias_textuais(txt.observacoes)
+    severidade = _severidade_consolidada(avarias)
 
-    # Sem diagrama estrutural não sabemos as avarias visuais — severity=NENHUMA
-    # mas confidence reflete incerteza
+    # Motor: usa dado textual se disponível. Estrutural degrada motor_ok automaticamente.
+    motor_ok = (txt.motor_original if txt.motor_original is not None else True) and \
+               severidade != SeveridadeAvaria.ESTRUTURAL
+
+    # Confidence: 0.7 quando extraiu avarias do texto (melhor qualidade); 0.6 só identificadores.
+    confidence = 0.7 if avarias else 0.6
+
     return LaudoEstruturado(
-        avarias=[],
-        severidade_geral=SeveridadeAvaria.NENHUMA,
+        avarias=avarias,
+        severidade_geral=severidade,
         motor_ok=motor_ok,
         documentacao=documentacao,
         categoria_veiculo=CategoriaVeiculo.OUTRO,
-        confidence=0.6,
+        confidence=confidence,
     )
 
 

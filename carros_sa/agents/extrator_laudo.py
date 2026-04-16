@@ -1,11 +1,14 @@
 """ExtratorLaudo — transforma o PDF de laudo cautelar do Auto Avaliar em LaudoEstruturado.
 
-Duas camadas:
-  1. Parse textual via PyMuPDF — captura chassi, placa, licenciamento, originalidade
-     e observações. Determinístico, zero custo.
-  2. Haiku 4.5 Vision sobre a página 2 do laudo (diagrama estrutural) — classifica
-     cada peça em {Original, Avariado, Reparado/Soldado/Substituído} usando a
-     legenda impressa na própria imagem.
+Três camadas complementares:
+  1. Visão (Gemini Flash / Haiku) sobre a página 2 do laudo — classifica cada peça
+     em {Original, Avariado, Reparado} lendo o diagrama colorido.
+  2. Parse textual via PyMuPDF do bloco "Observações" — regex no texto livre
+     do inspetor ("VEÍCULO POSSUI REPARO NAS COLUNAS B e C..."). Usado como
+     fallback quando a camada de visão falha (ex.: Gemini 503 por overload)
+     e como reforço mesmo no caminho feliz.
+  3. Parse textual de identificadores (chassi, placa, licenciamento, motor) —
+     determinístico, zero custo, sempre executado.
 
 Dado global (cacheado por hash do PDF): um laudo serve N empresas.
 """
@@ -107,9 +110,16 @@ def parse_laudo_textual(pdf_path: Path) -> LaudoTextual:
     elif km:
         odometro_legivel = True
 
-    # Observações: linhas com "ATENÇÃO"/"OBSERVAÇÃO" ou no fim
-    obs_blocks = re.findall(r"(OBSERVA[ÇC][ÕO]ES?[:\s][\s\S]{0,500})", texto, re.IGNORECASE)
-    observacoes = "\n---\n".join(obs_blocks)
+    # Observações: o PDF do Auto Avaliar tem o rótulo "Observações:" em vários
+    # pontos. Nos que são campo de formulário, o texto seguinte começa em
+    # CAIXA ALTA (convenção do laudo); os falsos positivos (prosa técnica como
+    # "observações e constatações do Inspetor") começam em minúsculo. Anconramos
+    # no caractere maiúsculo seguinte pra filtrar.
+    obs_matches = re.findall(
+        r"Observa[çc][õo]es:?\s+([A-ZÁÉÍÓÚÃÕÂÊÎÔÛÜÇ][^\n]{4,300})",
+        texto,
+    )
+    observacoes = "\n".join(m.strip() for m in obs_matches)
 
     return LaudoTextual(
         placa=placa.group(1) if placa else None,
@@ -128,7 +138,172 @@ def parse_laudo_textual(pdf_path: Path) -> LaudoTextual:
 
 
 # =============================================================================
-# Camada 2 — Haiku Vision na página 2 (diagrama estrutural)
+# Camada 2 — Extrator de avarias a partir do bloco "Observações" (texto livre)
+# =============================================================================
+#
+# Usado principalmente como fallback quando a camada de visão falha (ex.:
+# Gemini 503 UNAVAILABLE por overload). Procura menções a reparo/substituição
+# de peças estruturais ("VEÍCULO POSSUI REPARO NAS COLUNAS B e C DO LADO
+# ESQUERDO") e constrói lista de `Avaria` equivalente à que a visão geraria.
+#
+# Verbo que indica reparo (negativo pra valor residual).
+_RE_VERBO_REPARO = re.compile(
+    r"\b(reparo|reparad[oa]|repintad[oa]|repintura|soldad[oa]|substitu[íi]d[oa]|"
+    r"substitui[çc][ãa]o|amassad[oa]|danific[oa]|corro[ií]d[oa])\b",
+    re.IGNORECASE,
+)
+
+
+def _normaliza_lado(s: str) -> Optional[str]:
+    if not s:
+        return None
+    t = s.lower()
+    if "esq" in t:
+        return "esquerda"
+    if "dir" in t:
+        return "direita"
+    return None
+
+
+def _normaliza_posicao(s: str) -> Optional[str]:
+    if not s:
+        return None
+    t = s.lower()
+    if "dianteir" in t:
+        return "dianteira"
+    if "traseir" in t:
+        return "traseira"
+    return None
+
+
+def _nomes_coluna(sentenca: str) -> list:
+    """Detecta colunas mencionadas ('B e C', 'B', 'A, B e C', etc) + lado comum."""
+    # "COLUNAS B e C DO LADO ESQUERDO" / "COLUNA B DIREITA" / "COLUNAS A, B"
+    pat = re.compile(
+        r"coluna[s]?\s+((?:[a-d])(?:\s*(?:e|,|/|\bE\b)\s*[a-d])*)"
+        r"(?:\s+(?:do\s+)?(?:lado\s+)?(esquerd[oa]|direit[oa]))?",
+        re.IGNORECASE,
+    )
+    resultado = []
+    for m in pat.finditer(sentenca):
+        letras = re.findall(r"[a-d]", m.group(1), re.IGNORECASE)
+        lado = _normaliza_lado(m.group(2) or "")
+        for letra in letras:
+            base = f"coluna_{letra.lower()}"
+            resultado.append(f"{base}_{lado}" if lado else base)
+    return resultado
+
+
+def _nomes_peca_com_posicao_lado(sentenca: str, alvo: str, aliases: list) -> list:
+    """Para peças tipo longarina/paralama/porta que podem ter posição+lado
+    adjacentes: captura 'LONGARINA DIANTEIRA DIREITA', 'PORTA TRASEIRA ESQUERDA'.
+    """
+    pat = re.compile(
+        rf"\b({'|'.join(aliases)})\b"
+        r"(?:\s+(dianteir[oa]|traseir[oa]))?"
+        r"(?:\s+(esquerd[oa]|direit[oa]))?",
+        re.IGNORECASE,
+    )
+    resultado = []
+    for m in pat.finditer(sentenca):
+        pos = _normaliza_posicao(m.group(2) or "")
+        lado = _normaliza_lado(m.group(3) or "")
+        nome = alvo
+        if pos:
+            nome = f"{nome}_{pos}"
+        if lado:
+            nome = f"{nome}_{lado}"
+        resultado.append(nome)
+    return resultado
+
+
+def _nomes_capo(sentenca: str) -> list:
+    """Capô / tampa do motor."""
+    if re.search(r"cap[ôo]\b|tampa\s+do\s+motor", sentenca, re.IGNORECASE):
+        if re.search(r"tampa\s+do\s+motor", sentenca, re.IGNORECASE):
+            return ["tampa_motor"]
+        return ["capo_tampa_motor"]
+    return []
+
+
+def _nomes_teto(sentenca: str) -> list:
+    if re.search(r"\bteto\b", sentenca, re.IGNORECASE):
+        return ["teto"]
+    return []
+
+
+def _nomes_painel(sentenca: str) -> list:
+    m = re.search(r"painel\s+(frontal|traseir[oa])", sentenca, re.IGNORECASE)
+    if m:
+        qualificador = "frontal" if "frontal" in m.group(1).lower() else "traseiro"
+        return [f"painel_{qualificador}"]
+    return []
+
+
+# Severidade base por família de peça — colunas e longarinas são sinal
+# estrutural (ou quase), o resto é chapa externa.
+_SEVERIDADE_POR_PREFIXO = [
+    ("coluna_", SeveridadeAvaria.GRAVE),
+    ("longarina", SeveridadeAvaria.GRAVE),
+    ("capo_tampa_motor", SeveridadeAvaria.MEDIA),
+    ("tampa_motor", SeveridadeAvaria.MEDIA),
+    ("tampa_traseira", SeveridadeAvaria.MEDIA),
+    ("teto", SeveridadeAvaria.MEDIA),
+    ("paralama", SeveridadeAvaria.MEDIA),
+    ("porta", SeveridadeAvaria.MEDIA),
+    ("painel", SeveridadeAvaria.MEDIA),
+]
+
+
+def _severidade_de(nome: str) -> SeveridadeAvaria:
+    for prefixo, sev in _SEVERIDADE_POR_PREFIXO:
+        if nome.startswith(prefixo):
+            return sev
+    return SeveridadeAvaria.LEVE
+
+
+def extrair_avarias_textuais(observacoes: Optional[str]) -> list:
+    """Extrai `list[Avaria]` a partir do texto livre do campo Observações.
+
+    Retorna lista vazia se `observacoes` for None/empty ou não contiver nenhum
+    verbo de reparo. Best-effort — a camada visual continua sendo a fonte
+    primária de avarias; essa função é fallback quando a visão falha.
+    """
+    if not observacoes:
+        return []
+
+    sentencas = re.split(r"[.;\n]+", observacoes)
+    vistas: set = set()
+    avarias: list = []
+
+    for sent in sentencas:
+        if not _RE_VERBO_REPARO.search(sent):
+            continue
+
+        candidatos: list = []
+        candidatos.extend(_nomes_coluna(sent))
+        candidatos.extend(_nomes_peca_com_posicao_lado(sent, "longarina", ["longarina"]))
+        candidatos.extend(_nomes_peca_com_posicao_lado(sent, "paralama", ["paralama"]))
+        candidatos.extend(_nomes_peca_com_posicao_lado(sent, "porta", ["porta"]))
+        candidatos.extend(_nomes_capo(sent))
+        candidatos.extend(_nomes_teto(sent))
+        candidatos.extend(_nomes_painel(sent))
+
+        for nome in candidatos:
+            if nome in vistas:
+                continue
+            vistas.add(nome)
+            severidade = _severidade_de(nome)
+            avarias.append(Avaria(
+                parte=nome,
+                severidade=severidade,
+                descricao=f"Observações do laudo: '{sent.strip()[:120]}'",
+            ))
+    return avarias
+
+
+# =============================================================================
+# Camada 3 — Haiku Vision na página 2 (diagrama estrutural)
 # =============================================================================
 
 _HAIKU_MODEL = "claude-haiku-4-5"
@@ -215,18 +390,52 @@ def extrair_laudo(
     vision_client,
     categoria_veiculo: CategoriaVeiculo = CategoriaVeiculo.OUTRO,
 ) -> LaudoEstruturado:
-    """Pipeline completo: parse textual + visão + consolidação em LaudoEstruturado."""
+    """Pipeline completo: parse textual + visão + consolidação em LaudoEstruturado.
+
+    Se a camada de visão falhar (ex.: Gemini 503 UNAVAILABLE), cai pra apenas o
+    extrator textual (observações + documentação), com confidence reduzida.
+    """
     txt = parse_laudo_textual(pdf_path)
-    visual = extrair_laudo_visual(pdf_path, vision_client)
+    visual: Optional[dict] = None
+    visao_falhou = False
+    try:
+        visual = extrair_laudo_visual(pdf_path, vision_client)
+    except Exception:
+        visao_falhou = True
 
-    # Avarias: uma por peça reparada/avariada
-    avarias = []
-    for nome in visual.get("pecas_reparadas", []):
-        avarias.append(Avaria(parte=nome, severidade=SeveridadeAvaria.GRAVE if "coluna" in nome or "longarina" in nome else SeveridadeAvaria.MEDIA, descricao="reparado/soldado/substituído"))
-    for nome in visual.get("pecas_avariadas", []):
-        avarias.append(Avaria(parte=nome, severidade=SeveridadeAvaria.LEVE, descricao="avariado/pequenos danos"))
+    # Avarias: começam do visual (fonte primária) + enriquecem do textual
+    avarias: list = []
+    vistas_parte: set = set()
 
-    severidade = _SEVERIDADE_MAP.get(visual.get("severidade_geral", "nenhuma"), SeveridadeAvaria.NENHUMA)
+    if visual is not None:
+        for nome in visual.get("pecas_reparadas", []):
+            if nome in vistas_parte:
+                continue
+            vistas_parte.add(nome)
+            sev = (
+                SeveridadeAvaria.GRAVE
+                if ("coluna" in nome or "longarina" in nome)
+                else SeveridadeAvaria.MEDIA
+            )
+            avarias.append(Avaria(parte=nome, severidade=sev, descricao="reparado/soldado/substituído"))
+        for nome in visual.get("pecas_avariadas", []):
+            if nome in vistas_parte:
+                continue
+            vistas_parte.add(nome)
+            avarias.append(Avaria(parte=nome, severidade=SeveridadeAvaria.LEVE, descricao="avariado/pequenos danos"))
+
+    # Sempre tenta enriquecer com o bloco Observações — pode achar peças que
+    # o diagrama não cobre ou sinalizar gravidade quando visão falhou.
+    for av_text in extrair_avarias_textuais(txt.observacoes):
+        if av_text.parte not in vistas_parte:
+            vistas_parte.add(av_text.parte)
+            avarias.append(av_text)
+
+    # Severidade: prioriza valor da visão, senão deriva das avarias textuais.
+    if visual is not None and "severidade_geral" in visual:
+        severidade = _SEVERIDADE_MAP.get(visual.get("severidade_geral", "nenhuma"), SeveridadeAvaria.NENHUMA)
+    else:
+        severidade = _severidade_consolidada(avarias)
 
     # Documentação: consolidação textual
     if txt.roubo_furto_ativo or txt.comunicado_venda:
@@ -240,14 +449,51 @@ def extrair_laudo(
 
     motor_ok = bool(txt.motor_original) and severidade != SeveridadeAvaria.ESTRUTURAL
 
+    # Confidence: alta quando visão respondeu; menor quando só textual serviu.
+    confidence = float(visual.get("confidence", 0.7)) if visual is not None else (
+        0.65 if avarias else 0.5
+    )
+
     return LaudoEstruturado(
         avarias=avarias,
         severidade_geral=severidade,
         motor_ok=motor_ok,
         documentacao=doc,
         categoria_veiculo=categoria_veiculo,
-        confidence=float(visual.get("confidence", 0.7)),
+        confidence=confidence,
     )
+
+
+def _severidade_consolidada(avarias: list) -> SeveridadeAvaria:
+    """Deriva severidade_geral da lista de avarias (quando a visão falhou).
+
+    Regras iguais às usadas no prompt do Gemini:
+    - estrutural: qualquer coluna/longarina reparada/substituída
+    - grave: 3+ peças quaisquer marcadas graves ou estruturais
+    - media: 1-2 peças de chapa externa média
+    - leve: só avariado
+    - nenhuma: nada
+    """
+    if not avarias:
+        return SeveridadeAvaria.NENHUMA
+
+    tem_estrutural = any(
+        ("coluna" in a.parte or "longarina" in a.parte)
+        and a.severidade in (SeveridadeAvaria.GRAVE, SeveridadeAvaria.ESTRUTURAL)
+        for a in avarias
+    )
+    if tem_estrutural:
+        return SeveridadeAvaria.ESTRUTURAL
+
+    n_graves = sum(1 for a in avarias if a.severidade == SeveridadeAvaria.GRAVE)
+    if n_graves >= 3:
+        return SeveridadeAvaria.GRAVE
+
+    n_medias = sum(1 for a in avarias if a.severidade == SeveridadeAvaria.MEDIA)
+    if n_medias >= 1:
+        return SeveridadeAvaria.MEDIA
+
+    return SeveridadeAvaria.LEVE
 
 
 # =============================================================================

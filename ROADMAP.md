@@ -90,6 +90,26 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Cobertura:** 6 testes em [`tests/test_orquestrador.py`](tests/test_orquestrador.py) (frete por UF, early_exit, lote já avaliado, persistência).
 - **Limitações:** Seletores JS do scraper precisam ser ajustados na primeira execução real (DOM pode variar). Login deve usar `AUTOAVALIAR_EMAIL` + `AUTOAVALIAR_PASSWORD` no `.env`.
 
+### L — Fix laudo visual + extrator textual de avarias ✅
+- **Branch:** `claude/adoring-sinoussi`
+- **Arquivos:**
+  - [`carros_sa/agents/extrator_laudo.py`](carros_sa/agents/extrator_laudo.py) — nova `extrair_avarias_textuais()` + `_severidade_consolidada()` + `parse_laudo_textual` agora captura só campos (filtro CAIXA ALTA) + `extrair_laudo` sobrevive a visão falhada com fallback textual.
+  - [`carros_sa/agents/vision_clients.py`](carros_sa/agents/vision_clients.py) — retry manual 0s/15s/45s em `GeminiVisionClient` + novo `FallbackVisionClient` encadeando clients + `build_default_client` auto-constrói cascata Gemini→Haiku se `ANTHROPIC_API_KEY` setado.
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_laudo_de_textual` popula avarias e severidade via extrator textual (antes retornava sempre vazio).
+  - [`scripts/reprocessar_laudos.py`](scripts/reprocessar_laudos.py) — re-roda laudo+avaliação nos lotes já ingeridos sem rescrape, usando PDFs locais em `data/laudos_amostra/`.
+- **Diagnóstico:** Gemini 2.5 Flash vinha retornando `503 UNAVAILABLE` por overload em alguns momentos; o código caía em fallback `_laudo_de_textual` que **por design** retornava `avarias=[]`, zerando a reforma de todos os lotes. Causa raiz: fallback não aproveitava o bloco "Observações" do PDF (texto livre do inspetor com menções concretas a reparos).
+- **Como funciona:** O extrator textual procura verbos de reparo (`reparado`, `repintado`, `soldado`, `substituído`, etc.) combinados com peças estruturais (colunas A-D, longarinas, paralamas, portas, etc.) no bloco Observações. Severidade é derivada: coluna/longarina reparada → GRAVE ou ESTRUTURAL; chapa externa → MEDIA. Quando a visão volta a funcionar, ela é a fonte primária e o textual só enriquece (não sobrescreve). Cascata de providers: Gemini grátis como 1º, Haiku ~$0.005/chamada como fallback automático.
+- **Validação gold (Fiesta 21854782):**
+  - Antes: `severidade=nenhuma, avarias=[], reforma=R$ 0, viável=sim` (ERRADO — Fiesta tem REPROVADO ESTRUTURAL)
+  - Depois: `severidade=estrutural, avarias=[coluna_b_esquerda, coluna_c_esquerda], reforma=R$ 10.000, viável=NÃO` (correto — descartado no ranking)
+  - No reprocessamento em massa: Gemini voltou a responder (confidence 0.90), então camada visual funcionou, e os 22 lotes sem PDF local continuaram com `avarias=[]` — isso é esperado, precisam rodar pipeline completo com download de PDF pra serem melhorados.
+- **Cobertura:** 8 testes novos em [`tests/test_avarias_textuais.py`](tests/test_avarias_textuais.py) — gold Fiesta real + casos sintéticos (vazio, plural "COLUNAS B e C", lados separados, capô/tampa, múltiplos reparos numa frase, observações sem reparo).
+- **Custo operacional:** Com fallback ativo, pior caso é ~$0.005 por laudo no Haiku (100 lotes/dia = $15/mês; 300/dia = $45/mês). Gemini permanece primário grátis.
+- **Limitações conhecidas:**
+  - `ANTHROPIC_API_KEY` precisa ser setada no `.env` pra ativar o fallback pago — sem ela, pipeline ainda funciona mas Gemini 503 derruba o laudo visual (cai pro textual).
+  - Textual só detecta peças mencionadas em português no bloco Observações — PDFs com convenção diferente podem não ser cobertos (mitigável adicionando padrões).
+  - Reprocessar lotes antigos depende de PDFs locais. Lotes sem PDF ficam na zona cinza (avarias=0) até a próxima triagem completa.
+
 ### M — Expansão geográfica por raio ✅
 - **Branch:** `claude/adoring-sinoussi`
 - **Arquivos:**

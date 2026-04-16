@@ -166,13 +166,17 @@ def test_gol_2015_em_uberlandia_sem_frete(
     assert av.preco_giro == 24_000                # min(28000*0.95=26600, 24000) = 24000
     assert av.frete_incluso == 0
     assert av.reforma_estimada == 3_500
-    assert av.taxas_leilao == int(15_000 * 0.08)  # 1200
+
+    # Taxas agora calculadas sobre o lance máximo (nosso bid), não sobre lance_atual
+    # taxas_leilao = preco_max * 8%
+    assert av.taxas_leilao == int(av.preco_max * 0.08)
 
     # Margem: fator_risco ≈ 1.0 + (2.0-1.0) * (0.25 + 0 + 0 + 0.3*0.15) = 1.0 + 0.295 = 1.295
     # fator_liquidez ≈ 1.0 + (1.8-1.0) * ((80/100 + 25/90)/2) = 1.0 + 0.8 * 0.539 ≈ 1.431
-    # margem ≈ 0.18 * 1.295 * 1.431 ≈ 0.3336 → preco_giro * 0.3336 ≈ 8006
-    # preco_alvo ≈ 24000 - 3500 - 1200 - 0 - 500 - 8006 ≈ 10794
-    assert 10_000 < av.preco_alvo < 12_500
+    # margem ≈ 0.18 * 1.295 * 1.431 ≈ 0.3336
+    # bruto_alvo = 24000 - 3500 - 0 - 500 - 8006 = 11994
+    # preco_alvo = 11994 / 1.08 ≈ 11106
+    assert 10_500 < av.preco_alvo < 12_500
     assert av.preco_max > av.preco_alvo           # margem mínima é menos restritiva
 
 
@@ -188,12 +192,12 @@ def test_gol_2015_em_goiania_com_frete(
 
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
-    # Comparado com Uberlândia, preco_alvo deve cair em ~R$ 1400 (o frete)
+    # Comparado com Uberlândia, preco_alvo deve cair em ~R$ 1400/1.08 ≈ R$1296 (o frete)
     assert av.frete_incluso == 1_400
-    assert 8_500 < av.preco_alvo < 11_100
+    assert 9_000 < av.preco_alvo < 12_000
 
-    # Lance atual (R$ 15k) está bem acima do preco_alvo → orquestrador deve descartar
-    assert gol_2015_lote.lance_atual > av.preco_alvo
+    # Lance atual (R$ 15k) está bem acima do preco_max → lote caro demais
+    assert gol_2015_lote.lance_atual > av.preco_max
 
 
 # =============================================================================

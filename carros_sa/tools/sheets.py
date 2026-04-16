@@ -25,15 +25,14 @@ from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 
 HEADER = [
     "Rank",
+    "Situação",
     "Lote ID",
     "Modelo",
     "Fim do Leilão",
     "KM",
     "Lance Atual (R$)",
-    "Preço-Alvo (R$)",
-    "Preço Máx (R$)",
-    "ROI Estimado (%)",
-    "Score ROI",
+    "Lance Máximo (R$)",
+    "ROI se pagar o máximo (%)",
     "Fator Risco",
     "Severidade Laudo",
     "Motor OK",
@@ -45,16 +44,17 @@ HEADER = [
 ]
 
 
-def _fmt_brl(valor: int) -> str:
-    return f"R$ {valor:,.0f}".replace(",", ".")
+def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
+    """ROI garantido se ganhar o lote exatamente pelo lance máximo.
 
-
-def _calcular_roi_pct(av: AvaliacaoLote, lance_atual: int) -> float:
-    """ROI bruto estimado: (giro - lance - reforma - frete - taxas) / lance."""
-    if lance_atual == 0:
+    = (preco_giro - capital_total) / capital_total
+    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    """
+    if av.preco_max <= 0:
         return 0.0
-    lucro = av.preco_giro - lance_atual - av.reforma_estimada - av.frete_incluso - av.taxas_leilao
-    return round(lucro / lance_atual * 100, 1)
+    capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
+    lucro = av.preco_giro - capital
+    return round(lucro / max(capital, 1) * 100, 1)
 
 
 class SheetsExporter:
@@ -74,7 +74,15 @@ class SheetsExporter:
     def exportar(self, empresa_id: str, session: Session) -> int:
         """Lê SQLite, escreve aba <empresa_id> na Sheet. Retorna n linhas exportadas."""
         rows = self._query(empresa_id, session)
-        rows_sorted = sorted(rows, key=lambda r: r["score_roi"], reverse=True)
+        # Ordenação: viáveis primeiro (preco_max > lance_atual), dentro de cada grupo
+        # ordena por folga de lance decrescente (mais margem de negociação primeiro)
+        rows_sorted = sorted(
+            rows,
+            key=lambda r: (
+                0 if r["viavel"] else 1,        # viáveis antes dos inviáveis
+                -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
+            ),
+        )
         self._write_sheet(empresa_id, rows_sorted)
         return len(rows_sorted)
 
@@ -98,16 +106,16 @@ class SheetsExporter:
                 except Exception:
                     fim_em_str = str(lote.fim_em)
 
+            viavel = av.preco_max > (lote.lance_atual or 0)
+
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo} {lote.ano}",
                 "fim_em": fim_em_str,
                 "km": lote.km,
-                "lance_atual": lote.lance_atual,
-                "preco_alvo": av.preco_alvo,
+                "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
-                "roi_pct": _calcular_roi_pct(av, lote.lance_atual),
-                "score_roi": av.score_roi,
+                "roi_pct": _calcular_roi_no_maximo(av),
                 "fator_risco": round(av.fator_risco, 3),
                 "severidade": laudo.severidade_geral if laudo else "—",
                 "motor_ok": ("Sim" if laudo.motor_ok else "NÃO") if laudo else "—",
@@ -115,6 +123,7 @@ class SheetsExporter:
                 "frete": av.frete_incluso,
                 "justificativa": av.justificativa,
                 "url": lote.url,
+                "viavel": viavel,
             })
         return rows
 
@@ -133,17 +142,17 @@ class SheetsExporter:
 
         sheet_rows = [HEADER]
         for rank, r in enumerate(rows, start=1):
+            situacao = "✓ Viável" if r["viavel"] else "✗ Caro demais"
             sheet_rows.append([
                 rank,
+                situacao,
                 r["lote_id"],
                 r["modelo"],
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
-                r["preco_alvo"],
                 r["preco_max"],
                 r["roi_pct"],
-                round(r["score_roi"], 4),
                 r["fator_risco"],
                 r["severidade"],
                 r["motor_ok"],

@@ -101,43 +101,38 @@ def precificar(
     margem_calculada = empresa.margem.base * fator_risco * fator_liquidez
     margem_aplicada = max(margem_calculada, empresa.margem.minima_absoluta)
 
-    # 4. Custos fixos do deal
-    taxas_leilao_base = int(lote.lance_atual * empresa.taxa_leilao_pct) if lote.lance_atual else 0
+    # 4. Custos fixos (exceto taxas, calculadas abaixo sobre o lance vencedor)
     frete_incluso = frete.frete_estimado
     custo_op = empresa.custo_op_fixo
-    margem_reais = int(preco_giro * margem_aplicada)
+    taxa_leilao = empresa.taxa_leilao_pct
 
-    # 5. Preço-alvo de lance
-    preco_alvo = (
-        preco_giro
-        - reforma.custo_total
-        - taxas_leilao_base
-        - frete_incluso
-        - custo_op
-        - margem_reais
-    )
-
-    # 6. Preço máximo absoluto (margem mínima)
+    # 5. Preço máximo (lance máximo aceitável) — solução algébrica.
+    #    A taxa do leilão é cobrada sobre o lance vencedor (nosso bid),
+    #    não sobre o lance atual do momento.
+    #
+    #    Equação:  bid + bid*taxa = preco_giro - reforma - frete - custo_op - margem
+    #              bid * (1 + taxa) = bruto
+    #              bid = bruto / (1 + taxa)
     margem_reais_min = int(preco_giro * empresa.margem.minima_absoluta)
-    preco_max = (
-        preco_giro
-        - reforma.custo_total
-        - taxas_leilao_base
-        - frete_incluso
-        - custo_op
-        - margem_reais_min
-    )
+    bruto_max = preco_giro - reforma.custo_total - frete_incluso - custo_op - margem_reais_min
+    preco_max = int(max(bruto_max, 0) / (1 + taxa_leilao))
+    taxas_leilao_max = int(preco_max * taxa_leilao)
 
-    # 7. Score ROI — retorno % esperado sobre o capital imobilizado no preço-alvo
-    #    (útil pra ordenar entre lotes de preços muito diferentes)
-    capital_total = max(preco_alvo + reforma.custo_total + frete_incluso + taxas_leilao_base + custo_op, 1)
-    retorno = preco_giro - capital_total
-    score_roi = retorno / capital_total
+    # 6. Preço-alvo de lance (margem calculada = mais exigente que a mínima)
+    margem_reais = int(preco_giro * margem_aplicada)
+    bruto_alvo = preco_giro - reforma.custo_total - frete_incluso - custo_op - margem_reais
+    preco_alvo = int(max(bruto_alvo, 0) / (1 + taxa_leilao))
+
+    # 7. Score ROI — retorno % se ganhar pelo lance máximo (pior caso aceitável).
+    #    É o ROI mínimo garantido se pagarmos o teto.
+    capital_max = max(preco_max + reforma.custo_total + frete_incluso + taxas_leilao_max + custo_op, 1)
+    retorno_max = preco_giro - capital_max
+    score_roi = retorno_max / capital_max
 
     justificativa = (
         f"preco_giro=R${preco_giro} (FIPE={mercado.fipe}, WM_p25={mercado.webmotors_p25}) "
         f"reforma=R${reforma.custo_total} frete=R${frete_incluso} "
-        f"taxas=R${taxas_leilao_base} op=R${custo_op} "
+        f"taxas≈R${taxas_leilao_max} (8% do lance max) op=R${custo_op} "
         f"margem={margem_aplicada:.1%} (risco={fator_risco:.2f}, liq={fator_liquidez:.2f})"
     )
 
@@ -152,7 +147,7 @@ def precificar(
         margem_aplicada=margem_aplicada,
         frete_incluso=frete_incluso,
         reforma_estimada=reforma.custo_total,
-        taxas_leilao=taxas_leilao_base,
+        taxas_leilao=taxas_leilao_max,
         preco_giro=preco_giro,
         justificativa=justificativa,
     )

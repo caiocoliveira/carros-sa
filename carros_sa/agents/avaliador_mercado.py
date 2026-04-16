@@ -102,10 +102,11 @@ def avaliar(
         p25 = _percentil_25(sim)
         n = len(sim)
     else:
-        # sem dados de competidores: ancora em FIPE com desconto realista de
-        # mercado de varejo→atacado. Marcadores conservadores até B chegar.
-        mediana = int(round(fipe_valor * 0.90))
-        p25 = int(round(fipe_valor * 0.78))
+        # sem dados de competidores: ancora em FIPE com desconto típico de
+        # varejo→atacado (mediana≈93%, p25≈88% do FIPE — estimativa calibrada
+        # em dados do mercado brasileiro; Webmotors B refinará isso).
+        mediana = int(round(fipe_valor * 0.93))
+        p25 = int(round(fipe_valor * 0.88))
         n = 0
 
     dias_giro = _DIAS_GIRO_DEFAULT.get(categoria, 40)

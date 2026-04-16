@@ -14,7 +14,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.sheets import SheetsExporter, _calcular_roi_pct, HEADER
+from carros_sa.tools.sheets import SheetsExporter, _calcular_roi_no_maximo, HEADER
 
 
 # ---------------------------------------------------------------------------
@@ -43,19 +43,20 @@ def _lote(lote_id: str = "L001", marca: str = "Ford", modelo: str = "Fiesta", an
 
 
 def _avaliacao(lote_id: str = "L001", empresa_id: str = "uberlandia_mg",
-               score_roi: float = 0.3, preco_giro: int = 35000) -> AvaliacaoLote:
+               score_roi: float = 0.3, preco_giro: int = 35000,
+               preco_max: int = 30000) -> AvaliacaoLote:
     return AvaliacaoLote(
         empresa_id=empresa_id,
         lote_id=lote_id,
-        preco_alvo=28000,
-        preco_max=30000,
+        preco_alvo=25000,
+        preco_max=preco_max,
         score_roi=score_roi,
         fator_risco=0.8,
         fator_liquidez=1.0,
         margem_aplicada=0.15,
         frete_incluso=1500,
         reforma_estimada=3000,
-        taxas_leilao=600,
+        taxas_leilao=int(preco_max * 0.08),  # taxas baseadas no lance máximo
         preco_giro=preco_giro,
         justificativa="Laudo leve, FIPE R$30k, giro estimado 30 dias.",
         criado_em=datetime.utcnow(),
@@ -88,20 +89,23 @@ def _exporter() -> SheetsExporter:
 # Testes
 # ---------------------------------------------------------------------------
 
-class TestCalcularRoiPct:
+class TestCalcularRoiNoMaximo:
     def test_roi_positivo(self):
-        av = _avaliacao(preco_giro=35000)
+        """ROI se ganhar no lance máximo: (giro - capital_max) / capital_max."""
+        av = _avaliacao(preco_giro=35000, preco_max=25000)
         av.reforma_estimada = 3000
         av.frete_incluso = 1500
-        av.taxas_leilao = 600
-        # lucro = 35000 - 20000 - 3000 - 1500 - 600 = 9900
-        # roi = 9900 / 20000 * 100 = 49.5
-        roi = _calcular_roi_pct(av, lance_atual=20000)
-        assert roi == pytest.approx(49.5)
+        av.taxas_leilao = int(25000 * 0.08)  # 2000
+        # capital = 25000 + 3000 + 1500 + 2000 = 31500
+        # lucro = 35000 - 31500 = 3500
+        # roi = 3500 / 31500 * 100 ≈ 11.1
+        roi = _calcular_roi_no_maximo(av)
+        assert roi == pytest.approx(11.1, abs=0.5)
 
-    def test_lance_zero_retorna_zero(self):
+    def test_preco_max_zero_retorna_zero(self):
         av = _avaliacao()
-        assert _calcular_roi_pct(av, lance_atual=0) == 0.0
+        av.preco_max = 0
+        assert _calcular_roi_no_maximo(av) == 0.0
 
 
 class TestSheetsExporterQuery:
@@ -133,14 +137,16 @@ class TestSheetsExporterQuery:
         call_args = mock_ws.update.call_args[0][0]
         assert call_args[0] == HEADER
 
-    def test_exportar_ordena_por_score_roi(self):
-        """Lote com score_roi maior deve aparecer no topo (rank 1)."""
+    def test_exportar_viaveis_aparecem_primeiro(self):
+        """Lotes com preco_max > lance_atual (viáveis) devem vir antes dos inviáveis."""
         engine = _engine_mem()
         with Session(engine) as session:
+            # L001: lance=20000, preco_max=30000 → viável (folga +10k)
             session.add(_lote("L001", lance_atual=20000))
+            session.add(_avaliacao("L001", score_roi=0.1, preco_max=30000))
+            # L002: lance=50000, preco_max=30000 → inviável (caro demais)
             session.add(_lote("L002", modelo="Compass", lance_atual=50000))
-            session.add(_avaliacao("L001", score_roi=0.2))
-            session.add(_avaliacao("L002", score_roi=0.8))
+            session.add(_avaliacao("L002", score_roi=0.8, preco_max=30000))
             session.commit()
 
         mock_ws = MagicMock()
@@ -156,11 +162,13 @@ class TestSheetsExporterQuery:
 
         rows = mock_ws.update.call_args[0][0]
         # row[0] = header, row[1] = rank 1, row[2] = rank 2
-        # Rank 1 deve ser L002 (score 0.8)
-        assert rows[1][1] == "L002"  # coluna Lote ID
-        assert rows[1][0] == 1       # rank
-        assert rows[2][1] == "L001"
-        assert rows[2][0] == 2
+        idx_lote_id = HEADER.index("Lote ID")
+        idx_situacao = HEADER.index("Situação")
+        # Rank 1 deve ser L001 (viável), rank 2 deve ser L002 (inviável)
+        assert rows[1][idx_lote_id] == "L001"
+        assert "Viável" in rows[1][idx_situacao]
+        assert rows[2][idx_lote_id] == "L002"
+        assert "Caro" in rows[2][idx_situacao]
 
     def test_exportar_sem_laudo_nao_quebra(self):
         """LEFT JOIN — lote sem laudo associado deve ser exportado com '—' nos campos do laudo."""
@@ -215,3 +223,52 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args[0][0]
         assert len(rows) == 1
         assert rows[0] == HEADER
+
+    def test_exportar_situacao_viavel_vs_caro(self):
+        """Coluna Situação deve refletir preco_max vs lance_atual corretamente."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=25000))  # lance < preco_max (30k) → viável
+            session.add(_avaliacao("L001", preco_max=30000))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args[0][0]
+        idx_situacao = HEADER.index("Situação")
+        assert "Viável" in rows[1][idx_situacao]
+
+    def test_exportar_roi_baseado_no_lance_maximo(self):
+        """ROI deve ser calculado sobre o lance máximo, não sobre lance_atual."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20000))
+            av = _avaliacao("L001", preco_giro=35000, preco_max=25000)
+            session.add(av)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args[0][0]
+        idx_roi = HEADER.index("ROI se pagar o máximo (%)")
+        roi_val = rows[1][idx_roi]
+        # ROI ≈ 10-12% (baseado no lance máximo, não no lance atual de 20k)
+        assert 5 < roi_val < 20

@@ -149,9 +149,9 @@ def test_fallback_sem_similares(fipe_responses, in_memory_session):
         session=in_memory_session,
     )
     assert sinal.fipe == 30876
-    # FIPE × 0.90 e × 0.78
-    assert sinal.webmotors_mediana == round(30876 * 0.90)
-    assert sinal.webmotors_p25 == round(30876 * 0.78)
+    # FIPE × 0.93 e × 0.88 (fallback calibrado para mercado brasileiro)
+    assert sinal.webmotors_mediana == round(30876 * 0.93)
+    assert sinal.webmotors_p25 == round(30876 * 0.88)
     assert sinal.n_anuncios_competidores == 0
     # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → baseline hatch 25
     assert sinal.dias_giro_estimado == 25

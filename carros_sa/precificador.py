@@ -101,13 +101,14 @@ def precificar(
     Não decide se lance atual é aceitável — só retorna o target. Orquestrador
     compara `lote.lance_atual` vs `avaliacao.preco_alvo` pra descartar.
     """
-    # 1. Preço de venda âncora — duas fontes independentes, mais o consolidado.
-    #    FIPE: sempre presente; desconta 5% pra aproximar de atacado.
-    #    Tabela Auto Avaliar: presente quando scraper pegou "ULTIMA AVALIAÇÃO".
-    preco_giro_fipe = min(int(mercado.fipe * 0.95), mercado.webmotors_p25)
+    # 1. Preço de venda âncora — usamos a mediana de mercado como estimativa de
+    #    revenda (usuário confirmou que vende próximo da FIPE; mediana fallback=97%).
+    #    Quando Webmotors (workstream B) chegar, webmotors_mediana terá dado real.
+    #    Auto Avaliar ref: preço de referência da própria plataforma quando disponível.
+    preco_giro_fipe = int(mercado.webmotors_mediana)
     preco_giro_aa: Optional[int] = None
     if mercado.auto_avaliar_ref is not None:
-        preco_giro_aa = min(mercado.auto_avaliar_ref, mercado.webmotors_p25)
+        preco_giro_aa = min(mercado.auto_avaliar_ref, mercado.webmotors_mediana)
     # Consolidado = o mais conservador entre os dois (mais baixo preço de giro
     # => preço-alvo de lance também mais baixo => decisão mais cautelosa).
     preco_giro = min(preco_giro_fipe, preco_giro_aa) if preco_giro_aa is not None else preco_giro_fipe

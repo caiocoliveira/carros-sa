@@ -167,7 +167,8 @@ def test_gol_2015_em_uberlandia_sem_frete(
     av = precificar(lote_local, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
     # Checks:
-    assert av.preco_giro == 24_000                # min(28000*0.95=26600, 24000) = 24000
+    # preco_giro = webmotors_mediana = 25_000 (fixture); AA ausente
+    assert av.preco_giro == 25_000
     assert av.frete_incluso == 0
     assert av.reforma_estimada == 3_500
 
@@ -180,11 +181,11 @@ def test_gol_2015_em_uberlandia_sem_frete(
     assert empresa.custo_op_fixo == 2_523
 
     # Margem: fator_risco ≈ 1.295, fator_liquidez ≈ 1.431
-    # margem_aplicada ≈ 0.25 * 1.295 * 1.431 ≈ 0.4633
-    # margem_reais = int(24000 * 0.4633) = 11119
-    # bruto_alvo = 24000 - 3500 - 0 - 2523 - 11119 = 6858
-    # preco_alvo = (6858 - 999) / (1+0.0) = 5859
-    assert 5_500 < av.preco_alvo < 6_300
+    # margem_aplicada ≈ 0.25 * 1.295 * 1.431 ≈ 0.4632
+    # margem_reais = int(25000 * 0.4632) = 11580
+    # bruto_alvo = 25000 - 3500 - 0 - 2523 - 11580 = 7397
+    # preco_alvo = (7397 - 999) / (1+0.0) = 6398
+    assert 6_000 < av.preco_alvo < 6_700
     assert av.preco_max > av.preco_alvo           # margem mínima é menos restritiva
 
 
@@ -201,14 +202,15 @@ def test_gol_2015_em_goiania_com_frete(
 
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
-    # Comparado com Uberlândia (5859), preco_alvo cai em exatamente R$ 1400 (frete)
+    # Comparado com Uberlândia (6398), preco_alvo cai em exatamente R$ 1400 (frete)
     # pois taxa_pct=0 → não há divisor amplificando o desconto
-    # bruto_alvo = 24000 - 3500 - 1400 - 2523 - 11119 = 5458
-    # preco_alvo = (5458 - 999) / 1 = 4459
+    # bruto_alvo = 25000 - 3500 - 1400 - 2523 - 11580 = 5997
+    # preco_alvo = (5997 - 999) / 1 = 4998
     assert av.frete_incluso == 1_400
-    assert 4_000 < av.preco_alvo < 5_000
+    assert 4_700 < av.preco_alvo < 5_300
 
-    # Lance atual (R$ 15k) está bem acima do preco_max → lote caro demais
+    # Lance atual (R$ 15k) está acima do preco_max → lote caro demais
+    # preco_max = (25000 - 3500 - 1400 - 2523 - 2500 - 999) / 1 = 14078
     assert gol_2015_lote.lance_atual > av.preco_max
 
 
@@ -295,15 +297,15 @@ def test_sem_auto_avaliar_mantem_comportamento_fipe_only(
 def test_com_auto_avaliar_mais_baixo_escolhe_aa_como_giro_consolidado(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
 ):
-    """Quando Auto Avaliar dá preço MENOR que FIPE descontado, consolidado = AA."""
+    """Quando Auto Avaliar dá preço MENOR que mediana, consolidado = AA."""
     empresa = carregar_empresa("carros_uberlandia")
-    # FIPE=28k → FIPE*0.95 = 26.6k; Webmotors p25=24k. preco_giro_fipe = min(26.6k, 24k) = 24k
-    # Auto Avaliar ref = 22k → preco_giro_aa = min(22k, 24k) = 22k
-    # Consolidado = min(24k, 22k) = 22k (AA ganha).
+    # webmotors_mediana=25k → preco_giro_fipe = 25k
+    # Auto Avaliar ref = 22k → preco_giro_aa = min(22k, 25k) = 22k
+    # Consolidado = min(25k, 22k) = 22k (AA ganha).
     mercado_aa = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 22_000})
     frete = _frete("Goiânia", "GO", empresa.patio.cidade, empresa.patio.uf, 420, 1_400)
     av = precificar(gol_2015_lote, gol_2015_laudo, mercado_aa, gol_2015_reforma, frete, empresa)
-    assert av.preco_giro_fipe == 24_000
+    assert av.preco_giro_fipe == 25_000
     assert av.preco_giro_aa == 22_000
     assert av.preco_giro == 22_000  # consolidado = o menor
 
@@ -311,17 +313,17 @@ def test_com_auto_avaliar_mais_baixo_escolhe_aa_como_giro_consolidado(
 def test_com_auto_avaliar_mais_alto_consolidado_fica_no_fipe(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
 ):
-    """Se AA for mais otimista que FIPE, consolidado trava em FIPE (conservadorismo)."""
+    """Se AA for mais otimista que mediana, consolidado trava na mediana (conservadorismo)."""
     empresa = carregar_empresa("carros_uberlandia")
     mercado_aa_alto = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 30_000})
     frete = _frete("Goiânia", "GO", empresa.patio.cidade, empresa.patio.uf, 420, 1_400)
     av = precificar(gol_2015_lote, gol_2015_laudo, mercado_aa_alto, gol_2015_reforma, frete, empresa)
-    # preco_giro_aa = min(30k, 24k p25) = 24k  (p25 aperta)
-    # preco_giro_fipe = 24k também
-    # Consolidado = 24k
-    assert av.preco_giro == 24_000
-    assert av.preco_giro_fipe == 24_000
-    assert av.preco_giro_aa == 24_000
+    # webmotors_mediana=25k → preco_giro_fipe = 25k
+    # Auto Avaliar ref=30k → preco_giro_aa = min(30k, 25k mediana) = 25k (mediana aperta)
+    # Consolidado = min(25k, 25k) = 25k
+    assert av.preco_giro == 25_000
+    assert av.preco_giro_fipe == 25_000
+    assert av.preco_giro_aa == 25_000
 
 
 def test_auto_avaliar_ref_zero_rejeitado_pela_validacao():
@@ -393,8 +395,8 @@ def test_taxa_leilao_fixa_auto_avaliar_polo_track_real():
 
     # Taxa Auto Avaliar é R$ 999 fixos, não percentual
     assert av.taxas_leilao == 999
-    # Preço de giro: min(FIPE*0.95=65930, p25=66000) = 65930
-    assert av.preco_giro == 65_930
+    # Preço de giro: webmotors_mediana = 68_000 (nova fórmula; vende próximo da FIPE)
+    assert av.preco_giro == 68_000
     # Custos op = R$ 2.523 (decomposto em config)
     assert empresa.custo_op_fixo == 2_523
     # Preço-alvo deve estar abaixo de R$ 52.200 (o que o Caio pagou) — sistema

@@ -102,10 +102,11 @@ def avaliar(
         p25 = _percentil_25(sim)
         n = len(sim)
     else:
-        # sem dados de competidores: ancora em FIPE com desconto típico de
-        # varejo→atacado (mediana≈93%, p25≈88% do FIPE — estimativa calibrada
-        # em dados do mercado brasileiro; Webmotors B refinará isso).
-        mediana = int(round(fipe_valor * 0.93))
+        # sem dados de competidores: usa FIPE como referência de revenda.
+        # O usuário confirmou que vende próximo da FIPE — então mediana≈97%
+        # (margem de negociação de ~3%). p25≈88% é conservador pra ranking.
+        # Webmotors (workstream B) substituirá esses fallbacks por dados reais.
+        mediana = int(round(fipe_valor * 0.97))
         p25 = int(round(fipe_valor * 0.88))
         n = 0
 

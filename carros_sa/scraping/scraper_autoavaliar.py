@@ -76,17 +76,52 @@ _EXTRACT_CARDS_JS = """
 
 _EXTRACT_PDF_URL_JS = """
 () => {
-    // Procura link de PDF do laudo na página de detalhe
+    // 1. Links diretos <a href> — padrão mais comum
     const links = Array.from(document.querySelectorAll('a[href]'));
     for (const a of links) {
         const h = a.href || '';
-        if (h.includes('.pdf') || h.includes('laudo') || h.includes('storage.googleapis')) {
+        if (h.includes('.pdf')
+            || h.includes('doc-b2b')
+            || h.includes('storage.googleapis')
+            || (h.includes('laudo') && !h.includes('/assets/'))) {
             return h;
         }
     }
-    // Fallback: procura no texto da página
-    const m = document.body.innerText.match(/https?:\\/\\/[^\\s"']+\\.pdf/);
+    // 2. Atributos data-* ou href em <button> / <div> (Auto Avaliar às vezes usa onclick+data)
+    const candidatos = Array.from(document.querySelectorAll('[data-url], [data-href], [data-pdf]'));
+    for (const el of candidatos) {
+        const h = el.dataset.url || el.dataset.href || el.dataset.pdf || '';
+        if (h.includes('.pdf') || h.includes('doc-b2b') || h.includes('storage.googleapis')) {
+            return h;
+        }
+    }
+    // 3. iframes (modal do laudo pode renderizar dentro de um)
+    const iframes = Array.from(document.querySelectorAll('iframe[src]'));
+    for (const f of iframes) {
+        const s = f.src || '';
+        if (s.includes('.pdf') || s.includes('doc-b2b')) {
+            return s;
+        }
+    }
+    // 4. Fallback: regex no HTML inteiro (pega URLs assinadas mesmo em JS inline)
+    const html = document.documentElement.outerHTML;
+    const m = html.match(/https?:\\/\\/(?:storage\\.googleapis\\.com\\/doc-b2b|cdn-aav\\.autoavaliar\\.com\\.br)\\/[^\\s"'<>]+\\.pdf[^\\s"'<>]*/);
     return m ? m[0] : null;
+}
+"""
+
+# Abre o modal do laudo cautelar se existir — Auto Avaliar renderiza o PDF
+# via lazy load ao clicar em botão/link com texto "laudo".
+_ABRIR_MODAL_LAUDO_JS = """
+() => {
+    const alvos = Array.from(document.querySelectorAll('a, button, [role="button"], div[class*="laudo"], span[class*="laudo"]'));
+    for (const el of alvos) {
+        const txt = (el.textContent || '').toLowerCase();
+        if (txt.includes('laudo') && (txt.includes('completo') || txt.includes('cautelar') || txt.includes('ver'))) {
+            try { el.click(); return true; } catch (e) {}
+        }
+    }
+    return false;
 }
 """
 
@@ -303,12 +338,29 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
     """
     Abre página de detalhe de um lote.
     Retorna (body_text, laudo_pdf_url).
+
+    Tenta extrair `laudo_pdf_url` em duas passadas: primeiro no DOM inicial, e
+    se falhar, clica em botão/link "Ver Laudo" pra renderizar o modal lazy e
+    tenta de novo. Sem ambiguidade — a 2ª passada é best-effort, se não achar
+    ainda retorna None (pipeline cai em `_laudo_sem_pdf` que agora aproveita
+    `flags.reprovado_estrutural` quando aplicável).
     """
     await page.goto(url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(1500)
 
     body_text: str = await page.evaluate("() => document.body.innerText")
     laudo_pdf_url: Optional[str] = await page.evaluate(_EXTRACT_PDF_URL_JS)
+
+    # 2ª passada: se PDF não foi achado no DOM inicial, tenta revelar o modal
+    # do laudo (Auto Avaliar às vezes lazy-loada). Só abre o modal se valer a pena.
+    if not laudo_pdf_url:
+        try:
+            clicou = await page.evaluate(_ABRIR_MODAL_LAUDO_JS)
+            if clicou:
+                await page.wait_for_timeout(1500)
+                laudo_pdf_url = await page.evaluate(_EXTRACT_PDF_URL_JS)
+        except Exception:
+            pass
 
     return body_text, laudo_pdf_url
 

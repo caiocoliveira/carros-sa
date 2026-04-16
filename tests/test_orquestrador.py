@@ -31,11 +31,14 @@ from carros_sa.orquestrador import (
     OrquestradorResult,
     ResultadoLote,
     _calcular_frete,
+    _laudo_sem_pdf,
+    _persistir_flags_no_lote,
     _pipeline_lote,
     _upsert_avaliacao,
     _upsert_lote,
 )
-from carros_sa.models import Avaliacao
+from carros_sa.models import Avaliacao, PrecoReferenciaAA
+from carros_sa.scraping.parsers import DetalheFlags
 
 
 # ---------------------------------------------------------------------------
@@ -302,3 +305,79 @@ class TestPersistencia:
             ).first()
             assert persistida is not None
             assert persistida.preco_alvo == 18000
+
+
+# ---------------------------------------------------------------------------
+# Testes de _persistir_flags_no_lote (workstream N)
+# ---------------------------------------------------------------------------
+
+class TestPersistirFlagsNoLote:
+    def test_persiste_detalhe_e_precos_aa_no_lote(self):
+        """Flags com preço AA + FIPE% viram colunas first-class no Lote + histórico."""
+        engine = _engine()
+        with Session(engine) as session:
+            lote = _lote("L555")
+            session.add(lote)
+            session.commit()
+
+            flags = DetalheFlags(
+                specs={"ANO": "2013"},
+                status_laudo="Laudo aprovado",
+                preco_referencia_aa=31_000,
+                fipe_pct_lance_minimo=34,
+            )
+            _persistir_flags_no_lote(lote, flags, session)
+            session.commit()
+
+            atual = session.get(Lote, "L555")
+            assert atual.preco_referencia_aa == 31_000
+            assert atual.fipe_pct_lance_minimo == 34
+            assert atual.raw_json["detalhe"]["preco_referencia_aa"] == 31_000
+            # Histórico recebeu 1 entrada
+            historico = session.exec(select(PrecoReferenciaAA)).all()
+            assert len(historico) == 1
+            assert historico[0].preco == 31_000
+            assert historico[0].origem_lote_id == "L555"
+
+    def test_persiste_sem_precos_aa_nao_cria_historico(self):
+        engine = _engine()
+        with Session(engine) as session:
+            lote = _lote("L556")
+            session.add(lote)
+            session.commit()
+
+            flags = DetalheFlags(specs={}, preco_referencia_aa=None, fipe_pct_lance_minimo=None)
+            _persistir_flags_no_lote(lote, flags, session)
+            session.commit()
+
+            atual = session.get(Lote, "L556")
+            assert atual.preco_referencia_aa is None
+            assert session.exec(select(PrecoReferenciaAA)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# Testes do _laudo_sem_pdf com flags estruturais (workstream N)
+# ---------------------------------------------------------------------------
+
+class TestLaudoSemPdfComFlags:
+    def test_flags_reprovado_estrutural_promove_severidade(self):
+        """Scraper já sabe que é estrutural → marcamos sem precisar do PDF."""
+        flags = DetalheFlags(specs={}, itens_reprovados=["REPROVADO ESTRUTURAL"])
+        laudo = _laudo_sem_pdf(flags)
+        assert laudo.severidade_geral == SeveridadeAvaria.ESTRUTURAL
+        assert laudo.motor_ok is False
+        assert len(laudo.avarias) == 1
+        assert laudo.avarias[0].severidade == SeveridadeAvaria.ESTRUTURAL
+        assert laudo.confidence == 0.55  # um chão a mais que 0.5 puro
+
+    def test_flags_sem_estrutural_mantem_neutro(self):
+        flags = DetalheFlags(specs={}, status_laudo="Laudo aprovado", itens_reprovados=[])
+        laudo = _laudo_sem_pdf(flags)
+        assert laudo.severidade_geral == SeveridadeAvaria.NENHUMA
+        assert laudo.avarias == []
+        assert laudo.confidence == 0.5
+
+    def test_sem_flags_retorna_conservador(self):
+        laudo = _laudo_sem_pdf(None)
+        assert laudo.severidade_geral == SeveridadeAvaria.NENHUMA
+        assert laudo.confidence == 0.5

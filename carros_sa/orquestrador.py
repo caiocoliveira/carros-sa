@@ -179,34 +179,94 @@ def _laudo_de_textual(txt, flags=None) -> LaudoEstruturado:
 
 
 def _laudo_sem_pdf(flags=None) -> LaudoEstruturado:
-    """Laudo neutro quando não há PDF disponível.
+    """Laudo quando não há PDF disponível.
 
-    Usa informações da página de detalhe se disponíveis (flags).
-    confidence=0.5 = neutro (não pune ausência de PDF como pior caso).
+    Aproveita sinais do scraper de detalhe quando disponíveis:
+    - `reprovado_estrutural` do scraper → promove severidade pra ESTRUTURAL
+      (sem saber peça específica — o EstimadorReforma aplica o adicional
+      estrutural da empresa, suficiente pra descartar no ranking)
+    - `itens_reprovados` com menção a peças → cria Avaria explícita quando
+      possível
+    - `status_documento` → mapeia pra PENDENCIA_LEVE/GRAVE
+
+    Confidence 0.5 neutro, 0.55 se detectou sinal estrutural (sinal mais forte
+    que "não sei" mas sem cobertura visual, ainda abaixo de PDF).
     """
-    from carros_sa.scraping.parsers import DetalheFlags
+    from carros_sa.models import Avaria
 
+    avarias: list = []
+    severidade_geral = SeveridadeAvaria.NENHUMA
     documentacao = StatusDocumentacao.OK
+    confidence = 0.5
+
     if flags is not None:
+        # Documentação
         sd = (flags.status_documento or "").lower()
         if "pendente" in sd or "irregular" in sd or "débito" in sd:
             documentacao = StatusDocumentacao.PENDENCIA_LEVE
         elif "grave" in sd or "judicial" in sd or "bloqueio" in sd:
             documentacao = StatusDocumentacao.PENDENCIA_GRAVE
 
+        # Sinal estrutural do scraper → severidade ESTRUTURAL mesmo sem PDF.
+        # EstimadorReforma aplica adicional estrutural da empresa (R$ ~5k em MG)
+        # e o ranking descarta, que é o comportamento correto.
+        if getattr(flags, "reprovado_estrutural", False):
+            severidade_geral = SeveridadeAvaria.ESTRUTURAL
+            avarias.append(Avaria(
+                parte="estrutural_indefinido",
+                severidade=SeveridadeAvaria.ESTRUTURAL,
+                descricao="Scraper detectou REPROVADO ESTRUTURAL no HTML; sem PDF pra detalhar peça",
+            ))
+            confidence = 0.55
+
+    motor_ok = True and severidade_geral != SeveridadeAvaria.ESTRUTURAL
+
     return LaudoEstruturado(
-        avarias=[],
-        severidade_geral=SeveridadeAvaria.NENHUMA,
-        motor_ok=True,
+        avarias=avarias,
+        severidade_geral=severidade_geral,
+        motor_ok=motor_ok,
         documentacao=documentacao,
         categoria_veiculo=CategoriaVeiculo.OUTRO,
-        confidence=0.5,  # neutro — não sabemos, mas não assumimos pior caso
+        confidence=confidence,
     )
 
 
 # ---------------------------------------------------------------------------
 # Persistência
 # ---------------------------------------------------------------------------
+
+def _persistir_flags_no_lote(lote: Lote, flags, session: Session) -> None:
+    """Salva o resultado do parse_detalhe em `lote.raw_json["detalhe"]` e promove
+    preço-referência Auto Avaliar + % FIPE para colunas first-class do Lote.
+
+    Também alimenta o histórico `PrecoReferenciaAA` — útil pra lotes futuros
+    do mesmo modelo que caiam em cidades sem esse dado embutido.
+
+    Idempotente: reescrever sobrescreve; múltiplas coletas do mesmo lote
+    criam múltiplas linhas de histórico, o que é esperado (série temporal).
+    """
+    from carros_sa.models import PrecoReferenciaAA
+    from carros_sa.scraping.scraper_detalhe import _flags_to_dict
+
+    raw = dict(lote.raw_json or {})
+    raw["detalhe"] = _flags_to_dict(flags)
+    lote.raw_json = raw
+
+    if flags.preco_referencia_aa is not None:
+        lote.preco_referencia_aa = flags.preco_referencia_aa
+        session.add(PrecoReferenciaAA(
+            marca=lote.marca,
+            modelo=lote.modelo,
+            ano=lote.ano,
+            preco=flags.preco_referencia_aa,
+            fipe_pct_lance_minimo=flags.fipe_pct_lance_minimo,
+            origem_lote_id=lote.id,
+        ))
+    if flags.fipe_pct_lance_minimo is not None:
+        lote.fipe_pct_lance_minimo = flags.fipe_pct_lance_minimo
+
+    session.add(lote)
+
 
 def _upsert_lote(lote_raw: LoteRaw, session: Session) -> Lote:
     """Persiste ou atualiza Lote no SQLite. Retorna o objeto persistido."""
@@ -353,6 +413,12 @@ async def _pipeline_lote(
         await asyncio.sleep(random.uniform(2.0, 4.0))
         body_text, pdf_url = await coletar_detalhe(page, lote.url)
         flags = parse_detalhe(body_text, pdf_url)
+
+        # 1b. Persiste flags do detalhe + preços da Tabela Auto Avaliar no Lote.
+        # Sem isso, os campos preco_referencia_aa / fipe_pct_lance_minimo não
+        # populam e o raw_json.detalhe fica vazio — quebra reprocessamentos
+        # futuros que dependem de sinais do scraper (ex.: reprovado_estrutural).
+        _persistir_flags_no_lote(lote, flags, session)
 
         # 2. Early exit
         if flags.early_exit:

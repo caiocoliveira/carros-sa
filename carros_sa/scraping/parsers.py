@@ -32,17 +32,19 @@ def _parse_br_int(s: str) -> int:
 
 
 def _timer_para_fim_em(agora: datetime, timer: str) -> Optional[datetime]:
-    """Timer DD:HH:MM[:SS] → datetime relativo a agora."""
+    """Timer HH:MM:SS[:cs] → datetime relativo a agora.
+
+    O site mostra o tempo restante como HH:MM:SS e, em alguns cards, acrescenta
+    centésimos de segundo (ex.: '01:46:45:17'). Centésimos são descartados.
+    Implementação anterior tratava como DD:HH:MM[:SS] e gerava datetimes dias
+    ou semanas no futuro — ver gold em data/detalhes/21867780.json.
+    """
     parts = timer.split(":")
-    if len(parts) == 4:
-        d, h, m, s = parts
-    elif len(parts) == 3:
-        d, h, m = parts
-        s = "0"
-    else:
+    if len(parts) not in (3, 4):
         return None
+    h, m, s = parts[0], parts[1], parts[2]
     try:
-        delta = timedelta(days=int(d), hours=int(h), minutes=int(m), seconds=int(s))
+        delta = timedelta(hours=int(h), minutes=int(m), seconds=int(s))
         return agora + delta
     except ValueError:
         return None

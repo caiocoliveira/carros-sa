@@ -1,10 +1,10 @@
 """Testes dos parsers de Auto Avaliar, usando fixtures reais coletadas via Chrome MCP."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
-from carros_sa.scraping.parsers import parse_card_lines, parse_detalhe
+from carros_sa.scraping.parsers import _timer_para_fim_em, parse_card_lines, parse_detalhe
 
 
 # =============================================================================
@@ -65,6 +65,39 @@ def test_parse_card_fiesta_com_anuncio_destaque():
     assert lote.origem_cidade == "Uberlandia"
     assert lote.origem_uf == "MG"
     assert lote.fim_em is not None
+
+
+# =============================================================================
+# Timer do card: HH:MM:SS:cs (não DD:HH:MM:SS)
+# =============================================================================
+# Gold real: data/detalhes/21867780.json coletado 2026-04-14T22:19:00Z mostra
+# "FINALIZA EM 15/04/2026 as 16:00:00" com timer "17:40:36 :78".
+# 22:19 UTC + 17h40m36s ≈ 2026-04-15 15:59 UTC, bate com 16:00 do site.
+
+
+def test_timer_hh_mm_ss_com_centesimos_ignora_centesimos():
+    """Timer `01:46:45:17` é 1h46m45s (centésimos descartados), não 1 dia + 46h."""
+    agora = datetime(2026, 4, 16, 17, 13, 15)
+    fim = _timer_para_fim_em(agora, "01:46:45:17")
+    assert fim == agora + timedelta(hours=1, minutes=46, seconds=45)
+
+
+def test_timer_hh_mm_ss_tres_partes():
+    """Timer `17:40:36` é 17h40m36s (caso do detalhe do Haval)."""
+    agora = datetime(2026, 4, 14, 22, 19, 0)
+    fim = _timer_para_fim_em(agora, "17:40:36")
+    # 14/04 22:19 + 17h40m36s = 15/04 15:59:36 — bate com "FINALIZA EM 15/04 as 16:00"
+    assert fim == datetime(2026, 4, 15, 15, 59, 36)
+
+
+def test_timer_longo_20h_nao_vira_20_dias():
+    """`20:15:13:92` no card do Haval é 20h15m13s, não 20 dias (regressão)."""
+    agora = datetime(2026, 4, 14, 22, 0, 0)
+    fim = _timer_para_fim_em(agora, "20:15:13:92")
+    delta = fim - agora
+    # Deve estar no mesmo dia ou no dia seguinte — não uma semana+ no futuro.
+    assert delta < timedelta(days=1, hours=1)
+    assert delta >= timedelta(hours=20)
 
 
 CARD_HAVAL_SHOWROOM = [

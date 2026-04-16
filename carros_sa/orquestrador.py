@@ -60,16 +60,39 @@ _UFS_ADJACENTES_MG = {"SP", "RJ", "ES", "BA", "GO", "MS", "DF"}
 # ---------------------------------------------------------------------------
 
 def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
-    """Estima frete por heurística de UF. Usa tabela YAML da empresa."""
-    origem_uf = (lote.origem_uf or "").upper()
-    destino_uf = empresa.patio.uf.upper()
+    """Estima frete por distância haversine real (origem do lote → pátio da empresa).
 
-    if not origem_uf or origem_uf == destino_uf:
-        distancia_km = 150  # mesmo estado
-    elif origem_uf in _UFS_ADJACENTES_MG or destino_uf in _UFS_ADJACENTES_MG:
-        distancia_km = 400  # estado vizinho
-    else:
-        distancia_km = 700  # estado distante
+    Fallback pra heurística de UF quando a cidade de origem não está no dataset
+    de municípios (ex.: nome grafado de forma inusitada). Caso especial:
+    mesma cidade do pátio → distância 0 → frete 0 (comprador busca o carro).
+    """
+    from carros_sa.tools.geo import buscar_municipio, distancia_haversine_km
+
+    origem_uf = (lote.origem_uf or "").upper()
+    origem_cidade = (lote.origem_cidade or "").strip()
+    destino_uf = empresa.patio.uf.upper()
+    destino_cidade = empresa.patio.cidade
+
+    # 1. Tentativa preferencial: distância real via haversine sobre o dataset IBGE
+    distancia_km: Optional[int] = None
+    if origem_cidade and origem_uf:
+        origem_m = buscar_municipio(origem_cidade, origem_uf)
+        destino_m = buscar_municipio(destino_cidade, destino_uf)
+        if origem_m and destino_m:
+            d = distancia_haversine_km(
+                origem_m.latitude, origem_m.longitude,
+                destino_m.latitude, destino_m.longitude,
+            )
+            distancia_km = int(round(d))
+
+    # 2. Fallback: heurística de UF (como era antes)
+    if distancia_km is None:
+        if not origem_uf or origem_uf == destino_uf:
+            distancia_km = 150
+        elif origem_uf in _UFS_ADJACENTES_MG or destino_uf in _UFS_ADJACENTES_MG:
+            distancia_km = 400
+        else:
+            distancia_km = 700
 
     # Categoria do veículo — usa OUTRO se não tiver laudo ainda
     categoria = CategoriaVeiculo.OUTRO

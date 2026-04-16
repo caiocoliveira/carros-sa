@@ -90,6 +90,23 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Cobertura:** 6 testes em [`tests/test_orquestrador.py`](tests/test_orquestrador.py) (frete por UF, early_exit, lote já avaliado, persistência).
 - **Limitações:** Seletores JS do scraper precisam ser ajustados na primeira execução real (DOM pode variar). Login deve usar `AUTOAVALIAR_EMAIL` + `AUTOAVALIAR_PASSWORD` no `.env`.
 
+### M — Expansão geográfica por raio ✅
+- **Branch:** `claude/adoring-sinoussi`
+- **Arquivos:**
+  - [`carros_sa/tools/geo.py`](carros_sa/tools/geo.py) — `Municipio`, `carregar_municipios`, `distancia_haversine_km`, `buscar_municipio`, `cidades_no_raio`
+  - [`data/geo/municipios.csv`](data/geo/municipios.csv) — 5570 municípios BR (IBGE, MIT, 390KB) com lat/lon, cacheado em memória
+  - [`data/geo/estados.csv`](data/geo/estados.csv) — 27 UFs com códigos IBGE
+  - [`carros_sa/tenancy.py`](carros_sa/tenancy.py) — `EmpresaConfig.raio_operacao_km` + `cidades_de_busca()`, `frete_para(0)` retorna R$ 0
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_calcular_frete` usa distância haversine real (fallback heurístico UF se cidade fora do dataset)
+  - [`carros_sa/scraping/scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) — `coletar_listagem` itera cidades do raio, deduplica por `loteId`
+  - [`config/empresas/carros_uberlandia.yaml`](config/empresas/carros_uberlandia.yaml) — `raio_operacao_km: 150`
+- **Como funciona:** A empresa declara um raio operacional no YAML (150km em Uberlândia → 61 cidades, incluindo Triângulo Mineiro + fronteiras de GO e SP). O scraper itera cada cidade do raio fazendo 1 request à listagem do Auto Avaliar e deduplica lotes que aparecem em múltiplas cidades. Entre requests, sleep aleatório 0.8–1.5s. No precificador, o frete usa distância haversine real entre origem do lote e pátio, não mais a heurística grosseira de UF. **Lote na mesma cidade do pátio → frete R$ 0** (comprador busca pessoalmente), conforme briefing do usuário.
+- **Cobertura:** 12 testes novos — 11 em [`tests/test_geo.py`](tests/test_geo.py) (haversine, busca por nome/UF, raio com ordenação por distância, cross-UF), +1 em [`tests/test_precificador.py`](tests/test_precificador.py) (frete 0km = R$ 0), e atualização de 4 testes em [`tests/test_orquestrador.py`](tests/test_orquestrador.py) pra validar distância real em vez da heurística antiga.
+- **Limitações conhecidas:**
+  - 1 request por cidade = 61 requests por run no raio padrão. Auto Avaliar pode rate-limitar; se necessário, reduzir `raio_operacao_km` ou adicionar backoff exponencial.
+  - Haversine é linha reta — rodovia no Brasil costuma ser ~20% maior. Tabela de frete já absorve isso nas faixas largas (0-300km, 300-600km).
+  - Cidades com grafia "esquisita" (ex.: "São Gotardo" vs "Sao Gotardo") são normalizadas (lowercase + sem acento), mas se o Auto Avaliar usar nome que não bate com o IBGE, o frete cai no fallback heurístico UF.
+
 ### K — Referência de preço Tabela Auto Avaliar ✅
 - **Branch:** `claude/adoring-sinoussi`
 - **Arquivos:**

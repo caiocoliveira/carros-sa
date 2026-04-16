@@ -8,6 +8,11 @@ margem:
   base: 0.18                    # 18% alvo
   minima_absoluta: 0.10         # nunca abaixo disso
 raio_max_km: 1000
+# Raio operacional: cidades dentro desse raio (haversine a partir do pátio)
+# entram na busca de lotes. 150km cobre Triângulo Mineiro + cidades fronteiriças
+# de GO e SP. Cada cidade gera 1 request ao Auto Avaliar na coleta de listagem.
+# Frete é 0 pra lotes na mesma cidade do pátio (o próprio comprador busca).
+raio_operacao_km: 150
 fator_risco_bounds: [1.0, 2.0]
 fator_liquidez_bounds: [1.0, 1.8]
 tabela_frete:                   # R$ por faixa_km × categoria

@@ -47,7 +47,7 @@ HEADER = [
     "Frete (R$)",
     "Justificativa",
     "URL",
-    "Atualizado em",
+    "Coletado em",
 ]
 
 
@@ -81,11 +81,12 @@ class SheetsExporter:
     def exportar(self, empresa_id: str, session: Session) -> int:
         """Lê SQLite, escreve aba <empresa_id> + aba Glossário na Sheet. Retorna n linhas exportadas."""
         rows = self._query(empresa_id, session)
-        # Ordenação: viáveis primeiro (preco_max > lance_atual), dentro de cada grupo
-        # ordena por folga de lance decrescente (mais margem de negociação primeiro)
+        # Ordenação: encerrados vão pro final (não importa mais), dentro dos ativos
+        # viáveis vêm antes dos inviáveis, e a folga de lance desempata.
         rows_sorted = sorted(
             rows,
             key=lambda r: (
+                1 if r["encerrado"] else 0,     # encerrados depois de tudo
                 0 if r["viavel"] else 1,        # viáveis antes dos inviáveis
                 -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
             ),
@@ -100,6 +101,7 @@ class SheetsExporter:
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
         ).all()
 
+        agora = datetime.now()
         rows: List[dict] = []
         for av in avaliacoes:
             lote = session.get(Lote, av.lote_id)
@@ -119,6 +121,23 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import roi_anualizado
             roi_max = _calcular_roi_no_maximo(av)
             roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+
+            # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
+            # Dupla checagem pra cobrir os dois vetores (snapshot velho + detecção
+            # direta no HTML da próxima coleta).
+            detalhe_raw = (lote.raw_json or {}).get("detalhe") or {}
+            encerrado_por_badge = bool(detalhe_raw.get("encerrado"))
+            encerrado_por_timer = (
+                lote.fim_em is not None and lote.fim_em < agora
+            )
+            encerrado = encerrado_por_badge or encerrado_por_timer
+
+            scraped_at_str = "—"
+            if lote.scraped_at is not None:
+                try:
+                    scraped_at_str = lote.scraped_at.strftime("%d/%m/%Y %H:%M")
+                except Exception:
+                    scraped_at_str = str(lote.scraped_at)
 
             rows.append({
                 "lote_id": av.lote_id,
@@ -143,11 +162,13 @@ class SheetsExporter:
                 "justificativa": av.justificativa,
                 "url": lote.url,
                 "viavel": viavel,
+                "encerrado": encerrado,
+                "scraped_at": scraped_at_str,
             })
         return rows
 
     def _write_sheet(self, empresa_id: str, rows: List[dict]) -> None:
-        """Abre/cria aba, limpa, escreve header + rows."""
+        """Abre/cria aba, limpa, escreve timestamp global + header + rows."""
         gc = self._client()
         sh = gc.open_by_key(self._spreadsheet_id)
 
@@ -157,11 +178,22 @@ class SheetsExporter:
         except Exception:
             ws = sh.add_worksheet(title=empresa_id, rows=500, cols=len(HEADER))
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        ts = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        sheet_rows = [HEADER]
+        # Linha 1: banner global "Última atualização" — deixa óbvio o quão fresco
+        # está o snapshot. Preenche a primeira célula e mantém o resto vazio pra
+        # não poluir o layout; o freeze(rows=2) congela tanto o banner quanto o
+        # header de colunas.
+        banner = [f"Última atualização da planilha: {ts}"] + [""] * (len(HEADER) - 1)
+
+        sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):
-            situacao = "✓ Viável" if r["viavel"] else "✗ Caro demais"
+            if r["encerrado"]:
+                situacao = "⚠ Encerrado"
+            elif r["viavel"]:
+                situacao = "✓ Viável"
+            else:
+                situacao = "✗ Caro demais"
             # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
             # em vez da URL crua longa. Sheets interpreta com USER_ENTERED.
             if r["url"]:
@@ -193,14 +225,14 @@ class SheetsExporter:
                 r["frete"],
                 r["justificativa"],
                 url_cell,
-                ts,
+                r["scraped_at"],
             ])
 
         ws.clear()
         ws.update(sheet_rows, value_input_option="USER_ENTERED")
 
-        # Congela linha do header
-        ws.freeze(rows=1)
+        # Congela banner (linha 1) + header (linha 2)
+        ws.freeze(rows=2)
 
     def _write_glossario_sheet(self) -> None:
         """Aba fixa 'Glossário' com origem, cálculo e racional de cada coluna da triagem.
@@ -228,8 +260,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais",
-                "Filtro de sanidade: se o mínimo já passou do nosso teto, não há lance a fazer",
+                "⚠ Encerrado se o leilão acabou (badge ARREMATADO no anúncio OU Fim do Leilão já passou); senão ✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais",
+                "Filtro de sanidade: lotes encerrados vão pro final da lista; dentro dos ativos, se o mínimo já passou do nosso teto não há lance a fazer",
             ],
             [
                 "Lote ID",
@@ -304,6 +336,18 @@ class SheetsExporter:
                 "Retorno PERCENTUAL no pior cenário aceitável (se ganhar o lote pagando exatamente o teto)",
             ],
             [
+                "Dias até venda (est.)",
+                "CalibracaoGiro / AvaliacaoLote.dias_giro_estimado",
+                "Média histórica de dias_até_venda por categoria do veículo, calibrada a partir da tabela Arrematado. Fallback pra prior hardcoded quando há <3 vendas da categoria.",
+                "Input do ROI anualizado — quantos dias em média demora pra girar esse tipo de carro na empresa",
+            ],
+            [
+                "ROI anualizado (%)",
+                "Derivado",
+                "(1 + ROI)^(365/dias_giro) − 1, com floor de 30 dias. Usa 90d se dias_giro_estimado é NULL.",
+                "Normaliza ROI absoluto pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+            ],
+            [
                 "Fator Risco",
                 "Precificador",
                 "bounds.lo + (bounds.hi − bounds.lo) × peso, onde peso = severidade_laudo + documentação + motor + (1 − confidence laudo)",
@@ -346,10 +390,10 @@ class SheetsExporter:
                 "1 clique pra abrir o anúncio original e fazer checagens manuais ou lance",
             ],
             [
-                "Atualizado em",
-                "Derivado",
-                "Timestamp local do momento em que a aba foi reescrita",
-                "Saber se os números são frescos (pipeline diário roda às 7h)",
+                "Coletado em",
+                "Lote.scraped_at",
+                "Timestamp do momento em que esse lote foi raspado do Auto Avaliar (por linha)",
+                "Saber a idade específica daquela linha — lote raspado hoje é confiável, lote raspado há 3 dias pode já ter sido arrematado (veja também o banner de Última atualização no topo da aba)",
             ],
         ]
 

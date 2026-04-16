@@ -246,6 +246,38 @@ def test_processar_detalhe_body_sem_marcadores_nao_historiza(db, tmp_path):
     assert historico == []
 
 
+def test_processar_detalhe_lote_arrematado_pula_pdf_e_persiste_flag(db, tmp_path):
+    """Body com badge 'ARREMATADO' → early_exit='leilao_encerrado', raw_json.detalhe.encerrado=True, PDF não baixado."""
+    body_arrematado = (
+        "Ford Fiesta 1.6\n"
+        "ARREMATADO\n"
+        "KM\n171.053\n"
+        "Laudo aprovado\n"
+        "APROVADO ESTRUTURAL\n"
+        "IPVA 2026 pago\n"
+    )
+    chamadas, stub = _stub_downloader_factory()
+
+    with get_session(db) as s:
+        resultado = processar_detalhe(
+            lote_id="21854782",
+            body_text=body_arrematado,
+            laudo_pdf_url=LAUDO_PDF_URL,
+            session=s,
+            pdf_dir=tmp_path / "laudos",
+            downloader=stub,
+        )
+
+    assert resultado.early_exit == "leilao_encerrado"
+    assert resultado.pdf_baixado is False
+    assert chamadas == [], "Downloader não pode ser chamado quando leilão encerrou"
+
+    with get_session(db) as s:
+        lote = s.get(Lote, "21854782")
+    assert lote.raw_json["detalhe"]["encerrado"] is True
+    assert lote.raw_json["detalhe"]["early_exit"] == "leilao_encerrado"
+
+
 def test_processar_detalhe_lote_inexistente_falha(db, tmp_path):
     with get_session(db) as s:
         with pytest.raises(ValueError, match="não existe"):

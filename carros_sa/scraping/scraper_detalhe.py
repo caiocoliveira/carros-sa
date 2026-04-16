@@ -66,6 +66,7 @@ def _flags_to_dict(flags: DetalheFlags) -> dict:
         "fipe_pct_lance_minimo": flags.fipe_pct_lance_minimo,
         "reprovado_estrutural": flags.reprovado_estrutural,
         "laudo_aprovado": flags.laudo_aprovado,
+        "encerrado": flags.encerrado,
         "early_exit": flags.early_exit,
     }
 

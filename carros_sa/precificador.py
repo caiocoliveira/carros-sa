@@ -123,24 +123,26 @@ def precificar(
     # 4. Custos fixos (exceto taxas, calculadas abaixo sobre o lance vencedor)
     frete_incluso = frete.frete_estimado
     custo_op = empresa.custo_op_fixo
-    taxa_leilao = empresa.taxa_leilao_pct
+    taxa_leilao_pct = empresa.taxa_leilao_pct
+    taxa_leilao_fixa = empresa.taxa_leilao_fixa
 
     # 5. Preço máximo (lance máximo aceitável) — solução algébrica.
-    #    A taxa do leilão é cobrada sobre o lance vencedor (nosso bid),
-    #    não sobre o lance atual do momento.
+    #    A taxa do leilão pode ter 2 componentes:
+    #      - `taxa_pct`  cobrada como % do lance vencedor (nosso bid)
+    #      - `taxa_fixa` R$ fixo independente do lance (ex.: R$ 999 do Auto Avaliar)
     #
-    #    Equação:  bid + bid*taxa = preco_giro - reforma - frete - custo_op - margem
-    #              bid * (1 + taxa) = bruto
-    #              bid = bruto / (1 + taxa)
+    #    Equação:  bid + bid*pct + fixa = preco_giro - reforma - frete - custo_op - margem
+    #              bid * (1 + pct) = bruto - fixa
+    #              bid = (bruto - fixa) / (1 + pct)
     margem_reais_min = int(preco_giro * empresa.margem.minima_absoluta)
     bruto_max = preco_giro - reforma.custo_total - frete_incluso - custo_op - margem_reais_min
-    preco_max = int(max(bruto_max, 0) / (1 + taxa_leilao))
-    taxas_leilao_max = int(preco_max * taxa_leilao)
+    preco_max = int(max(bruto_max - taxa_leilao_fixa, 0) / (1 + taxa_leilao_pct))
+    taxas_leilao_max = int(preco_max * taxa_leilao_pct) + taxa_leilao_fixa
 
     # 6. Preço-alvo de lance (margem calculada = mais exigente que a mínima)
     margem_reais = int(preco_giro * margem_aplicada)
     bruto_alvo = preco_giro - reforma.custo_total - frete_incluso - custo_op - margem_reais
-    preco_alvo = int(max(bruto_alvo, 0) / (1 + taxa_leilao))
+    preco_alvo = int(max(bruto_alvo - taxa_leilao_fixa, 0) / (1 + taxa_leilao_pct))
 
     # 7. Score ROI — retorno % se ganhar pelo lance máximo (pior caso aceitável).
     #    É o ROI mínimo garantido se pagarmos o teto.
@@ -149,12 +151,18 @@ def precificar(
     score_roi = retorno_max / capital_max
 
     aa_txt = f" AA_ref={mercado.auto_avaliar_ref}" if mercado.auto_avaliar_ref else ""
+    if taxa_leilao_fixa and taxa_leilao_pct:
+        taxa_desc = f"{taxa_leilao_pct:.0%}+R${taxa_leilao_fixa}"
+    elif taxa_leilao_fixa:
+        taxa_desc = f"R${taxa_leilao_fixa} fixo"
+    else:
+        taxa_desc = f"{taxa_leilao_pct:.0%} do lance max"
     justificativa = (
         f"preco_giro=R${preco_giro} (fipe={preco_giro_fipe}"
         f"{f', aa={preco_giro_aa}' if preco_giro_aa is not None else ''}) "
         f"(FIPE={mercado.fipe}{aa_txt}, WM_p25={mercado.webmotors_p25}) "
         f"reforma=R${reforma.custo_total} frete=R${frete_incluso} "
-        f"taxas≈R${taxas_leilao_max} (8% do lance max) op=R${custo_op} "
+        f"taxas≈R${taxas_leilao_max} ({taxa_desc}) op=R${custo_op} "
         f"margem={margem_aplicada:.1%} (risco={fator_risco:.2f}, liq={fator_liquidez:.2f})"
     )
 

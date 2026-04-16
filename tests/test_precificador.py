@@ -153,7 +153,11 @@ def test_fator_liquidez_mercado_vazio_e_rapido(gol_2015_mercado):
 def test_gol_2015_em_uberlandia_sem_frete(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
 ):
-    """Mesmo lote, mas simulando que o leilão é em Uberlândia (frete 0)."""
+    """Mesmo lote, mas simulando que o leilão é em Uberlândia (frete 0).
+
+    Após calibração (Bloco A): margem.base 0.25, custo_op_fixo 2523 (decomposto),
+    taxa_leilao_pct 0.0 + taxa_leilao_fixa 999 (Auto Avaliar).
+    """
     empresa = carregar_empresa("carros_uberlandia")
     lote_local = gol_2015_lote.model_copy(update={
         "origem_cidade": "Uberlândia", "origem_uf": "MG",
@@ -167,16 +171,20 @@ def test_gol_2015_em_uberlandia_sem_frete(
     assert av.frete_incluso == 0
     assert av.reforma_estimada == 3_500
 
-    # Taxas agora calculadas sobre o lance máximo (nosso bid), não sobre lance_atual
-    # taxas_leilao = preco_max * 8%
-    assert av.taxas_leilao == int(av.preco_max * 0.08)
+    # Auto Avaliar = R$ 999 fixo, independente do lance vencedor (não 8%)
+    assert av.taxas_leilao == 999
+    assert empresa.taxa_leilao_fixa == 999
+    assert empresa.taxa_leilao_pct == 0.0
 
-    # Margem: fator_risco ≈ 1.0 + (2.0-1.0) * (0.25 + 0 + 0 + 0.3*0.15) = 1.0 + 0.295 = 1.295
-    # fator_liquidez ≈ 1.0 + (1.8-1.0) * ((80/100 + 25/90)/2) = 1.0 + 0.8 * 0.539 ≈ 1.431
-    # margem ≈ 0.18 * 1.295 * 1.431 ≈ 0.3336
-    # bruto_alvo = 24000 - 3500 - 0 - 500 - 8006 = 11994
-    # preco_alvo = 11994 / 1.08 ≈ 11106
-    assert 10_500 < av.preco_alvo < 12_500
+    # Custo op decomposto soma R$ 2.523 (380+450+1500+120+73)
+    assert empresa.custo_op_fixo == 2_523
+
+    # Margem: fator_risco ≈ 1.295, fator_liquidez ≈ 1.431
+    # margem_aplicada ≈ 0.25 * 1.295 * 1.431 ≈ 0.4633
+    # margem_reais = int(24000 * 0.4633) = 11119
+    # bruto_alvo = 24000 - 3500 - 0 - 2523 - 11119 = 6858
+    # preco_alvo = (6858 - 999) / (1+0.0) = 5859
+    assert 5_500 < av.preco_alvo < 6_300
     assert av.preco_max > av.preco_alvo           # margem mínima é menos restritiva
 
 
@@ -187,14 +195,18 @@ def test_gol_2015_em_uberlandia_sem_frete(
 def test_gol_2015_em_goiania_com_frete(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
 ):
+    """Após calibração: frete R$ 1400 derruba preco_alvo em ~1400 (taxa pct = 0)."""
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
 
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
-    # Comparado com Uberlândia, preco_alvo deve cair em ~R$ 1400/1.08 ≈ R$1296 (o frete)
+    # Comparado com Uberlândia (5859), preco_alvo cai em exatamente R$ 1400 (frete)
+    # pois taxa_pct=0 → não há divisor amplificando o desconto
+    # bruto_alvo = 24000 - 3500 - 1400 - 2523 - 11119 = 5458
+    # preco_alvo = (5458 - 999) / 1 = 4459
     assert av.frete_incluso == 1_400
-    assert 9_000 < av.preco_alvo < 12_000
+    assert 4_000 < av.preco_alvo < 5_000
 
     # Lance atual (R$ 15k) está bem acima do preco_max → lote caro demais
     assert gol_2015_lote.lance_atual > av.preco_max
@@ -208,9 +220,10 @@ def test_multi_empresa_mesmo_lote_rankings_divergem(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
 ):
     """Mesmo Gol em Goiânia deve ter preco_alvo MAIS BAIXO pra empresa_fake_sp:
-    - Margem base 22% (vs 18% de Uberlândia) → exige mais desconto
+    - Margem base 30% (vs 25% de Uberlândia) → exige mais desconto
     - Pátio em SP está mais longe de Goiânia que Uberlândia (frete maior)
-    - custo_op_fixo mais alto
+    - taxa_leilao_pct 8% (vs 0% de Uberlândia, que usa fixa de 999)
+    - bounds de risco/liquidez mais largos (operação mais exigente)
     """
     empresa_uber = carregar_empresa("carros_uberlandia")
     empresa_sp = carregar_empresa("empresa_fake_sp")
@@ -322,3 +335,132 @@ def test_auto_avaliar_ref_zero_rejeitado_pela_validacao():
             dias_giro_estimado=25,
             auto_avaliar_ref=0,
         )
+
+
+# =============================================================================
+# Bloco A — Calibração com dados reais do operador (Polo Track 2024)
+# =============================================================================
+
+def test_taxa_leilao_fixa_auto_avaliar_polo_track_real():
+    """Gold do Polo Track 2024 real comprado pelo Caio em 2025-11.
+
+    Dados do acerto de contas:
+      - Compra: R$ 52.200 (Auto Avaliar, Uberlândia, mesma cidade do pátio)
+      - FIPE: R$ 69.400 / vendido por R$ 69.400 (FIPE cheia)
+      - Custos não-veículo: R$ 6.235 (incluso R$ 1.500 não-recorrente de chave)
+      - Recorrente real: R$ 4.735 (despachante 380 + cegonha 1200 + marketing 1513
+        + higienização 450 + laudo 120 + combustível 73 + AA 999)
+      - Reforma: zero (Polo novo, sem avaria)
+
+    O sistema deve sugerir um preço-alvo coerente com a realidade — a R$ 52.200
+    pago, sobra ~R$ 17.200 de margem bruta = 24,8% sobre venda, dentro do alvo
+    calibrado de 25%.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+
+    # Mesma cidade → frete 0 (comprador busca pessoalmente, conforme tenancy)
+    lote_polo = LoteRaw(
+        lote_id="AA-POLO-2024",
+        leilao="auto_arremate",
+        url="https://autoarremate.com.br/lotes/polo",
+        marca="VW",
+        modelo="Polo Track",
+        ano=2024,
+        km=80_000,
+        lance_atual=50_000,
+        origem_cidade="Uberlândia",
+        origem_uf="MG",
+    )
+    laudo_polo = LaudoEstruturado(
+        avarias=[],
+        severidade_geral=SeveridadeAvaria.NENHUMA,
+        motor_ok=True,
+        documentacao=StatusDocumentacao.OK,
+        categoria_veiculo=CategoriaVeiculo.HATCH,
+        confidence=0.95,
+    )
+    mercado_polo = SinalMercado(
+        fipe=69_400,
+        webmotors_mediana=68_000,
+        webmotors_p25=66_000,
+        n_anuncios_competidores=20,
+        dias_giro_estimado=30,
+    )
+    reforma_zero = CustoReforma(itens=[], custo_total=0, range_min=0, range_max=0)
+    frete_zero = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    av = precificar(lote_polo, laudo_polo, mercado_polo, reforma_zero, frete_zero, empresa)
+
+    # Taxa Auto Avaliar é R$ 999 fixos, não percentual
+    assert av.taxas_leilao == 999
+    # Preço de giro: min(FIPE*0.95=65930, p25=66000) = 65930
+    assert av.preco_giro == 65_930
+    # Custos op = R$ 2.523 (decomposto em config)
+    assert empresa.custo_op_fixo == 2_523
+    # Preço-alvo deve estar abaixo de R$ 52.200 (o que o Caio pagou) — sistema
+    # exige margem maior que a operação real, então alvo conservador < pago real
+    assert av.preco_alvo < 52_200
+    # Mas razoável (não absurdo) — pelo menos 30% do preco_giro
+    assert av.preco_alvo > 20_000
+
+
+def test_taxa_leilao_pct_e_fixa_combinadas(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
+):
+    """Empresa com 2% pct + R$ 200 fixos (leilão hipotético misto).
+
+    Verifica que a fórmula soma ambos: taxas = preco_max*0.02 + 200.
+    """
+    from carros_sa.tenancy import EmpresaConfig, MargemConfig, PatioConfig
+
+    empresa_mista = EmpresaConfig(
+        empresa_id="teste_misto",
+        nome="Teste Taxa Mista",
+        patio=PatioConfig(cidade="Uberlândia", uf="MG"),
+        margem=MargemConfig(base=0.20, minima_absoluta=0.10),
+        tabela_frete={"0-300": {"hatch": 800, "sedan": 800, "suv": 1200,
+                                "utilitario": 1500, "picape": 1500, "outro": 1200}},
+        categorias_aceitas=["hatch", "sedan", "suv", "picape"],
+        taxa_leilao_pct=0.02,
+        taxa_leilao_fixa=200,
+        custo_op_fixo=500,
+    )
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa_mista)
+
+    # taxas = preco_max * 0.02 + 200
+    assert av.taxas_leilao == int(av.preco_max * 0.02) + 200
+
+
+def test_custos_op_decompostos_somam_total():
+    """CustosOperacionais.total = soma de todos os componentes."""
+    from carros_sa.tenancy import CustosOperacionais
+
+    c = CustosOperacionais(
+        despachante=380,
+        higienizacao=450,
+        marketing_medio=1500,
+        laudo_cautelar=120,
+        combustivel=73,
+        outros=100,
+    )
+    assert c.total == 2_623
+
+    # Vazio = zero
+    assert CustosOperacionais().total == 0
+
+
+def test_yaml_antigo_so_custo_op_fixo_funciona():
+    """empresa_fake_sp.yaml ainda usa formato legado (sem custos_operacionais).
+
+    Garante retrocompat: int agregado funciona sem o decomposto novo.
+    """
+    empresa_sp = carregar_empresa("empresa_fake_sp")
+    # SP YAML não tem `custos_operacionais` — fica None
+    assert empresa_sp.custos_operacionais is None
+    # custo_op_fixo lido direto do int legado
+    assert empresa_sp.custo_op_fixo == 650
+    # taxa_leilao_fixa default 0 (não tem no YAML legado)
+    assert empresa_sp.taxa_leilao_fixa == 0
+    assert empresa_sp.taxa_leilao_pct == 0.08

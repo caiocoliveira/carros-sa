@@ -4,8 +4,11 @@ patio:
   cidade: "Uberlândia"
   uf: "MG"
   cep: "38400-000"
+# Margem calibrada com a operação real: Caio busca ~25% sobre venda (≈33% sobre
+# custo), validado pelo histórico do Polo Track 2024 (lucro líquido R$ 10.964
+# sobre R$ 52.200 investidos = 21% após desconto VJCAR; 28% bruto pré-desconto).
 margem:
-  base: 0.18                    # 18% alvo
+  base: 0.25                    # 25% sobre o preço de giro (venda âncora)
   minima_absoluta: 0.10         # nunca abaixo disso
 raio_max_km: 1000
 # Raio operacional: cidades dentro desse raio (haversine a partir do pátio)
@@ -45,5 +48,16 @@ tabela_frete:                   # R$ por faixa_km × categoria
     picape: 4500
     outro: 3800
 categorias_aceitas: [hatch, sedan, suv, utilitario, picape]
-taxa_leilao_pct: 0.08
-custo_op_fixo: 500
+# Auto Avaliar cobra R$ 999 fixos por arremate (não percentual). Para leilões
+# judiciais futuros que usam %, manter `taxa_leilao_pct > 0` que soma com fixa.
+taxa_leilao_pct: 0.0
+taxa_leilao_fixa: 999
+# Custos operacionais não-veículo decompostos — calibrados com a operação real
+# do Polo Track 2024 (despachante R$380, polimento R$450, marketing IG/FB/portais
+# R$1500 médio, laudo cautelar pré-venda R$120, combustível R$73). Total = R$2523.
+custos_operacionais:
+  despachante: 380
+  higienizacao: 450
+  marketing_medio: 1500
+  laudo_cautelar: 120
+  combustivel: 73

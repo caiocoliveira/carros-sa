@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from carros_sa.models import CategoriaVeiculo
 
@@ -37,6 +37,36 @@ class MargemConfig(BaseModel):
         return v
 
 
+class CustosOperacionais(BaseModel):
+    """Decomposição dos custos operacionais não-veículo recorrentes por carro.
+
+    Itens calibrados a partir da operação real do Polo Track 2024 (compra Auto Avaliar
+    em 2025-11, venda em 2026-03). Ver `data/historico/uberlandia_arrematado.csv`
+    e ROADMAP.md (Bloco A da calibração).
+
+    Quando presente no YAML, substitui o `custo_op_fixo` agregado — o precificador
+    consome a soma. Quando ausente, fallback pro int legado em `EmpresaConfig.custo_op_fixo`.
+    """
+
+    despachante: int = 0          # transferência + autorizações
+    higienizacao: int = 0          # limpeza, polimento pré-anúncio
+    marketing_medio: int = 0       # Instagram/Facebook/portais BCO BV/MobiAuto
+    laudo_cautelar: int = 0        # laudo de pré-venda (ANFAVEA)
+    combustivel: int = 0           # média por carro (ida/teste/entrega)
+    outros: int = 0                # catch-all configurável por tenant
+
+    @property
+    def total(self) -> int:
+        return (
+            self.despachante
+            + self.higienizacao
+            + self.marketing_medio
+            + self.laudo_cautelar
+            + self.combustivel
+            + self.outros
+        )
+
+
 class EmpresaConfig(BaseModel):
     """Snapshot carregado de config/empresas/<id>.yaml."""
 
@@ -53,8 +83,27 @@ class EmpresaConfig(BaseModel):
     # tabela_frete: chave = "min-max" km, valor = dict categoria -> reais
     tabela_frete: dict  # dict[str, dict[str, int]]
     categorias_aceitas: list  # list[CategoriaVeiculo]
-    taxa_leilao_pct: float = Field(ge=0.0, le=0.5)
+    # Taxa do leilão pode vir em duas formas — somadas no precificador.
+    # `taxa_leilao_pct` é proporcional ao lance vencedor (típico de leilão judicial).
+    # `taxa_leilao_fixa` é R$ fixos independentes do lance (típico de Auto Avaliar = R$999).
+    taxa_leilao_pct: float = Field(default=0.0, ge=0.0, le=0.5)
+    taxa_leilao_fixa: int = Field(default=0, ge=0)
+    # Custos operacionais — formato novo decomposto OU int legado agregado.
+    # `_custo_op_aplicado` resolve qual usar via model_validator.
+    custos_operacionais: Optional[CustosOperacionais] = None
     custo_op_fixo: int = 0
+
+    @model_validator(mode="after")
+    def _resolver_custo_op(self) -> "EmpresaConfig":
+        """Se YAML traz `custos_operacionais` decomposto, deriva o agregado.
+
+        Se traz só `custo_op_fixo` (formato legado), mantém. Permite migração
+        gradual sem quebrar configs antigas.
+        """
+        if self.custos_operacionais is not None:
+            # Decomposto venceu — sobrescreve o int agregado pra refletir a soma
+            object.__setattr__(self, "custo_op_fixo", self.custos_operacionais.total)
+        return self
 
     def frete_para(self, distancia_km: int, categoria: CategoriaVeiculo) -> int:
         """Lookup na tabela de frete. Além do último range → retorna maior + 30% extra.

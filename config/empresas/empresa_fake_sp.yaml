@@ -6,8 +6,8 @@ patio:
   uf: "SP"
   cep: "01310-100"
 margem:
-  base: 0.22                    # 22% — operação mais exigente
-  minima_absoluta: 0.15
+  base: 0.30                    # 30% — operação mais exigente que Uberlândia (25%)
+  minima_absoluta: 0.18
 raio_max_km: 800                # mais restritivo
 fator_risco_bounds: [1.0, 2.2]
 fator_liquidez_bounds: [1.0, 2.0]

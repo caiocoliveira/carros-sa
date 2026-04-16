@@ -1,19 +1,26 @@
 """Abstração de client de visão + implementações.
 
 `VisionClient.classify(image_png_bytes, prompt) -> dict` — contrato único.
-Cada backend (Anthropic, Gemini, Ollama) implementa do seu jeito, mas retorna o mesmo shape de JSON.
+Cada backend (Anthropic, Gemini, Ollama) implementa do seu jeito, mas retorna
+o mesmo shape de JSON.
 
-Isso deixa o `ExtratorLaudo` agnóstico e permite A/B entre providers sem tocar no pipeline.
+Inclui `FallbackVisionClient` que encadeia múltiplos clients — útil pra lidar
+com picos de overload do Gemini (`503 UNAVAILABLE`) caindo automaticamente
+pro Anthropic Haiku (~$0.005/chamada).
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
+import time
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class VisionClient(ABC):
@@ -50,22 +57,41 @@ class GeminiVisionClient(VisionClient):
 
     def classify(self, image_png_bytes: bytes, prompt: str) -> dict:
         from google.genai import types
+        from google.genai.errors import ServerError
 
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=[
-                types.Part.from_bytes(data=image_png_bytes, mime_type="image/png"),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.0,
-            ),
-        )
-        raw = (response.text or "").strip()
-        # Algumas variantes incluem fences — remover
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-        return json.loads(raw)
+        # Retry manual com backoff agressivo pra absorver 503 UNAVAILABLE
+        # (picos de demanda no Gemini Flash). 3 tentativas: 0s, 15s, 45s.
+        ultimo_erro: Optional[Exception] = None
+        for tentativa, espera in enumerate([0, 15, 45]):
+            if espera:
+                logger.warning(
+                    "GeminiVisionClient: retry em %ds após %s",
+                    espera, type(ultimo_erro).__name__,
+                )
+                time.sleep(espera)
+            try:
+                response = self._client.models.generate_content(
+                    model=self._model,
+                    contents=[
+                        types.Part.from_bytes(data=image_png_bytes, mime_type="image/png"),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.0,
+                    ),
+                )
+                raw = (response.text or "").strip()
+                raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+                return json.loads(raw)
+            except ServerError as e:
+                ultimo_erro = e
+                # 503 / 429 / 500 — vale a pena tentar de novo
+                if getattr(e, "code", None) in (429, 500, 502, 503, 504) and tentativa < 2:
+                    continue
+                raise
+        assert ultimo_erro is not None
+        raise ultimo_erro
 
     @property
     def custo_estimado_usd(self) -> float:
@@ -143,16 +169,98 @@ class OllamaVisionClient(VisionClient):
 
 
 # =============================================================================
+# Fallback em cascata — tenta clients em ordem até um sucesso
+# =============================================================================
+
+class FallbackVisionClient(VisionClient):
+    """Tenta cada client em ordem; aceita o primeiro que não levantar exceção.
+
+    Casos típicos:
+    - Gemini (grátis) → Haiku (~$0.005) — cobre overload 503 sem ficar sem análise
+    - Gemini → Ollama local — em ambiente offline/air-gapped
+
+    Logs mostram qual client conseguiu, pra acompanhar custo real em produção.
+    """
+
+    def __init__(self, clients: List[VisionClient]):
+        if not clients:
+            raise ValueError("FallbackVisionClient precisa de pelo menos 1 client")
+        self._clients = clients
+        # Custo estimado = max entre os possíveis (pior caso — todos caíram menos o último)
+        self._custo = max(c.custo_estimado_usd for c in clients)
+        self._ultimo_usado: Optional[str] = None
+
+    def classify(self, image_png_bytes: bytes, prompt: str) -> dict:
+        ultimo_erro: Optional[Exception] = None
+        for client in self._clients:
+            nome = type(client).__name__
+            try:
+                resultado = client.classify(image_png_bytes, prompt)
+                if ultimo_erro is not None:
+                    logger.warning(
+                        "FallbackVisionClient: sucesso em %s após falha do primário (%s)",
+                        nome, type(ultimo_erro).__name__,
+                    )
+                self._ultimo_usado = nome
+                return resultado
+            except Exception as e:
+                logger.warning("FallbackVisionClient: %s falhou (%s), tentando próximo…", nome, e)
+                ultimo_erro = e
+        # Todos falharam
+        assert ultimo_erro is not None
+        raise ultimo_erro
+
+    @property
+    def custo_estimado_usd(self) -> float:
+        return self._custo
+
+    @property
+    def ultimo_usado(self) -> Optional[str]:
+        """Nome da última implementação que respondeu com sucesso."""
+        return self._ultimo_usado
+
+
+# =============================================================================
 # Factory — escolhe client por env var
 # =============================================================================
 
 def build_default_client() -> VisionClient:
-    """VISION_PROVIDER={gemini|anthropic|ollama} — default: gemini (free)."""
-    provider = os.environ.get("VISION_PROVIDER", "gemini").lower()
+    """Monta o VisionClient a ser usado pelo pipeline.
+
+    Política por default (`VISION_PROVIDER` ausente ou "auto"):
+      - Sempre inclui Gemini (grátis via free tier, requer GEMINI_API_KEY)
+      - Se `ANTHROPIC_API_KEY` estiver setada, adiciona Haiku como FALLBACK
+        (cai só se Gemini levantar exceção — tipicamente 503 UNAVAILABLE)
+      - Se só um estiver configurado, retorna esse único cliente.
+
+    Overrides explícitos via `VISION_PROVIDER`:
+      - "gemini"    → só Gemini
+      - "anthropic" → só Anthropic Haiku
+      - "ollama"    → só Ollama local
+      - "auto"      → cascata (default)
+    """
+    provider = os.environ.get("VISION_PROVIDER", "auto").lower()
+
     if provider == "gemini":
         return GeminiVisionClient()
     if provider == "anthropic":
         return AnthropicVisionClient()
     if provider == "ollama":
         return OllamaVisionClient()
+
+    if provider in ("", "auto"):
+        clients: List[VisionClient] = []
+        if os.environ.get("GEMINI_API_KEY"):
+            clients.append(GeminiVisionClient())
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            clients.append(AnthropicVisionClient())
+        if not clients:
+            raise RuntimeError(
+                "Nenhum provider de visão configurado. Defina GEMINI_API_KEY e/ou "
+                "ANTHROPIC_API_KEY no .env, ou VISION_PROVIDER=ollama."
+            )
+        if len(clients) == 1:
+            return clients[0]
+        return FallbackVisionClient(clients)
+
     raise ValueError(f"VISION_PROVIDER desconhecido: {provider}")

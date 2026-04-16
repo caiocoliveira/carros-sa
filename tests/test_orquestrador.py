@@ -113,6 +113,8 @@ def _avaliacao_obj(lote_id: str = "L001") -> Avaliacao:
         reforma_estimada=400,
         taxas_leilao=1600,
         preco_giro=24000,
+        preco_giro_fipe=24000,
+        preco_giro_aa=None,
         justificativa="Teste.",
     )
 
@@ -204,6 +206,8 @@ class TestPipelineLote:
             reforma_estimada=400,
             taxas_leilao=1600,
             preco_giro=24000,
+            preco_giro_fipe=24000,
+            preco_giro_aa=None,
             justificativa="Avaliação existente.",
             criado_em=datetime.utcnow(),
         )

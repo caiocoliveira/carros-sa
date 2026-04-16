@@ -1,15 +1,26 @@
 """Precificador — Python puro, sem LLM.
 
 Fórmula (ver plano):
-    preco_giro       = min(FIPE * 0.95, webmotors_p25)
+    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
+    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
+    preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
     margem_min       = margem_base * fator_risco * fator_liquidez
     preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
+
+Sobre as duas âncoras:
+- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
+- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
+  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
+  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
+  de giro consolidado.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 from carros_sa.models import (
     Avaliacao,
@@ -90,8 +101,16 @@ def precificar(
     Não decide se lance atual é aceitável — só retorna o target. Orquestrador
     compara `lote.lance_atual` vs `avaliacao.preco_alvo` pra descartar.
     """
-    # 1. Preço de venda âncora: mínimo entre FIPE descontado e Webmotors p25
-    preco_giro = min(int(mercado.fipe * 0.95), mercado.webmotors_p25)
+    # 1. Preço de venda âncora — duas fontes independentes, mais o consolidado.
+    #    FIPE: sempre presente; desconta 5% pra aproximar de atacado.
+    #    Tabela Auto Avaliar: presente quando scraper pegou "ULTIMA AVALIAÇÃO".
+    preco_giro_fipe = min(int(mercado.fipe * 0.95), mercado.webmotors_p25)
+    preco_giro_aa: Optional[int] = None
+    if mercado.auto_avaliar_ref is not None:
+        preco_giro_aa = min(mercado.auto_avaliar_ref, mercado.webmotors_p25)
+    # Consolidado = o mais conservador entre os dois (mais baixo preço de giro
+    # => preço-alvo de lance também mais baixo => decisão mais cautelosa).
+    preco_giro = min(preco_giro_fipe, preco_giro_aa) if preco_giro_aa is not None else preco_giro_fipe
 
     # 2. Fatores
     fator_risco = calcular_fator_risco(laudo, empresa.fator_risco_bounds)
@@ -129,8 +148,11 @@ def precificar(
     retorno_max = preco_giro - capital_max
     score_roi = retorno_max / capital_max
 
+    aa_txt = f" AA_ref={mercado.auto_avaliar_ref}" if mercado.auto_avaliar_ref else ""
     justificativa = (
-        f"preco_giro=R${preco_giro} (FIPE={mercado.fipe}, WM_p25={mercado.webmotors_p25}) "
+        f"preco_giro=R${preco_giro} (fipe={preco_giro_fipe}"
+        f"{f', aa={preco_giro_aa}' if preco_giro_aa is not None else ''}) "
+        f"(FIPE={mercado.fipe}{aa_txt}, WM_p25={mercado.webmotors_p25}) "
         f"reforma=R${reforma.custo_total} frete=R${frete_incluso} "
         f"taxas≈R${taxas_leilao_max} (8% do lance max) op=R${custo_op} "
         f"margem={margem_aplicada:.1%} (risco={fator_risco:.2f}, liq={fator_liquidez:.2f})"
@@ -149,5 +171,7 @@ def precificar(
         reforma_estimada=reforma.custo_total,
         taxas_leilao=taxas_leilao_max,
         preco_giro=preco_giro,
+        preco_giro_fipe=preco_giro_fipe,
+        preco_giro_aa=preco_giro_aa,
         justificativa=justificativa,
     )

@@ -63,6 +63,8 @@ def _seed_avaliacoes(db_path: Path, empresa: str = "carros_uberlandia", n: int =
                 reforma_estimada=1000,
                 taxas_leilao=500,
                 preco_giro=26000,
+                preco_giro_fipe=26000,
+                preco_giro_aa=None,
                 justificativa="teste",
                 criado_em=datetime.utcnow(),
             )

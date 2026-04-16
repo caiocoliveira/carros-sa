@@ -12,8 +12,10 @@ from typing import List, Tuple
 import pytest
 from sqlmodel import SQLModel
 
+from sqlmodel import select
+
 from carros_sa.db import get_engine, get_session
-from carros_sa.models import Lote
+from carros_sa.models import Lote, PrecoReferenciaAA
 from carros_sa.scraping.scraper_detalhe import processar_detalhe
 from tests.test_parsers import DETALHE_FIESTA_BODY
 
@@ -146,6 +148,102 @@ def test_processar_detalhe_sem_url_de_pdf_nao_falha(db, tmp_path):
     assert resultado.passou is True
     assert resultado.pdf_baixado is False
     assert chamadas == []
+
+
+def test_processar_detalhe_propaga_precos_auto_avaliar(db, tmp_path):
+    """HTML com ULTIMA AVALIAÇÃO + FIPE% → promove pros campos do Lote e cria histórico."""
+    # Injeta um innerText com os marcadores da Tabela Auto Avaliar
+    body_com_precos = (
+        "Laudo aprovado\n"
+        "APROVADO ESTRUTURAL\n"  # não deve dar early_exit
+        "KM\n171.053\n"
+        "PLACA\nABC-1D23\n"
+        "COMBUSTÍVEL\nFLEX\n"
+        "IPVA 2026 pago\n"
+        "34%\n"
+        "ULTIMA AVALIAÇÃO\n"
+        "31.000,00 / FIESTA\n"
+        "R$\nmin. 22.900,00\n"
+    )
+    _, stub = _stub_downloader_factory()
+
+    with get_session(db) as s:
+        processar_detalhe(
+            lote_id="21854782",
+            body_text=body_com_precos,
+            laudo_pdf_url=None,
+            session=s,
+            pdf_dir=tmp_path / "laudos",
+            downloader=stub,
+        )
+
+    # 1. Promovido pras colunas first-class do Lote
+    with get_session(db) as s:
+        lote = s.get(Lote, "21854782")
+        assert lote.preco_referencia_aa == 31_000
+        assert lote.fipe_pct_lance_minimo == 34
+
+        # 2. Histórico criado em PrecoReferenciaAA
+        historico = s.exec(select(PrecoReferenciaAA)).all()
+    assert len(historico) == 1
+    h = historico[0]
+    assert h.marca == "Ford"
+    assert h.ano == 2013
+    assert h.preco == 31_000
+    assert h.fipe_pct_lance_minimo == 34
+    assert h.origem_lote_id == "21854782"
+
+
+def test_processar_detalhe_extrai_precos_aa_do_body_real_fiesta(db, tmp_path):
+    """Gold: Fiesta REAL já traz ULTIMA AVALIAÇÃO 22.900,00 + 33% — tudo deve fluir."""
+    _, stub = _stub_downloader_factory()
+
+    with get_session(db) as s:
+        processar_detalhe(
+            lote_id="21854782",
+            body_text=DETALHE_FIESTA_BODY,
+            laudo_pdf_url=None,
+            session=s,
+            pdf_dir=tmp_path / "laudos",
+            downloader=stub,
+        )
+
+    with get_session(db) as s:
+        lote = s.get(Lote, "21854782")
+        historico = s.exec(select(PrecoReferenciaAA)).all()
+
+    assert lote.preco_referencia_aa == 22_900
+    assert lote.fipe_pct_lance_minimo == 33
+    assert len(historico) == 1
+    assert historico[0].preco == 22_900
+    assert historico[0].origem_lote_id == "21854782"
+
+
+def test_processar_detalhe_body_sem_marcadores_nao_historiza(db, tmp_path):
+    """Body sem 'ULTIMA AVALIAÇÃO' e sem classes HTML — campos ficam None, zero histórico."""
+    body_sem_aa = (
+        "KM\n171.053\nCOMBUSTÍVEL\nFLEX\n"
+        "Laudo aprovado\nAPROVADO ESTRUTURAL\nIPVA pago\n"
+    )
+    _, stub = _stub_downloader_factory()
+
+    with get_session(db) as s:
+        processar_detalhe(
+            lote_id="21854782",
+            body_text=body_sem_aa,
+            laudo_pdf_url=None,
+            session=s,
+            pdf_dir=tmp_path / "laudos",
+            downloader=stub,
+        )
+
+    with get_session(db) as s:
+        lote = s.get(Lote, "21854782")
+        historico = s.exec(select(PrecoReferenciaAA)).all()
+
+    assert lote.preco_referencia_aa is None
+    assert lote.fipe_pct_lance_minimo is None
+    assert historico == []
 
 
 def test_processar_detalhe_lote_inexistente_falha(db, tmp_path):

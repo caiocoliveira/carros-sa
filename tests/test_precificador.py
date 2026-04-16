@@ -252,3 +252,63 @@ def test_tabela_frete_extrapola_alem_da_maior_faixa():
     extrapolado = empresa.frete_para(2_500, CategoriaVeiculo.HATCH)
     assert extrapolado > maior
     assert extrapolado == int(maior * 1.3)
+
+
+# =============================================================================
+# Integração FIPE + Tabela Auto Avaliar
+# =============================================================================
+
+def test_sem_auto_avaliar_mantem_comportamento_fipe_only(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
+):
+    """Backward compat: mercado sem auto_avaliar_ref usa só FIPE (preco_giro_aa=None)."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Goiânia", "GO", empresa.patio.cidade, empresa.patio.uf, 420, 1_400)
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+    assert av.preco_giro_fipe == av.preco_giro    # consolidado = FIPE quando AA ausente
+    assert av.preco_giro_aa is None
+
+
+def test_com_auto_avaliar_mais_baixo_escolhe_aa_como_giro_consolidado(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
+):
+    """Quando Auto Avaliar dá preço MENOR que FIPE descontado, consolidado = AA."""
+    empresa = carregar_empresa("carros_uberlandia")
+    # FIPE=28k → FIPE*0.95 = 26.6k; Webmotors p25=24k. preco_giro_fipe = min(26.6k, 24k) = 24k
+    # Auto Avaliar ref = 22k → preco_giro_aa = min(22k, 24k) = 22k
+    # Consolidado = min(24k, 22k) = 22k (AA ganha).
+    mercado_aa = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 22_000})
+    frete = _frete("Goiânia", "GO", empresa.patio.cidade, empresa.patio.uf, 420, 1_400)
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_aa, gol_2015_reforma, frete, empresa)
+    assert av.preco_giro_fipe == 24_000
+    assert av.preco_giro_aa == 22_000
+    assert av.preco_giro == 22_000  # consolidado = o menor
+
+
+def test_com_auto_avaliar_mais_alto_consolidado_fica_no_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
+):
+    """Se AA for mais otimista que FIPE, consolidado trava em FIPE (conservadorismo)."""
+    empresa = carregar_empresa("carros_uberlandia")
+    mercado_aa_alto = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 30_000})
+    frete = _frete("Goiânia", "GO", empresa.patio.cidade, empresa.patio.uf, 420, 1_400)
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_aa_alto, gol_2015_reforma, frete, empresa)
+    # preco_giro_aa = min(30k, 24k p25) = 24k  (p25 aperta)
+    # preco_giro_fipe = 24k também
+    # Consolidado = 24k
+    assert av.preco_giro == 24_000
+    assert av.preco_giro_fipe == 24_000
+    assert av.preco_giro_aa == 24_000
+
+
+def test_auto_avaliar_ref_zero_rejeitado_pela_validacao():
+    """SinalMercado garante que auto_avaliar_ref se presente é positivo."""
+    with pytest.raises(Exception):
+        SinalMercado(
+            fipe=28_000,
+            webmotors_mediana=25_000,
+            webmotors_p25=24_000,
+            n_anuncios_competidores=80,
+            dias_giro_estimado=25,
+            auto_avaliar_ref=0,
+        )

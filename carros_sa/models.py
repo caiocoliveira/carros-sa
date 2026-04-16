@@ -64,6 +64,11 @@ class LoteRaw(BaseModel):
     origem_cidade: Optional[str] = None
     origem_uf: Optional[str] = None
     origem_cep: Optional[str] = None
+    # Referências de preço extraídas do próprio anúncio Auto Avaliar (SSR).
+    # Preenchidas pelo scraper quando a página de detalhe carrega; None quando
+    # o lote não tem os sinais (ex.: tipos de anúncio sem "ULTIMA AVALIAÇÃO").
+    preco_referencia_aa: Optional[int] = None   # R$ sugerido pela Tabela Auto Avaliar
+    fipe_pct_lance_minimo: Optional[int] = None # 0..999 — % do lance min sobre FIPE
 
 
 class Avaria(BaseModel):
@@ -84,19 +89,31 @@ class LaudoEstruturado(BaseModel):
 
 
 class SinalMercado(BaseModel):
-    """Saída do AvaliadorMercado — FIPE + Webmotors. Global."""
+    """Saída do AvaliadorMercado — FIPE + Webmotors + Tabela Auto Avaliar. Global."""
 
     fipe: int
     webmotors_mediana: int
     webmotors_p25: int
     n_anuncios_competidores: int
     dias_giro_estimado: int               # heurística inicial
+    # Preço-referência da Tabela Auto Avaliar (mercado atacado real). Opcional:
+    # None quando o lote não trouxe o dado ou o histórico ainda não tem entrada
+    # pra esse modelo/ano. Quando presente, Precificador usa como âncora alternativa
+    # e escolhe o menor entre preco_giro_fipe e preco_giro_aa.
+    auto_avaliar_ref: Optional[int] = None
 
     @field_validator("fipe", "webmotors_mediana", "webmotors_p25")
     @classmethod
     def _positivo(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("preço deve ser positivo")
+        return v
+
+    @field_validator("auto_avaliar_ref")
+    @classmethod
+    def _aa_positivo(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
+            raise ValueError("auto_avaliar_ref deve ser positivo se informado")
         return v
 
 
@@ -141,7 +158,11 @@ class Avaliacao(BaseModel):
     frete_incluso: int
     reforma_estimada: int
     taxas_leilao: int
-    preco_giro: int                       # preço de venda de referência
+    preco_giro: int                       # preço de venda de referência consolidado (menor entre FIPE e AA)
+    # Decomposição do preço de giro por fonte — permite à triagem mostrar
+    # ambas as âncoras (FIPE e Tabela Auto Avaliar) lado a lado.
+    preco_giro_fipe: int                  # ancorado em FIPE descontado ∩ webmotors p25
+    preco_giro_aa: Optional[int] = None   # ancorado em Tabela Auto Avaliar; None se sem dado
     justificativa: str
 
 
@@ -171,6 +192,10 @@ class Lote(SQLModel, table=True):
     origem_cidade: Optional[str] = None
     origem_uf: Optional[str] = None
     origem_cep: Optional[str] = None
+    # Sinais Tabela Auto Avaliar (ver LoteRaw pro significado). Persistidos
+    # junto com o Lote pra não depender de abrir raw_json["detalhe"].
+    preco_referencia_aa: Optional[int] = None
+    fipe_pct_lance_minimo: Optional[int] = None
     raw_json: dict = SQLField(default_factory=dict, sa_column=Column(JSON))
     scraped_at: datetime = SQLField(default_factory=datetime.utcnow)
 
@@ -216,6 +241,28 @@ class ModeloFipeCache(SQLModel, table=True):
     consultado_em: datetime = SQLField(default_factory=datetime.utcnow)
 
 
+class PrecoReferenciaAA(SQLModel, table=True):
+    """Histórico longitudinal de preços-referência da Tabela Auto Avaliar.
+
+    Alimentado pelo scraper a cada vez que um anúncio traz "ULTIMA AVALIAÇÃO".
+    Serve a dois propósitos:
+      1. Consultar preço de referência de um modelo que já apareceu em leilão
+         ao avaliar um lote futuro do mesmo modelo (amortiza escassez).
+      2. Construir série temporal pra calibração (workstream H).
+    """
+
+    __tablename__ = "preco_referencia_aa"
+    id: Optional[int] = SQLField(default=None, primary_key=True)
+    marca: str = SQLField(index=True)
+    modelo: str = SQLField(index=True)
+    ano: int = SQLField(index=True)
+    versao: Optional[str] = None
+    preco: int                                       # R$ da ULTIMA AVALIAÇÃO
+    fipe_pct_lance_minimo: Optional[int] = None      # % sobre FIPE anotado no lote-fonte
+    origem_lote_id: Optional[str] = None             # lote_id que trouxe o dado
+    coletado_em: datetime = SQLField(default_factory=datetime.utcnow, index=True)
+
+
 # =============================================================================
 # SQLModel tables — POR EMPRESA
 # =============================================================================
@@ -234,7 +281,9 @@ class AvaliacaoLote(SQLModel, table=True):
     frete_incluso: int
     reforma_estimada: int
     taxas_leilao: int
-    preco_giro: int
+    preco_giro: int                                # consolidado (menor entre FIPE e AA)
+    preco_giro_fipe: int                           # decomposto — ancorado em FIPE
+    preco_giro_aa: Optional[int] = None            # decomposto — ancorado em Tabela Auto Avaliar
     justificativa: str
     criado_em: datetime = SQLField(default_factory=datetime.utcnow)
 

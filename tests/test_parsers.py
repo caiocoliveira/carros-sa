@@ -271,3 +271,53 @@ def test_parse_detalhe_laudo_aprovado_sem_early_exit():
     assert flags.laudo_aprovado is True
     assert flags.reprovado_estrutural is False
     assert flags.early_exit is None
+    assert flags.encerrado is False
+
+
+def test_parse_detalhe_badge_arrematado_marca_encerrado():
+    """Auto Avaliar coloca 'ARREMATADO' como badge isolado quando o lote fecha."""
+    body = (
+        "Ford Fiesta 1.6\n"
+        "ARREMATADO\n"
+        "KM\n171.053\n"
+        "Laudo aprovado\n"
+        "APROVADO ESTRUTURAL\n"
+    )
+    flags = parse_detalhe(body)
+    assert flags.encerrado is True
+    # early_exit prioriza "leilao_encerrado" pra economizar download de PDF
+    assert flags.early_exit == "leilao_encerrado"
+
+
+def test_parse_detalhe_frase_leilao_encerrado():
+    """'Leilão encerrado' em texto livre também deve disparar a flag."""
+    body = "Ford Fiesta\nEste leilão encerrado em 10/04/2026\nKM\n171.053\n"
+    flags = parse_detalhe(body)
+    assert flags.encerrado is True
+
+
+def test_parse_detalhe_palavra_vendido_em_observacao_nao_falso_positiva():
+    """'vendido' dentro de frase longa não é badge — não deve marcar encerrado."""
+    body = (
+        "Ford Fiesta\n"
+        "O carro foi vendido anteriormente sem garantia segundo o relato do antigo proprietário.\n"
+        "Laudo aprovado\n"
+        "APROVADO ESTRUTURAL\n"
+        "KM\n171.053\n"
+    )
+    flags = parse_detalhe(body)
+    assert flags.encerrado is False
+
+
+def test_parse_detalhe_encerrado_tem_precedencia_sobre_estrutural():
+    """Lote arrematado + reprovado estrutural → early_exit vira 'leilao_encerrado'.
+
+    Faz diferença pro Orquestrador: encerrado é mais informativo pro usuário
+    ('não vale mais pensar') que 'reprovado_estrutural' (que ainda sugere
+    possibilidade de lance).
+    """
+    body = DETALHE_FIESTA_BODY + "\nARREMATADO\n"
+    flags = parse_detalhe(body)
+    assert flags.encerrado is True
+    assert flags.reprovado_estrutural is True
+    assert flags.early_exit == "leilao_encerrado"

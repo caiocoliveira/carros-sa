@@ -143,6 +143,19 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - A label visual "fipe" do badge é renderizada via CSS/imagem ao lado do número, não aparece em innerText. Confiamos que `.tag-percent-value` significa semanticamente "% sobre FIPE do lance mín" — confirmado em inspeção manual 2026-04-16. Se Auto Avaliar mudar o HTML, o parser falha silencioso (retorna `None`), não errado.
   - SinalMercado.auto_avaliar_ref precisa ser populado pelo AvaliadorMercado (hoje continua None até o wire-up).
 
+### N — Marcar leilões encerrados + timestamp visível ✅
+- **Branch:** `claude/happy-johnson`
+- **Arquivos:**
+  - [`carros_sa/scraping/parsers.py`](carros_sa/scraping/parsers.py) — `DetalheFlags.encerrado` + `_detectar_encerrado()` detecta badge "ARREMATADO"/"VENDIDO"/"ENCERRADO"/"FINALIZADO" isolado ou frase "leilão encerrado". `early_exit` passa a priorizar `"leilao_encerrado"` sobre `reprovado_estrutural`.
+  - [`carros_sa/scraping/scraper_detalhe.py`](carros_sa/scraping/scraper_detalhe.py) — `_flags_to_dict` persiste `encerrado` em `lote.raw_json["detalhe"]`.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — exportador agora: (a) insere linha 1 "Última atualização da planilha: DD/MM/YYYY HH:MM" como banner, (b) renomeia coluna final pra "Coletado em" e mostra `Lote.scraped_at` por linha, (c) calcula `encerrado = badge OU fim_em < now()`, (d) ordena encerrados pro FIM da aba, (e) adiciona situação "⚠ Encerrado", (f) `freeze(rows=2)` protege banner+header.
+- **Motivação:** Usuário clicou no primeiro lote da planilha e ele já estava arrematado. Duas causas: snapshot do SQLite de 2 dias antes + ausência de qualquer sinal visual de "idade do dado". Agora o banner no topo mostra quando foi a última atualização e cada linha indica quando aquele lote específico foi visto no Auto Avaliar.
+- **Cobertura:** 12 testes novos — 4 em [`tests/test_parsers.py`](tests/test_parsers.py) (badge ARREMATADO, frase "leilão encerrado", anti-falso-positivo em texto livre, precedência sobre estrutural), 1 em [`tests/test_scraper_detalhe.py`](tests/test_scraper_detalhe.py) (early_exit + persistência), 6 em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) (timer vencido marca encerrado, badge no raw_json marca encerrado, encerrados vão pro final, banner na linha 1, coluna Coletado em reflete scraped_at, freeze cobre 2 linhas). 143/143 passando.
+- **Limitações conhecidas:**
+  - A detecção depende do scraper detalhe **ter rodado** depois do leilão fechar. Se o SQLite só tem o snapshot da listagem, a única defesa é o `fim_em < now()`, que pode dar falso-negativo se o lote foi arrematado **antes** do timer zerar (raro mas possível).
+  - Os badges no b2b.autoavaliar foram inferidos das palavras portuguesas mais comuns ("ARREMATADO", "VENDIDO", "ENCERRADO", "FINALIZADO"). Se a plataforma introduzir nova label (ex.: "LOTE FECHADO"), o regex falha silencioso e cai pro fallback do timer.
+  - Lotes sem `fim_em` (SHOWROOM, venda direta) nunca são marcados como encerrados pelo timer — precisam do badge pra sair da lista ativa.
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

@@ -178,6 +178,7 @@ class DetalheFlags:
         similares_precos: list = None,
         preco_referencia_aa: Optional[int] = None,
         fipe_pct_lance_minimo: Optional[int] = None,
+        encerrado: bool = False,
     ):
         self.specs = specs
         self.status_laudo = status_laudo
@@ -192,6 +193,7 @@ class DetalheFlags:
         self.similares_precos = similares_precos or []
         self.preco_referencia_aa = preco_referencia_aa
         self.fipe_pct_lance_minimo = fipe_pct_lance_minimo
+        self.encerrado = encerrado
 
     @property
     def reprovado_estrutural(self) -> bool:
@@ -204,6 +206,8 @@ class DetalheFlags:
     @property
     def early_exit(self) -> Optional[str]:
         """Razão pra descartar o lote ANTES de chamar LLM. None = seguir em frente."""
+        if self.encerrado:
+            return "leilao_encerrado"
         if self.reprovado_estrutural:
             return "reprovado_estrutural"
         if self.status_laudo and "não aprovado" in self.status_laudo.lower():
@@ -214,6 +218,39 @@ class DetalheFlags:
 
 
 _PRAZO_RE = re.compile(r"(\d+)\s*dias?", re.IGNORECASE)
+
+# Sinais de leilão encerrado/arrematado no DOM do anúncio. O b2b.autoavaliar
+# mostra um badge "ARREMATADO" (ou "VENDIDO"/"ENCERRADO") sobre a foto quando o
+# leilão já acabou. Também filtra variações comuns ("leilão encerrado",
+# "lote arrematado"). Palavra isolada, case-insensitive.
+_RE_ENCERRADO = re.compile(
+    r"(?i)(?<![A-Za-zÀ-ÿ])(arrematado|arrematada|encerrado|encerrada|vendido|vendida|finalizado|finalizada)(?![A-Za-zÀ-ÿ])"
+)
+_RE_LEILAO_ENCERRADO = re.compile(
+    r"(?i)leil[aã]o\s+(encerrad[oa]|finalizad[oa]|vendid[oa])"
+)
+
+
+def _detectar_encerrado(body_text: str) -> bool:
+    """True se o DOM/innerText indica leilão já arrematado/encerrado.
+
+    Heurística conservadora: precisa de (a) badge-like match isolado OU
+    (b) frase "leilão encerrado/finalizado/vendido". Evita falso-positivo
+    em frases tipo "carro vendido sem garantia" (sem contexto de leilão)
+    exigindo que o match isolado apareça numa linha curta (<40 chars) —
+    os badges do Auto Avaliar são sempre linhas isoladas.
+    """
+    if not body_text:
+        return False
+    if _RE_LEILAO_ENCERRADO.search(body_text):
+        return True
+    for ln in body_text.split("\n"):
+        stripped = ln.strip()
+        if not stripped or len(stripped) > 40:
+            continue
+        if _RE_ENCERRADO.fullmatch(stripped):
+            return True
+    return False
 
 
 def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> DetalheFlags:
@@ -263,6 +300,9 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
     # 9. Preços da Tabela Auto Avaliar embutidos (preço referência + FIPE%)
     precos_aa = extrair_precos_aa(body_text)
 
+    # 10. Leilão encerrado / lote arrematado (badge visível na página)
+    encerrado = _detectar_encerrado(body_text)
+
     return DetalheFlags(
         specs=specs,
         status_laudo=status_laudo,
@@ -277,6 +317,7 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
         similares_precos=similares_precos,
         preco_referencia_aa=precos_aa.preco_referencia_aa,
         fipe_pct_lance_minimo=precos_aa.fipe_pct_lance_minimo,
+        encerrado=encerrado,
     )
 
 

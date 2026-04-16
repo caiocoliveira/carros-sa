@@ -124,6 +124,58 @@ def test_top_filtra_por_empresa(db_tmp):
     assert "UBE000" not in result.stdout
 
 
+def test_top_ranqueia_por_roi_anualizado_default(db_tmp):
+    """Default rankeia por ROI/ano: lote rápido (30d) com ROI menor passa lento (180d) maior."""
+    engine = create_engine(f"sqlite:///{db_tmp}", connect_args={"check_same_thread": False})
+    from sqlmodel import Session
+    with Session(engine) as session:
+        # Lote LENTO: ROI 30% mas dias_giro 180 → anualizado = 0.30 * 365/180 = 0.608
+        lote_lento = Lote(
+            id="LENTO", leilao="x", url="x", marca="Land Rover", modelo="Freelander",
+            ano=2012, lance_atual=30000, raw_json={},
+        )
+        av_lento = AvaliacaoLote(
+            empresa_id="carros_uberlandia", lote_id="LENTO",
+            preco_alvo=25000, preco_max=27000,
+            score_roi=0.30, fator_risco=1.0, fator_liquidez=1.0,
+            margem_aplicada=0.20, frete_incluso=500, reforma_estimada=1000,
+            taxas_leilao=500, preco_giro=26000, preco_giro_fipe=26000,
+            preco_giro_aa=None, dias_giro_estimado=180,
+            justificativa="lento",
+            criado_em=datetime.utcnow(),
+        )
+        # Lote RAPIDO: ROI 20% mas dias_giro 30 → anualizado = 0.20 * 365/30 = 2.43
+        lote_rapido = Lote(
+            id="RAPIDO", leilao="x", url="x", marca="VW", modelo="Polo",
+            ano=2024, lance_atual=50000, raw_json={},
+        )
+        av_rapido = AvaliacaoLote(
+            empresa_id="carros_uberlandia", lote_id="RAPIDO",
+            preco_alvo=45000, preco_max=48000,
+            score_roi=0.20, fator_risco=1.0, fator_liquidez=1.0,
+            margem_aplicada=0.20, frete_incluso=500, reforma_estimada=1000,
+            taxas_leilao=500, preco_giro=46000, preco_giro_fipe=46000,
+            preco_giro_aa=None, dias_giro_estimado=30,
+            justificativa="rapido",
+            criado_em=datetime.utcnow(),
+        )
+        for r in [lote_lento, av_lento, lote_rapido, av_rapido]:
+            session.add(r)
+        session.commit()
+
+    # Default: por ROI anualizado → RAPIDO vem antes
+    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia"])
+    assert result.exit_code == 0
+    assert result.stdout.index("RAPIDO") < result.stdout.index("LENTO")
+    assert "ROI anualizado" in result.stdout
+
+    # --absoluto inverte: por score_roi puro → LENTO (30%) vem antes de RAPIDO (20%)
+    result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--absoluto"])
+    assert result_abs.exit_code == 0
+    assert result_abs.stdout.index("LENTO") < result_abs.stdout.index("RAPIDO")
+    assert "ROI absoluto" in result_abs.stdout
+
+
 # ---------------------------------------------------------------------------
 # empresas — lista configs do diretório
 # ---------------------------------------------------------------------------

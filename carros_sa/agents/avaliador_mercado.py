@@ -86,12 +86,17 @@ def avaliar(
     categoria: CategoriaVeiculo = CategoriaVeiculo.OUTRO,
     fipe_client: Optional[FipeClient] = None,
     session: Optional[Session] = None,
+    empresa_id: Optional[str] = None,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
     `similares_precos` é a lista de preços que a página de detalhe de Auto
     Avaliar mostra na seção 'Talvez se interesse por'. Quando vazio, caímos
     na heurística FIPE × 0.9 (mediana) / 0.78 (p25).
+
+    Quando `empresa_id` e `session` são passados, `dias_giro_estimado` é
+    calibrado a partir do histórico real (Arrematado da empresa) — fallback
+    pro prior categórico hardcoded quando há <3 amostras na categoria.
     """
     fipe = fipe_client or FipeClient()
     fipe_valor = _consultar_fipe_com_cache(fipe, marca, modelo, ano, session)
@@ -110,7 +115,16 @@ def avaliar(
         p25 = int(round(fipe_valor * 0.88))
         n = 0
 
-    dias_giro = _DIAS_GIRO_DEFAULT.get(categoria, 40)
+    # Prior categórico — base do dias_giro
+    prior = _DIAS_GIRO_DEFAULT.get(categoria, 40)
+
+    # Calibração com Arrematado (Bloco C) — só ativa quando empresa+session presentes
+    if empresa_id and session is not None:
+        from carros_sa.agents.calibracao_giro import calibrar_dias_giro
+        dias_giro = calibrar_dias_giro(empresa_id, categoria, session, fallback=prior)
+    else:
+        dias_giro = prior
+
     # ajuste leve por liquidez observada: muitos competidores → mercado mais
     # líquido, gira mais rápido. Pouquíssimos → ilíquido.
     if n >= 6:

@@ -179,6 +179,21 @@ Cron semanal que popula `anuncio_webmotors.sumiu_em`. Só faz sentido depois de 
 - **Como funciona:** cada linha vira `Lote` sintético (`leilao="historico_offline"`, `lote_id` determinístico) + `Arrematado`. Preserva FK pra `lote.id` sem mexer em [models.py](carros_sa/models.py). Suporta linhas "no pátio" (sem `data_venda` → `vendido_em` e `vendido_por` ficam NULL).
 - **Cobertura:** 4 testes em [tests/test_historico_import.py](tests/test_historico_import.py) — id sintético determinístico, gold do Polo real, "no pátio" parcial, idempotência.
 
+### Bloco C — Calibração `dias_giro` + ROI anualizado ✅
+- **Branch:** `claude/exciting-pascal`
+- **Arquivos:**
+  - [carros_sa/models.py](carros_sa/models.py) — +1 campo `dias_giro_estimado: Optional[int] = None` em `Avaliacao` e `AvaliacaoLote` (mudança coordenada, aprovada explicitamente)
+  - [carros_sa/db.py](carros_sa/db.py) — `_aplicar_migracoes_leves` ALTER TABLE idempotente pra DBs existentes (substituir por Alembic quando sair de PoC)
+  - [carros_sa/agents/calibracao_giro.py](carros_sa/agents/calibracao_giro.py) — NOVO. `calibrar_dias_giro()` lê `Arrematado` por categoria (≥3 vendas → média; <3 → fallback prior). `roi_anualizado(score, dias)` com floor de 30d e fallback de 90d quando NULL.
+  - [carros_sa/agents/avaliador_mercado.py](carros_sa/agents/avaliador_mercado.py) — aceita `empresa_id` opcional pra ativar calibração (retrocompat: sem empresa = prior hardcoded)
+  - [carros_sa/precificador.py](carros_sa/precificador.py) — propaga `dias_giro_estimado` da SinalMercado pra Avaliacao
+  - [carros_sa/orquestrador.py](carros_sa/orquestrador.py) — passa `empresa_id` ao avaliar mercado e persiste o campo no upsert
+  - [carros_sa/cli.py](carros_sa/cli.py) — `top` agora ranqueia por **ROI anualizado** por default; `--absoluto` volta pro score_roi puro
+  - [carros_sa/tools/sheets.py](carros_sa/tools/sheets.py) — 2 colunas novas (Dias até venda, ROI anualizado)
+- **Calibração real (32 vendas importadas):** sedan calibrado 98d (vs prior 30d), hatch 128d (vs 25d), SUV 79d, picape 64d. **Sistema estava otimista demais** — operador real opera com mix de carros antigos e nichos que demoram muito mais que o prior categórico assumia.
+- **Cobertura:** 13 testes novos — 12 em [tests/test_calibracao_giro.py](tests/test_calibracao_giro.py) (inferência de categoria, calibração ≥3 vs fallback, idempotência por empresa, ROI anualizado com floor) + 1 em [tests/test_cli.py](tests/test_cli.py) (`test_top_ranqueia_por_roi_anualizado_default` — lote rápido com ROI menor passa lento com ROI maior).
+- **Limitações:** calibração de qualidade modesta com 32 vendas (~poucas por categoria). Workstream H futuro vai melhorar com séries temporais e overlap real entre AA + Arrematado.
+
 ---
 
 ## Convenções de coordenação

@@ -46,10 +46,16 @@ console = Console()
 def top(
     empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
     n: int = typer.Option(10, "--n", "--top", help="Quantos lotes mostrar (top N por ROI)"),
+    por_absoluto: bool = typer.Option(False, "--absoluto", help="Ordena por ROI absoluto (sem anualizar)"),
 ) -> None:
-    """Lista as top N avaliações da empresa já persistidas no SQLite."""
+    """Lista as top N avaliações da empresa já persistidas no SQLite.
+
+    Ordenação default: ROI anualizado (score_roi × 365 / dias_giro). Premia
+    carros de giro rápido. `--absoluto` volta pro score_roi puro (legado).
+    """
     from sqlmodel import select
 
+    from carros_sa.agents.calibracao_giro import roi_anualizado
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, Lote
 
@@ -60,27 +66,39 @@ def top(
             select(AvaliacaoLote, Lote)
             .join(Lote, Lote.id == AvaliacaoLote.lote_id)  # type: ignore[arg-type]
             .where(AvaliacaoLote.empresa_id == empresa)
-            .order_by(AvaliacaoLote.score_roi.desc())  # type: ignore[union-attr]
-            .limit(n)
         )
-        rows = session.exec(stmt).all()
+        todas = session.exec(stmt).all()
 
-    if not rows:
+    if not todas:
         console.print(
             f"[yellow]Nenhuma avaliação para empresa '{empresa}'. "
             "Rode [bold]carros-sa triagem[/bold] primeiro.[/yellow]"
         )
         raise typer.Exit(0)
 
-    tbl = Table(title=f"Top {len(rows)} lotes — {empresa}")
+    # Anota cada linha com ROI anualizado e ordena
+    enriquecidas = [
+        (av, lote, roi_anualizado(av.score_roi, av.dias_giro_estimado))
+        for av, lote in todas
+    ]
+    if por_absoluto:
+        enriquecidas.sort(key=lambda x: x[0].score_roi, reverse=True)
+    else:
+        enriquecidas.sort(key=lambda x: x[2], reverse=True)
+    rows = enriquecidas[:n]
+
+    sufixo = "ROI absoluto" if por_absoluto else "ROI anualizado"
+    tbl = Table(title=f"Top {len(rows)} lotes — {empresa} (ordem: {sufixo})")
     tbl.add_column("Lote")
     tbl.add_column("Modelo")
     tbl.add_column("Ano", justify="right")
     tbl.add_column("Lance", justify="right")
     tbl.add_column("Preço-Alvo", justify="right")
     tbl.add_column("ROI%", justify="right")
+    tbl.add_column("Dias", justify="right")
+    tbl.add_column("ROI/ano%", justify="right")
     tbl.add_column("Risco", justify="right")
-    for av, lote in rows:
+    for av, lote, roi_anual in rows:
         tbl.add_row(
             lote.id,
             f"{lote.marca} {lote.modelo[:30]}",
@@ -88,6 +106,8 @@ def top(
             f"R$ {lote.lance_atual:,}",
             f"R$ {av.preco_alvo:,}",
             f"{av.score_roi * 100:.1f}%",
+            str(av.dias_giro_estimado) if av.dias_giro_estimado else "—",
+            f"{roi_anual * 100:.1f}%",
             f"{av.fator_risco:.2f}",
         )
     console.print(tbl)

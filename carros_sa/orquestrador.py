@@ -344,6 +344,7 @@ def _upsert_avaliacao(avaliacao, empresa_id: str, session: Session) -> None:
         preco_giro_aa=avaliacao.preco_giro_aa,
         fipe=avaliacao.fipe,
         webmotors_mediana=avaliacao.webmotors_mediana,
+        dias_giro_estimado=avaliacao.dias_giro_estimado,
         justificativa=avaliacao.justificativa,
         criado_em=datetime.utcnow(),
     )
@@ -471,6 +472,7 @@ async def _pipeline_lote(
             similares_precos=flags.similares_precos or None,
             categoria=laudo.categoria_veiculo,
             session=session,
+            empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
         )
 
         # 6. Reforma

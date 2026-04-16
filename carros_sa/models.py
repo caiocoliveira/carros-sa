@@ -167,6 +167,9 @@ class Avaliacao(BaseModel):
     # Webmotors ao lado do preço de giro, facilitando auditoria humana.
     fipe: int
     webmotors_mediana: int
+    # Tempo estimado de venda (dias) — propagado de SinalMercado pra permitir
+    # cálculo de ROI anualizado no ranking sem re-derivar (workstream calibração).
+    dias_giro_estimado: Optional[int] = None
     justificativa: str
 
 
@@ -292,6 +295,10 @@ class AvaliacaoLote(SQLModel, table=True):
     # Podem ficar NULL em registros antigos (pré-workstream K).
     fipe: Optional[int] = None
     webmotors_mediana: Optional[int] = None
+    # Tempo estimado de venda (dias) — usado pra calcular ROI anualizado no
+    # ranking. NULL em registros pré-Bloco C; nesses casos rank cai pro score_roi
+    # absoluto.
+    dias_giro_estimado: Optional[int] = None
     justificativa: str
     criado_em: datetime = SQLField(default_factory=datetime.utcnow)
 

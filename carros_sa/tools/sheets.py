@@ -38,6 +38,8 @@ HEADER = [
     "Preço Giro Auto Avaliar (R$)",
     "FIPE % (lance min)",
     "ROI se pagar o máximo (%)",
+    "Dias até venda (est.)",
+    "ROI anualizado (%)",
     "Fator Risco",
     "Severidade Laudo",
     "Motor OK",
@@ -114,6 +116,10 @@ class SheetsExporter:
 
             viavel = av.preco_max > (lote.lance_atual or 0)
 
+            from carros_sa.agents.calibracao_giro import roi_anualizado
+            roi_max = _calcular_roi_no_maximo(av)
+            roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo} {lote.ano}",
@@ -126,7 +132,9 @@ class SheetsExporter:
                 "preco_giro_fipe": av.preco_giro_fipe,
                 "preco_giro_aa": av.preco_giro_aa,
                 "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
-                "roi_pct": _calcular_roi_no_maximo(av),
+                "roi_pct": roi_max,
+                "dias_giro": av.dias_giro_estimado,
+                "roi_anualizado": round(roi_anual, 1),
                 "fator_risco": round(av.fator_risco, 3),
                 "severidade": laudo.severidade_geral if laudo else "—",
                 "motor_ok": ("Sim" if laudo.motor_ok else "NÃO") if laudo else "—",
@@ -176,6 +184,8 @@ class SheetsExporter:
                 r["preco_giro_aa"] if r["preco_giro_aa"] is not None else "—",
                 f"{r['fipe_pct_lance_minimo']}%" if r["fipe_pct_lance_minimo"] is not None else "—",
                 r["roi_pct"],
+                r["dias_giro"] if r["dias_giro"] is not None else "—",
+                r["roi_anualizado"],
                 r["fator_risco"],
                 r["severidade"],
                 r["motor_ok"],

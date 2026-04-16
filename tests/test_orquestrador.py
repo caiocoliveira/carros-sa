@@ -124,21 +124,43 @@ def _avaliacao_obj(lote_id: str = "L001") -> Avaliacao:
 # ---------------------------------------------------------------------------
 
 class TestCalcularFrete:
-    def test_frete_mesmo_uf(self):
+    def test_frete_mesma_cidade_do_patio_e_zero(self):
+        """Lote na mesma cidade do pátio (Uberlândia) → comprador busca, frete 0."""
+        empresa = _empresa()
+        lote = _lote(uf="MG")   # _lote usa origem_cidade="Uberlândia"
+        frete = _calcular_frete(lote, empresa)
+        assert frete.distancia_km == 0
+        assert frete.frete_estimado == 0
+        assert frete.destino_cidade == "Uberlândia"
+
+    def test_frete_cidade_proxima_mesmo_uf(self):
+        """Uberaba/MG (~100km de Uberlândia) usa distância haversine real."""
         empresa = _empresa()
         lote = _lote(uf="MG")
+        lote.origem_cidade = "Uberaba"
         frete = _calcular_frete(lote, empresa)
+        # 90 < haversine(Uberlândia, Uberaba) < 110
+        assert 80 < frete.distancia_km < 120
+        assert frete.frete_estimado > 0
+
+    def test_frete_cidade_fora_do_dataset_cai_em_heuristica(self):
+        """Cidade com nome inusitado (não achada no dataset IBGE) → fallback por UF."""
+        empresa = _empresa()
+        lote = _lote(uf="MG")
+        lote.origem_cidade = "Cidade-Fictícia-XYZ"
+        frete = _calcular_frete(lote, empresa)
+        # Não achou → usa heurística antiga: mesma UF = 150km
         assert frete.distancia_km == 150
         assert frete.frete_estimado > 0
-        assert frete.destino_uf == "MG"
 
-    def test_frete_uf_diferente(self):
+    def test_frete_uf_distante_maior_que_proxima(self):
         empresa = _empresa()
         lote_sp = _lote(uf="SP")
+        lote_sp.origem_cidade = "São Paulo"
         lote_am = _lote(uf="AM")
+        lote_am.origem_cidade = "Manaus"
         frete_sp = _calcular_frete(lote_sp, empresa)
         frete_am = _calcular_frete(lote_am, empresa)
-        # UF adjacente < UF distante
         assert frete_sp.distancia_km < frete_am.distancia_km
         assert frete_sp.frete_estimado <= frete_am.frete_estimado
 

@@ -250,6 +250,16 @@ def test_tabela_frete_extrapola_alem_da_maior_faixa():
     assert extrapolado == int(maior * 1.3)
 
 
+def test_tabela_frete_zero_km_e_gratuito():
+    """Lote na mesma cidade do pátio → frete R$ 0 pra qualquer categoria.
+
+    O comprador busca o carro pessoalmente; sem logística contratada.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    for categoria in (CategoriaVeiculo.HATCH, CategoriaVeiculo.SUV, CategoriaVeiculo.PICAPE):
+        assert empresa.frete_para(0, categoria) == 0
+
+
 # =============================================================================
 # Integração FIPE + Tabela Auto Avaliar
 # =============================================================================

@@ -190,27 +190,24 @@ async def garantir_autenticado(page, email: str, password: str) -> None:
 # Coleta de listagem
 # ---------------------------------------------------------------------------
 
-async def coletar_listagem(
+async def _coletar_listagem_cidade(
     page,
-    empresa: EmpresaConfig,
-    horizonte_dias: int = 7,
-) -> list[dict]:
-    """
-    Coleta cards da listagem do Auto Avaliar para a cidade/UF da empresa.
-    Rola a página para carregar todos os cards.
-    Filtra: só lotes com fim_em dentro do horizonte (próximos N dias).
-    Retorna lista de {loteId, href, lines} — mesmo shape do JSON manual.
-    """
-    cidade = quote(empresa.patio.cidade.lower())
-    uf = empresa.patio.uf.lower()
-    url = f"{LISTAGEM_URL}?location={uf}&cities={cidade}&report=yes&order=recforyou"
+    cidade: str,
+    uf: str,
+    horizonte_dias: int,
+) -> list:
+    """Coleta cards de UMA cidade específica. Helper interno do coletar_listagem."""
+    url = (
+        f"{LISTAGEM_URL}?location={uf.lower()}&cities={quote(cidade.lower())}"
+        f"&report=yes&order=recforyou"
+    )
 
     await page.goto(url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(2000)
 
     # Scroll infinito — rola até parar de aparecer novos cards
     cards_anterior = 0
-    for _ in range(30):  # máximo 30 scrolls
+    for _ in range(30):
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await page.wait_for_timeout(1500)
         cards_agora = await page.evaluate("document.querySelectorAll('a[href*=\"/avaliacoes/\"]').length")
@@ -218,24 +215,66 @@ async def coletar_listagem(
             break
         cards_anterior = cards_agora
 
-    # Extrai cards
-    raw_cards: list[dict] = await page.evaluate(_EXTRACT_CARDS_JS)
+    raw_cards: list = await page.evaluate(_EXTRACT_CARDS_JS)
 
     # Filtra por horizonte
     agora = datetime.now()
     limite = agora + timedelta(days=horizonte_dias)
     resultado = []
     for card in raw_cards:
-        from carros_sa.scraping.parsers import parse_card_lines, _timer_para_fim_em, _TIMER_RE
-        # Detecta timer nas linhas para filtrar por horizonte
+        from carros_sa.scraping.parsers import _timer_para_fim_em, _TIMER_RE
         timer_linha = next((l for l in card["lines"] if _TIMER_RE.match(l)), None)
         if timer_linha:
             fim_em = _timer_para_fim_em(agora, timer_linha)
             if fim_em and fim_em > limite:
-                continue  # fora do horizonte
+                continue
         resultado.append(card)
 
     return resultado
+
+
+async def coletar_listagem(
+    page,
+    empresa: EmpresaConfig,
+    horizonte_dias: int = 7,
+) -> list[dict]:
+    """
+    Coleta cards do Auto Avaliar iterando pelas cidades do raio operacional da empresa.
+
+    Itera `empresa.cidades_de_busca()` (haversine a partir do pátio, ordenado
+    por distância) e combina resultados deduplicando por lote_id — mesmo lote
+    aparecendo em buscas de 2 cidades diferentes é contado só 1 vez.
+
+    Retorna lista de {loteId, href, lines} — mesmo shape antigo.
+    """
+    try:
+        municipios = empresa.cidades_de_busca()
+    except Exception:
+        # Fallback: só o pátio (comportamento legado) se o dataset não estiver disponível
+        municipios = []
+
+    # Se o dataset geo não retornou nada, caímos pra busca só da cidade do pátio
+    if not municipios:
+        return await _coletar_listagem_cidade(
+            page, empresa.patio.cidade, empresa.patio.uf, horizonte_dias,
+        )
+
+    vistos: set = set()
+    agregado: list[dict] = []
+    for m in municipios:
+        try:
+            cards = await _coletar_listagem_cidade(page, m.nome, m.uf, horizonte_dias)
+        except Exception:
+            continue   # 1 cidade falhou → segue pras outras
+        for card in cards:
+            lote_id = card.get("loteId")
+            if lote_id and lote_id not in vistos:
+                vistos.add(lote_id)
+                agregado.append(card)
+        # Sleep leve entre cidades pra reduzir risco de rate-limit
+        await page.wait_for_timeout(random.randint(800, 1500))
+
+    return agregado
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,9 @@ class EmpresaConfig(BaseModel):
     patio: PatioConfig
     margem: MargemConfig
     raio_max_km: int = 1000
+    # Raio operacional — cidades dentro desse haversine a partir do pátio são
+    # raspadas. Distinto de raio_max_km (teto legado; não usado no frete real).
+    raio_operacao_km: int = 150
     fator_risco_bounds: Tuple[float, float] = (1.0, 2.0)
     fator_liquidez_bounds: Tuple[float, float] = (1.0, 1.8)
     # tabela_frete: chave = "min-max" km, valor = dict categoria -> reais
@@ -54,7 +57,14 @@ class EmpresaConfig(BaseModel):
     custo_op_fixo: int = 0
 
     def frete_para(self, distancia_km: int, categoria: CategoriaVeiculo) -> int:
-        """Lookup na tabela de frete. Além do último range → retorna maior + 30% extra."""
+        """Lookup na tabela de frete. Além do último range → retorna maior + 30% extra.
+
+        Caso especial: `distancia_km == 0` (mesma cidade do pátio) retorna 0.
+        O comprador busca o carro pessoalmente, sem logística contratada.
+        """
+        if distancia_km == 0:
+            return 0
+
         faixas = []  # list[tuple[int, int, dict[str, int]]]
         for chave, valores in self.tabela_frete.items():
             lo, hi = chave.split("-")
@@ -68,6 +78,18 @@ class EmpresaConfig(BaseModel):
         # Excedeu a maior faixa — extrapola conservadoramente
         _, _, maiores = faixas[-1]
         return int(maiores[categoria.value] * 1.3)
+
+    def cidades_de_busca(self) -> list:
+        """Lista de Municipio no raio operacional (crescente por distância; pátio primeiro).
+
+        Import local pra evitar ciclo `geo → tenancy → geo`.
+        """
+        from carros_sa.tools.geo import cidades_no_raio
+        return cidades_no_raio(
+            cidade_base=self.patio.cidade,
+            uf_base=self.patio.uf,
+            raio_km=self.raio_operacao_km,
+        )
 
 
 @lru_cache(maxsize=32)

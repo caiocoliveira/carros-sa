@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -21,16 +22,24 @@ from carros_sa.scraping.parsers import parse_card_lines
 console = Console()
 
 
+def _parse_iso_utc(s: str) -> datetime:
+    """'2026-04-14T22:00:00Z' → datetime naive UTC."""
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+
+
 def main(path: str) -> None:
     data = json.loads(Path(path).read_text())
     lotes_raw = data["lotes_amostra"]
+    # coletado_em é a referência histórica pro timer do card: reingerir sem
+    # ele calcula fim_em relativo a "agora" e os lotes viram sempre futuros.
+    agora = _parse_iso_utc(data["coletado_em"]) if "coletado_em" in data else None
     init_db()
 
     parsed = []
     falhas = []
     for entry in lotes_raw:
         try:
-            lote = parse_card_lines(entry["lines"], entry["loteId"], entry["href"])
+            lote = parse_card_lines(entry["lines"], entry["loteId"], entry["href"], agora=agora)
             parsed.append(lote)
         except Exception as e:  # pragma: no cover — log estratégico
             falhas.append({"loteId": entry["loteId"], "erro": str(e)})

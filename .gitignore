@@ -19,6 +19,7 @@ build/
 *.db-journal
 data/scrapes/*.json
 data/laudos_amostra/*.pdf
+data/cache/
 # Exceções: dataset de referência — usado como fixture pelos testes/workstreams
 !data/scrapes/2026-04-14_uberlandia_listagem.json
 !data/scrapes/2026-04-14_webmotors_fiesta.json

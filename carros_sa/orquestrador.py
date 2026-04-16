@@ -416,10 +416,12 @@ async def _pipeline_lote(
         flags = parse_detalhe(body_text, pdf_url)
 
         # 1b. Persiste flags do detalhe + preços da Tabela Auto Avaliar no Lote.
-        # Sem isso, os campos preco_referencia_aa / fipe_pct_lance_minimo não
-        # populam e o raw_json.detalhe fica vazio — quebra reprocessamentos
-        # futuros que dependem de sinais do scraper (ex.: reprovado_estrutural).
+        # COMMIT GRANULAR: sem isso, qualquer erro subsequente (ex.: FIPE 404
+        # pra moto, falha de laudo, Webmotors timeout) dispara session.rollback()
+        # e **apaga também o detalhe raspado**, forçando re-scrape desnecessário.
+        # Comitando aqui, o detalhe fica salvo e o reprocessamento vira 1-request.
         _persistir_flags_no_lote(lote, flags, session)
+        session.commit()
 
         # 2. Early exit
         if flags.early_exit:
@@ -472,16 +474,26 @@ async def _pipeline_lote(
             from carros_sa.agents.calibracao_giro import _categoria_de_modelo
             categoria = _categoria_de_modelo(lote.modelo)
 
-        mercado = avaliar_mercado(
-            marca=lote.marca,
-            modelo=lote.modelo,
-            ano=lote.ano,
-            km=lote.km,
-            similares_precos=flags.similares_precos or None,
-            categoria=categoria,
-            session=session,
-            empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
-        )
+        try:
+            mercado = avaliar_mercado(
+                marca=lote.marca,
+                modelo=lote.modelo,
+                ano=lote.ano,
+                km=lote.km,
+                similares_precos=flags.similares_precos or None,
+                categoria=categoria,
+                session=session,
+                empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
+            )
+        except LookupError as exc:
+            # FIPE Parallelum não tem catálogo de motos (Dafra, Triumph, Harley…)
+            # nem modelos exóticos fora de linha. Sem FIPE o precificador perde
+            # a âncora — descartar é mais correto que falhar com exceção e
+            # bloquear a planilha inteira. Lote fica visível com motivo claro.
+            return ResultadoLote(
+                lote_id=lote.id, modelo=modelo_str, avaliado=False,
+                motivo_descarte=f"fipe_indisponivel: {exc}",
+            )
 
         # 6. Reforma
         reforma = estimar_reforma(laudo, empresa)
@@ -501,9 +513,19 @@ async def _pipeline_lote(
                              preco_alvo=avaliacao.preco_alvo, roi_pct=roi_pct)
 
     except Exception as exc:
+        # Log estruturado pra debug: tipo da exceção + mensagem. Imprime antes
+        # do rollback pra garantir que o usuário veja qual lote falhou e por quê
+        # (sem esse print, o erro ficava só no ResultadoLote.erro, invisível
+        # durante o run — causou misterio de "21 erros silenciosos" em 2026-04-16).
+        import sys
+        print(
+            f"[pipeline_lote] ERRO em {lote.id} ({modelo_str}): "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr, flush=True,
+        )
         session.rollback()
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str,
-                             avaliado=False, erro=str(exc))
+                             avaliado=False, erro=f"{type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------

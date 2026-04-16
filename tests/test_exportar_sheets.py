@@ -42,8 +42,14 @@ def _lote(lote_id: str = "L001", marca: str = "Ford", modelo: str = "Fiesta", an
     )
 
 
-def _avaliacao(lote_id: str = "L001", empresa_id: str = "uberlandia_mg",
-               score_roi: float = 0.3, preco_giro: int = 35000) -> AvaliacaoLote:
+def _avaliacao(
+    lote_id: str = "L001",
+    empresa_id: str = "uberlandia_mg",
+    score_roi: float = 0.3,
+    preco_giro: int = 35000,
+    preco_giro_fipe: int = 35000,
+    preco_giro_aa=None,
+) -> AvaliacaoLote:
     return AvaliacaoLote(
         empresa_id=empresa_id,
         lote_id=lote_id,
@@ -57,6 +63,8 @@ def _avaliacao(lote_id: str = "L001", empresa_id: str = "uberlandia_mg",
         reforma_estimada=3000,
         taxas_leilao=600,
         preco_giro=preco_giro,
+        preco_giro_fipe=preco_giro_fipe,
+        preco_giro_aa=preco_giro_aa,
         justificativa="Laudo leve, FIPE R$30k, giro estimado 30 dias.",
         criado_em=datetime.utcnow(),
     )

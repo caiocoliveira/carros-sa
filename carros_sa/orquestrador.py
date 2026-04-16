@@ -193,6 +193,8 @@ def _upsert_avaliacao(avaliacao, empresa_id: str, session: Session) -> None:
         reforma_estimada=avaliacao.reforma_estimada,
         taxas_leilao=avaliacao.taxas_leilao,
         preco_giro=avaliacao.preco_giro,
+        preco_giro_fipe=avaliacao.preco_giro_fipe,
+        preco_giro_aa=avaliacao.preco_giro_aa,
         justificativa=avaliacao.justificativa,
         criado_em=datetime.utcnow(),
     )

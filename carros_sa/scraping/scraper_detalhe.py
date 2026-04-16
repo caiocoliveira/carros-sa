@@ -21,7 +21,7 @@ from typing import Callable, Optional
 
 from sqlmodel import Session
 
-from carros_sa.models import Lote
+from carros_sa.models import Lote, PrecoReferenciaAA
 from carros_sa.scraping.parsers import DetalheFlags, parse_detalhe
 
 
@@ -62,6 +62,8 @@ def _flags_to_dict(flags: DetalheFlags) -> dict:
         "observacoes_anunciante": flags.observacoes_anunciante,
         "laudo_pdf_url": flags.laudo_pdf_url,
         "similares_precos": flags.similares_precos,
+        "preco_referencia_aa": flags.preco_referencia_aa,
+        "fipe_pct_lance_minimo": flags.fipe_pct_lance_minimo,
         "reprovado_estrutural": flags.reprovado_estrutural,
         "laudo_aprovado": flags.laudo_aprovado,
         "early_exit": flags.early_exit,
@@ -95,6 +97,22 @@ def processar_detalhe(
     raw = dict(lote.raw_json or {})
     raw["detalhe"] = _flags_to_dict(flags)
     lote.raw_json = raw
+
+    # Promove referências de preço da Tabela Auto Avaliar pra colunas first-class.
+    # Histórico vai pra preco_referencia_aa (tabela separada) pra futura consulta
+    # por modelo em lotes que não trouxerem o dado embutido.
+    if flags.preco_referencia_aa is not None:
+        lote.preco_referencia_aa = flags.preco_referencia_aa
+        session.add(PrecoReferenciaAA(
+            marca=lote.marca,
+            modelo=lote.modelo,
+            ano=lote.ano,
+            preco=flags.preco_referencia_aa,
+            fipe_pct_lance_minimo=flags.fipe_pct_lance_minimo,
+            origem_lote_id=lote_id,
+        ))
+    if flags.fipe_pct_lance_minimo is not None:
+        lote.fipe_pct_lance_minimo = flags.fipe_pct_lance_minimo
 
     pdf_baixado = False
     pdf_path: Optional[Path] = None

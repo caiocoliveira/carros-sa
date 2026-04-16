@@ -7,6 +7,7 @@ Zero dependência de browser — funções puras, testáveis em isolamento.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -175,6 +176,8 @@ class DetalheFlags:
         observacoes_anunciante: str = "",
         laudo_pdf_url: Optional[str] = None,
         similares_precos: list = None,
+        preco_referencia_aa: Optional[int] = None,
+        fipe_pct_lance_minimo: Optional[int] = None,
     ):
         self.specs = specs
         self.status_laudo = status_laudo
@@ -187,6 +190,8 @@ class DetalheFlags:
         self.observacoes_anunciante = observacoes_anunciante
         self.laudo_pdf_url = laudo_pdf_url
         self.similares_precos = similares_precos or []
+        self.preco_referencia_aa = preco_referencia_aa
+        self.fipe_pct_lance_minimo = fipe_pct_lance_minimo
 
     @property
     def reprovado_estrutural(self) -> bool:
@@ -255,6 +260,9 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
     # 8. Preços de similares na plataforma (seção "Talvez se interesse por")
     similares_precos = _extrai_precos_similares(body_text)
 
+    # 9. Preços da Tabela Auto Avaliar embutidos (preço referência + FIPE%)
+    precos_aa = extrair_precos_aa(body_text)
+
     return DetalheFlags(
         specs=specs,
         status_laudo=status_laudo,
@@ -267,6 +275,8 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
         observacoes_anunciante=observacoes,
         laudo_pdf_url=laudo_pdf_url,
         similares_precos=similares_precos,
+        preco_referencia_aa=precos_aa.preco_referencia_aa,
+        fipe_pct_lance_minimo=precos_aa.fipe_pct_lance_minimo,
     )
 
 
@@ -312,3 +322,93 @@ def _extrai_precos_similares(body_text: str) -> list:
         return []
     bloco = body_text[idx : idx + 2000]
     return [_parse_br_int(m) for m in re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", bloco)]
+
+
+# =============================================================================
+# Tabela Auto Avaliar — preços de referência embedded na página do anúncio
+# =============================================================================
+#
+# Dois sinais embutidos pela plataforma em cada página de lote (SSR, sem XHR):
+#   1. "ULTIMA AVALIAÇÃO" — preço-alvo que a Tabela Auto Avaliar atribui àquele
+#      modelo/versão/ano (em reais). Marker visual do carro no atacado.
+#   2. % sobre FIPE — percentual do lance mínimo em relação à FIPE. Rotulado
+#      visualmente como "fipe X%" via imagem/CSS adjacente à tag. O número vem
+#      sempre em `.tag-percent-value` na seção da foto.
+#
+# Seletores confirmados em inspeção manual autenticada (2026-04-16, lote 21893414).
+
+@dataclass
+class PrecosAA:
+    """Sinais de preço Tabela Auto Avaliar extraídos da página do lote."""
+
+    preco_referencia_aa: Optional[int] = None   # R$ da ULTIMA AVALIAÇÃO (referência do modelo)
+    fipe_pct_lance_minimo: Optional[int] = None # % sobre FIPE do lance mínimo (0..999)
+
+
+_RE_BIND_PRICE = re.compile(
+    r'class="[^"]*\bbind-price\b[^"]*"[^>]*>\s*([\d.,]+)\s*</',
+    re.IGNORECASE,
+)
+_RE_TAG_PERCENT = re.compile(
+    r'class="[^"]*\btag-percent-value\b[^"]*"[^>]*>\s*(\d{1,3})\s*<',
+    re.IGNORECASE,
+)
+# Fallback innerText: "ULTIMA AVALIAÇÃO" seguido (em até 2 linhas) de valor R$
+_RE_TEXT_ULTIMA_AVAL = re.compile(
+    r"ULTIMA\s+AVALIA[ÇC][ÃA]O[^\n]*\n\s*([\d.,]+)",
+    re.IGNORECASE,
+)
+# Fallback innerText: linha isolada "NN%" (pega o primeiro match até 3 dígitos)
+_RE_TEXT_PCT_ISOLADO = re.compile(r"(?m)^\s*(\d{1,3})\s*%\s*$")
+
+
+def _parse_preco_flexivel(s: str) -> Optional[int]:
+    """Converte '31.000,00' / '31.000' / '31000' em int. None se não parseável."""
+    s = s.strip().replace(".", "")
+    s = s.split(",")[0]  # descarta centavos
+    if not s.isdigit():
+        return None
+    return int(s)
+
+
+def extrair_precos_aa(html_or_text: str) -> PrecosAA:
+    """Extrai preço-referência Auto Avaliar e % FIPE do HTML (ou innerText) do lote.
+
+    Prioriza âncoras HTML estáveis (`.bind-price`, `.tag-percent-value`). Se não
+    achar (ex.: recebeu só innerText), cai num fallback por regex de texto.
+    Retorna ambos campos `None` se a página não tiver os sinais — o caller
+    decide se isso é erro ou lote sem avaliação Auto Avaliar.
+    """
+    if not html_or_text:
+        return PrecosAA()
+
+    # 1. Tentativa HTML-first (mais precisa)
+    preco: Optional[int] = None
+    fipe_pct: Optional[int] = None
+
+    m = _RE_BIND_PRICE.search(html_or_text)
+    if m:
+        preco = _parse_preco_flexivel(m.group(1))
+
+    m = _RE_TAG_PERCENT.search(html_or_text)
+    if m:
+        try:
+            fipe_pct = int(m.group(1))
+        except ValueError:
+            fipe_pct = None
+
+    # 2. Fallback innerText — só preenche o que ainda falta
+    if preco is None:
+        m = _RE_TEXT_ULTIMA_AVAL.search(html_or_text)
+        if m:
+            preco = _parse_preco_flexivel(m.group(1))
+
+    if fipe_pct is None:
+        m = _RE_TEXT_PCT_ISOLADO.search(html_or_text)
+        if m:
+            try:
+                fipe_pct = int(m.group(1))
+            except ValueError:
+                fipe_pct = None
+
+    return PrecosAA(preco_referencia_aa=preco, fipe_pct_lance_minimo=fipe_pct)

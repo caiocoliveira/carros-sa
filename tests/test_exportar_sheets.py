@@ -256,6 +256,57 @@ class TestSheetsExporterQuery:
         idx_situacao = HEADER.index("Situação")
         assert "Viável" in rows[1][idx_situacao]
 
+    def test_exportar_url_como_hyperlink_clicavel(self):
+        """A coluna URL deve virar =HYPERLINK(url, "Abrir anúncio") pra célula ficar curta e clicável."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))  # url = https://autoavaliar.com.br/lote/L001
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_url = HEADER.index("URL")
+        url_cell = rows[1][idx_url]
+        assert url_cell.startswith("=HYPERLINK(")
+        assert "https://autoavaliar.com.br/lote/L001" in url_cell
+        assert "Abrir anúncio" in url_cell
+
+    def test_exportar_url_vazia_nao_gera_hyperlink(self):
+        """Lote sem URL deve cair pro placeholder '—', sem fórmula HYPERLINK quebrada."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.url = ""  # sem URL
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_url = HEADER.index("URL")
+        assert rows[1][idx_url] == "—"
+
     def test_exportar_roi_baseado_no_lance_maximo(self):
         """ROI deve ser calculado sobre o lance máximo, não sobre lance_atual."""
         engine = _engine_mem()

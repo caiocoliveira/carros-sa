@@ -154,6 +154,13 @@ class SheetsExporter:
         sheet_rows = [HEADER]
         for rank, r in enumerate(rows, start=1):
             situacao = "✓ Viável" if r["viavel"] else "✗ Caro demais"
+            # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
+            # em vez da URL crua longa. Sheets interpreta com USER_ENTERED.
+            if r["url"]:
+                url_escaped = r["url"].replace('"', '""')
+                url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
+            else:
+                url_cell = "—"
             sheet_rows.append([
                 rank,
                 situacao,
@@ -175,7 +182,7 @@ class SheetsExporter:
                 r["reforma_estimada"],
                 r["frete"],
                 r["justificativa"],
-                r["url"],
+                url_cell,
                 ts,
             ])
 
@@ -325,8 +332,8 @@ class SheetsExporter:
             [
                 "URL",
                 "Auto Avaliar",
-                "Link direto do anúncio no b2b.autoavaliar.com.br",
-                "Ir ao anúncio original pra checagens manuais ou lance",
+                "=HYPERLINK do link direto do anúncio no b2b.autoavaliar.com.br, rotulado 'Abrir anúncio'",
+                "1 clique pra abrir o anúncio original e fazer checagens manuais ou lance",
             ],
             [
                 "Atualizado em",

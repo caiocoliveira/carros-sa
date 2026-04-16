@@ -87,6 +87,10 @@ def top(
         enriquecidas.sort(key=lambda x: x[2], reverse=True)
     rows = enriquecidas[:n]
 
+    # Inferência de popularidade on-demand pra cada lote do top (barato, sem rede)
+    from carros_sa.agents.calibracao_giro import _categoria_de_modelo
+    from carros_sa.tools.popularidade import bucket_modelo
+
     sufixo = "ROI absoluto" if por_absoluto else "ROI anualizado"
     tbl = Table(title=f"Top {len(rows)} lotes — {empresa} (ordem: {sufixo})")
     tbl.add_column("Lote")
@@ -97,8 +101,11 @@ def top(
     tbl.add_column("ROI%", justify="right")
     tbl.add_column("Dias", justify="right")
     tbl.add_column("ROI/ano%", justify="right")
+    tbl.add_column("Pop.", justify="left")
     tbl.add_column("Risco", justify="right")
     for av, lote, roi_anual in rows:
+        cat = _categoria_de_modelo(lote.modelo)
+        bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
         tbl.add_row(
             lote.id,
             f"{lote.marca} {lote.modelo[:30]}",
@@ -108,6 +115,7 @@ def top(
             f"{av.score_roi * 100:.1f}%",
             str(av.dias_giro_estimado) if av.dias_giro_estimado else "—",
             f"{roi_anual * 100:.1f}%",
+            bucket.value,
             f"{av.fator_risco:.2f}",
         )
     console.print(tbl)

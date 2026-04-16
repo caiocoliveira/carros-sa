@@ -40,6 +40,7 @@ HEADER = [
     "ROI se pagar o máximo (%)",
     "Dias até venda (est.)",
     "ROI anualizado (%)",
+    "Popularidade",
     "Fator Risco",
     "Severidade Laudo",
     "Motor OK",
@@ -118,9 +119,14 @@ class SheetsExporter:
 
             viavel = av.preco_max > (lote.lance_atual or 0)
 
-            from carros_sa.agents.calibracao_giro import roi_anualizado
+            from carros_sa.agents.calibracao_giro import (
+                _categoria_de_modelo, roi_anualizado,
+            )
+            from carros_sa.tools.popularidade import bucket_modelo
             roi_max = _calcular_roi_no_maximo(av)
             roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+            cat_inferida = _categoria_de_modelo(lote.modelo)
+            bucket = bucket_modelo(lote.marca, lote.modelo, cat_inferida, ano=lote.ano)
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
             # Dupla checagem pra cobrir os dois vetores (snapshot velho + detecção
@@ -154,6 +160,7 @@ class SheetsExporter:
                 "roi_pct": roi_max,
                 "dias_giro": av.dias_giro_estimado,
                 "roi_anualizado": round(roi_anual, 1),
+                "popularidade": bucket.value,
                 "fator_risco": round(av.fator_risco, 3),
                 "severidade": laudo.severidade_geral if laudo else "—",
                 "motor_ok": ("Sim" if laudo.motor_ok else "NÃO") if laudo else "—",
@@ -218,6 +225,7 @@ class SheetsExporter:
                 r["roi_pct"],
                 r["dias_giro"] if r["dias_giro"] is not None else "—",
                 r["roi_anualizado"],
+                r["popularidade"],
                 r["fator_risco"],
                 r["severidade"],
                 r["motor_ok"],

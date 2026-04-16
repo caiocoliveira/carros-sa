@@ -87,6 +87,7 @@ def avaliar(
     fipe_client: Optional[FipeClient] = None,
     session: Optional[Session] = None,
     empresa_id: Optional[str] = None,
+    aplicar_popularidade: bool = True,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
@@ -131,6 +132,15 @@ def avaliar(
         dias_giro = max(15, dias_giro - 5)
     elif 0 < n <= 2:
         dias_giro += 10
+
+    # Ajuste relativo via popularidade FENABRAVE (top emplacamentos da categoria).
+    # Modelo blockbuster (top-5) gira ~40% mais rápido; modelo nicho ~30% mais lento.
+    # Acionado on-demand pra todo cálculo de mercado, mas só faz sentido pra
+    # categorias que aparecem no ranking (excluí UTILITARIO genérico, etc.).
+    if aplicar_popularidade:
+        from carros_sa.tools.popularidade import ajustar_dias_giro, bucket_modelo
+        bucket = bucket_modelo(marca, modelo, categoria, ano=ano)
+        dias_giro = ajustar_dias_giro(dias_giro, bucket)
 
     return SinalMercado(
         fipe=fipe_valor,

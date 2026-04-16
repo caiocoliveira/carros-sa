@@ -1,0 +1,155 @@
+# Ranking aproximado de emplacamentos de automóveis novos no Brasil — top 30
+# por categoria, baseado em dados públicos da FENABRAVE referência mar/2026.
+#
+# Como atualizar (rotina mensal):
+#   1. Baixar PDF/CSV mensal em https://www.fenabrave.org.br/
+#   2. Ler ranking de "Automóveis e comerciais leves" por modelo
+#   3. Agrupar por categoria do nosso enum (HATCH/SEDAN/SUV/PICAPE/UTILITARIO)
+#   4. Manter top 30 por categoria, ordem decrescente de unidades emplacadas
+#
+# Usado SOMENTE como sinal RELATIVO de popularidade — nunca o valor absoluto.
+# Ver `carros_sa/tools/popularidade.py` pra como o ranking vira multiplicador
+# de dias_giro_estimado (top 5 = blockbuster × 0.6, etc.).
+#
+# Carros descontinuados mas com forte presença no mercado de USADO (Polo
+# antigo, Voyage, Gol, Uno, Ka, Fit) entram mesmo sem emplacamento atual,
+# em posições medianas, pra refletir a demanda real do nosso negócio.
+
+referencia_mes: "2026-03"
+fonte: "FENABRAVE — emplacamentos de automóveis (mar/2026, dados curados)"
+
+ranking_por_categoria:
+  hatch:
+    - "HB20"
+    - "Mobi"
+    - "Onix"
+    - "Polo"
+    - "Polo Track"
+    - "Kwid"
+    - "Argo"
+    - "208"
+    - "Sandero"
+    - "C3"
+    - "Gol"
+    - "Up"
+    - "Uno"
+    - "Ka"
+    - "Fit"
+    - "i30"
+    - "Fiesta"
+    - "March"
+    - "Punto"
+    - "Palio"
+    - "Bravo"
+    - "Etios"
+    - "Astra"
+    - "Celta"
+    - "Picanto"
+    - "Soul"
+    - "Cobalt"  # tecnicamente sedan mas mercado trata como hatch alongado
+    - "Jazz"
+    - "City"  # quando hatch
+    - "Voyage"  # variante hatch raríssima
+
+  sedan:
+    - "Onix Plus"
+    - "Virtus"
+    - "Corolla"
+    - "City"
+    - "Yaris Sedan"
+    - "HB20S"
+    - "Logan"
+    - "Versa"
+    - "Cronos"
+    - "Civic"
+    - "Grand Siena"
+    - "Voyage"
+    - "Prisma"
+    - "Linea"
+    - "Sentra"
+    - "Cruze Sedan"
+    - "Cruze"
+    - "Jetta"
+    - "Fluence"
+    - "Polo Sedan"
+    - "Etios Sedan"
+    - "Cobalt Sedan"
+    - "Cobalt"
+    - "Focus Sedan"
+    - "Ka Sedan"
+    - "Vectra"
+    - "Astra Sedan"
+    - "Lancer"
+    - "Megane"
+    - "Versa SV"
+
+  suv:
+    - "T-Cross"
+    - "Creta"
+    - "Compass"
+    - "Pulse"
+    - "Tracker"
+    - "HR-V"
+    - "Renegade"
+    - "Corolla Cross"
+    - "Kicks"
+    - "Tucson"
+    - "Duster"
+    - "Ecosport"
+    - "Captur"
+    - "WR-V"
+    - "Territory"
+    - "Tiggo"
+    - "Haval H6"
+    - "Haval"
+    - "Commander"
+    - "Outlander"
+    - "Pajero"
+    - "Pajero Full"
+    - "Sportage"
+    - "Santa Fe"
+    - "X1"
+    - "Q3"
+    - "Cherokee"
+    - "Trailblazer"
+    - "Spin"
+    - "Freelander"
+
+  picape:
+    - "Strada"
+    - "Saveiro"
+    - "Montana"
+    - "Hilux"
+    - "Toro"
+    - "Ranger"
+    - "S10"
+    - "Amarok"
+    - "L200"
+    - "Frontier"
+    - "Triton"
+    - "Maverick"
+    - "Oroch"
+    - "Courier"
+    - "Hoggar"
+    - "RAM 1500"
+    - "RAM"
+    - "F-1000"
+    - "F-250"
+    - "Dakota"
+    - "D-20"
+    - "Bandeirante"
+
+  utilitario:
+    - "Master"
+    - "Sprinter"
+    - "Daily"
+    - "Ducato"
+    - "Boxer"
+    - "Jumper"
+    - "Trafic"
+    - "Doblò"
+    - "Berlingo"
+    - "Kangoo"
+    - "Partner"
+    - "Combi"
+    - "Fiorino"

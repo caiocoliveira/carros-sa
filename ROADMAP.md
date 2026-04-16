@@ -205,6 +205,15 @@ Cron semanal que popula `anuncio_webmotors.sumiu_em`. Só faz sentido depois de 
   - [carros_sa/tools/sheets.py](carros_sa/tools/sheets.py) — 2 colunas novas (Dias até venda, ROI anualizado)
 - **Calibração real (32 vendas importadas):** sedan calibrado 98d (vs prior 30d), hatch 128d (vs 25d), SUV 79d, picape 64d. **Sistema estava otimista demais** — operador real opera com mix de carros antigos e nichos que demoram muito mais que o prior categórico assumia.
 - **Cobertura:** 13 testes novos — 12 em [tests/test_calibracao_giro.py](tests/test_calibracao_giro.py) (inferência de categoria, calibração ≥3 vs fallback, idempotência por empresa, ROI anualizado com floor) + 1 em [tests/test_cli.py](tests/test_cli.py) (`test_top_ranqueia_por_roi_anualizado_default` — lote rápido com ROI menor passa lento com ROI maior).
+
+#### Pendência identificada por Caio (2026-04-16): granularidade da calibração
+A categoria genérica é grosseira demais. O hatch 128d agrupa Polo Track 2024 (227d, preço-cheio) com Onix Joy 1.0 2018 (278d) e Gol 2014 (22d) — perfis muito diferentes.
+
+Caminhos pra refinar (em ordem de simplicidade):
+1. **Sub-bucket por idade** (`hatch_novo` ≤3 anos / `hatch_velho` >3 anos). Implementação: ~1h. Custo: precisa rodar mais lotes pra ter ≥3 amostras por sub-bucket.
+2. **Calibração por modelo** quando há ≥2 amostras do MESMO modelo (cai pra categoria quando não). Mais granular, mas requer histórico denso.
+3. **Filtrar outliers**: usar mediana em vez de média; ou peso decrescente por idade da amostra.
+4. **Distinguir "demanda intrínseca" de "política de preço"**: o Polo demorou 227d porque vendeu na FIPE cheia. Dividir `dias_giro` em `dias_se_FIPE` vs `dias_se_FIPE-5%` exigiria histórico com info de quanto desconto deu (não temos hoje).
 - **Limitações:** calibração de qualidade modesta com 32 vendas (~poucas por categoria). Workstream H futuro vai melhorar com séries temporais e overlap real entre AA + Arrematado.
 
 ---

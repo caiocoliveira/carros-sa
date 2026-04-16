@@ -464,13 +464,21 @@ async def _pipeline_lote(
             origem_cidade=lote.origem_cidade,
             origem_uf=lote.origem_uf,
         )
+        # Categoria: prefere o que o laudo (visão Gemini) classificou; mas se voltar
+        # OUTRO (gênero indefinido), usa heurística por nome do modelo — assim o
+        # Compass vira SUV e Toro vira PICAPE, ativando a calibração correta de dias_giro.
+        categoria = laudo.categoria_veiculo
+        if categoria == CategoriaVeiculo.OUTRO:
+            from carros_sa.agents.calibracao_giro import _categoria_de_modelo
+            categoria = _categoria_de_modelo(lote.modelo)
+
         mercado = avaliar_mercado(
             marca=lote.marca,
             modelo=lote.modelo,
             ano=lote.ano,
             km=lote.km,
             similares_precos=flags.similares_precos or None,
-            categoria=laudo.categoria_veiculo,
+            categoria=categoria,
             session=session,
             empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
         )
@@ -554,9 +562,11 @@ async def orquestrar(
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
         ).all()
     }
+    # Exclui Lotes sintéticos importados via `arrematado-import` (leilao="historico_offline")
+    # — não têm URL real; só existem pra preservar FK do Arrematado.
     lotes_a_avaliar = [
         l for l in session.exec(select(Lote)).all()
-        if l.id not in ids_ja_avaliados
+        if l.id not in ids_ja_avaliados and l.leilao != "historico_offline"
     ]
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="carros_sa_"))

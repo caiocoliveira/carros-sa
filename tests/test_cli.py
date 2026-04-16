@@ -96,7 +96,9 @@ def test_top_sem_dados_emite_aviso(db_tmp):
 
 def test_top_ranqueia_por_roi_desc(db_tmp):
     _seed_avaliacoes(db_tmp, empresa="carros_uberlandia", n=3)
-    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--n", "10"])
+    # COLUMNS alto evita Rich truncar IDs com "…" quando há muitas colunas
+    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--n", "10"],
+                           env={"COLUMNS": "200"})
     assert result.exit_code == 0
     # Primeiro lote (LOT000) tem ROI 30%, segundo 25%, terceiro 20% — ordem descendente
     idx_lot0 = result.stdout.index("LOT000")
@@ -107,7 +109,8 @@ def test_top_ranqueia_por_roi_desc(db_tmp):
 
 def test_top_respeita_limite_n(db_tmp):
     _seed_avaliacoes(db_tmp, empresa="carros_uberlandia", n=3)
-    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--n", "2"])
+    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--n", "2"],
+                           env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert "LOT000" in result.stdout
     assert "LOT001" in result.stdout
@@ -117,7 +120,8 @@ def test_top_respeita_limite_n(db_tmp):
 def test_top_filtra_por_empresa(db_tmp):
     _seed_avaliacoes(db_tmp, empresa="carros_uberlandia", n=2, prefix="UBE")
     _seed_avaliacoes(db_tmp, empresa="outra_empresa", n=2, prefix="OUT")
-    result = runner.invoke(app, ["top", "--empresa", "outra_empresa"])
+    result = runner.invoke(app, ["top", "--empresa", "outra_empresa"],
+                           env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert "outra_empresa" in result.stdout
     assert "OUT000" in result.stdout
@@ -164,13 +168,14 @@ def test_top_ranqueia_por_roi_anualizado_default(db_tmp):
         session.commit()
 
     # Default: por ROI anualizado → RAPIDO vem antes
-    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia"])
+    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert result.stdout.index("RAPIDO") < result.stdout.index("LENTO")
     assert "ROI anualizado" in result.stdout
 
     # --absoluto inverte: por score_roi puro → LENTO (30%) vem antes de RAPIDO (20%)
-    result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--absoluto"])
+    result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--absoluto"],
+                               env={"COLUMNS": "200"})
     assert result_abs.exit_code == 0
     assert result_abs.stdout.index("LENTO") < result_abs.stdout.index("RAPIDO")
     assert "ROI absoluto" in result_abs.stdout

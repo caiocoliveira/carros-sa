@@ -154,8 +154,30 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 ### G — Tracking longitudinal Webmotors 🕐 futuro
 Cron semanal que popula `anuncio_webmotors.sumiu_em`. Só faz sentido depois de ≥2 semanas de coleta contínua.
 
-### H — Calibração coeficientes 🕐 futuro
-Relatório DuckDB `preco_alvo vs arrematado.preco_real`. Só ativa após 5+ linhas em `arrematado` (dados reais de compras).
+### H — Calibração coeficientes 🔓 destravado (dados disponíveis)
+- **Pré-requisito atendido:** [data/historico/uberlandia_arrematado.csv](data/historico/uberlandia_arrematado.csv) com **32 vendas reais** importáveis via `carros-sa arrematado-import`. Carregadas em `arrematado` + `lote` (sintético com `leilao="historico_offline"`) — preserva FK sem mexer em `models.py`.
+- **Já disponível:** 1 venda completa Auto Avaliar (Polo Track), 11 consignação (no pátio), 19 vendidos do Reinaldo com prazo médio 3,07 meses.
+- **Próximo passo:** relatório DuckDB `preco_alvo (AvaliacaoLote) vs preco_real (Arrematado)` quando houver overlap (lotes que entraram pelo pipeline AA E foram arrematados). Hoje overlap = 0 — precisa rodar triagem real e arrematar de fato.
+- **Bloco C deste plano** já consome esse dado pra calibrar `dias_giro_estimado` por categoria (sem esperar overlap, usa só `vendido_em - data` dos históricos).
+
+### Bloco A — Calibração econômica do precificador ✅
+- **Branch:** `claude/exciting-pascal` (worktree `exciting-pascal`)
+- **Arquivos:**
+  - [carros_sa/tenancy.py](carros_sa/tenancy.py) — novo `CustosOperacionais` (despachante/higienização/marketing/laudo/combustível) + `taxa_leilao_fixa`
+  - [carros_sa/precificador.py](carros_sa/precificador.py) — fórmula combina taxa pct + fixa
+  - [config/empresas/carros_uberlandia.yaml](config/empresas/carros_uberlandia.yaml) — calibrado: margem.base 0.18→0.25, taxa Auto Avaliar R$ 999 fixo, custos op R$ 2.523 decompostos
+  - [config/empresas/empresa_fake_sp.yaml](config/empresas/empresa_fake_sp.yaml) — bump margem 0.22→0.30 (mantém semântica "mais agressivo que Uberlândia")
+- **Calibração baseada em:** Polo Track 2024 real (R$ 52.200 → R$ 69.400, FIPE cheia, R$ 4.735 em custos recorrentes), histórico Reinaldo 21 carros (R$ 161k lucro / R$ 1,08M invest = 14,9% absoluto / 3 meses médios = ~5x CDI).
+- **Cobertura:** 18 testes em [tests/test_precificador.py](tests/test_precificador.py) (14 ajustados + 4 novos: `test_taxa_leilao_fixa_auto_avaliar_polo_track_real`, `test_taxa_leilao_pct_e_fixa_combinadas`, `test_custos_op_decompostos_somam_total`, `test_yaml_antigo_so_custo_op_fixo_funciona`).
+
+### Bloco B — Importador histórico → Arrematado ✅
+- **Branch:** `claude/exciting-pascal`
+- **Arquivos:**
+  - [carros_sa/tools/historico_import.py](carros_sa/tools/historico_import.py) — `HistoricoRow`, `parse_csv`, `importar_historico`, `lote_id_sintetico`. Idempotente (matching por marca+modelo+ano+valor_compra).
+  - [carros_sa/cli.py](carros_sa/cli.py) — subcomando `arrematado-import <csv> --empresa <id>`
+  - [data/historico/uberlandia_arrematado.csv](data/historico/uberlandia_arrematado.csv) — 32 carros do operador
+- **Como funciona:** cada linha vira `Lote` sintético (`leilao="historico_offline"`, `lote_id` determinístico) + `Arrematado`. Preserva FK pra `lote.id` sem mexer em [models.py](carros_sa/models.py). Suporta linhas "no pátio" (sem `data_venda` → `vendido_em` e `vendido_por` ficam NULL).
+- **Cobertura:** 4 testes em [tests/test_historico_import.py](tests/test_historico_import.py) — id sintético determinístico, gold do Polo real, "no pátio" parcial, idempotência.
 
 ---
 

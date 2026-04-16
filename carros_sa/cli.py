@@ -195,6 +195,57 @@ def ingest(
 
 
 # ---------------------------------------------------------------------------
+# arrematado-import — CSV de histórico → Lote sintético + Arrematado
+# ---------------------------------------------------------------------------
+
+@app.command("arrematado-import")
+def arrematado_import_cmd(
+    arquivo: Path = typer.Argument(..., help="CSV com colunas marca,modelo,ano,km,valor_compra,data_compra,custos_extras,valor_venda,data_venda,observacoes"),
+    empresa: str = typer.Option(..., help="ID da empresa (ex: carros_uberlandia)"),
+) -> None:
+    """Importa histórico de compra/venda offline pra tabela Arrematado.
+
+    Cria um Lote sintético (`leilao="historico_offline"`) por linha pra preservar
+    a integridade referencial do schema. Idempotente — re-rodar atualiza linhas
+    existentes (matching por marca+modelo+ano+valor_compra).
+    """
+    if not arquivo.exists():
+        console.print(f"[red]Arquivo não encontrado: {arquivo}[/red]")
+        raise typer.Exit(1)
+
+    from carros_sa.db import get_session, init_db
+    from carros_sa.tools.historico_import import importar_historico, parse_csv
+
+    init_db()
+    rows, erros_parse = parse_csv(arquivo)
+
+    if erros_parse:
+        console.print(f"[yellow]{len(erros_parse)} linha(s) com erro de parse:[/yellow]")
+        for linha, msg in erros_parse[:5]:
+            console.print(f"  linha {linha}: {msg}")
+        if len(erros_parse) > 5:
+            console.print(f"  ... e mais {len(erros_parse) - 5}")
+
+    with get_session() as session:
+        result = importar_historico(rows, empresa, session)
+
+    tbl = Table(title=f"Importação histórico — {empresa}")
+    tbl.add_column("Métrica")
+    tbl.add_column("Valor", justify="right")
+    tbl.add_row("Linhas no CSV", str(len(rows) + len(erros_parse)))
+    tbl.add_row("Lotes criados", f"[green]{result.criados}[/green]")
+    tbl.add_row("Lotes atualizados", str(result.atualizados))
+    tbl.add_row("Erros parse", str(len(erros_parse)))
+    tbl.add_row("Erros import", str(len(result.erros)))
+    console.print(tbl)
+
+    if result.erros:
+        console.print("[red]Erros de import:[/red]")
+        for linha, msg in result.erros[:10]:
+            console.print(f"  linha {linha}: {msg}")
+
+
+# ---------------------------------------------------------------------------
 # extrair-laudo — PDF → LaudoEstruturado
 # ---------------------------------------------------------------------------
 

@@ -173,5 +173,7 @@ def precificar(
         preco_giro=preco_giro,
         preco_giro_fipe=preco_giro_fipe,
         preco_giro_aa=preco_giro_aa,
+        fipe=mercado.fipe,
+        webmotors_mediana=mercado.webmotors_mediana,
         justificativa=justificativa,
     )

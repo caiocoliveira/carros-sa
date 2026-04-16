@@ -32,6 +32,8 @@ HEADER = [
     "KM",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
+    "FIPE (R$)",
+    "Webmotors Mediana (R$)",
     "Preço Giro FIPE (R$)",
     "Preço Giro Auto Avaliar (R$)",
     "FIPE % (lance min)",
@@ -75,7 +77,7 @@ class SheetsExporter:
         return self._gc
 
     def exportar(self, empresa_id: str, session: Session) -> int:
-        """Lê SQLite, escreve aba <empresa_id> na Sheet. Retorna n linhas exportadas."""
+        """Lê SQLite, escreve aba <empresa_id> + aba Glossário na Sheet. Retorna n linhas exportadas."""
         rows = self._query(empresa_id, session)
         # Ordenação: viáveis primeiro (preco_max > lance_atual), dentro de cada grupo
         # ordena por folga de lance decrescente (mais margem de negociação primeiro)
@@ -87,6 +89,7 @@ class SheetsExporter:
             ),
         )
         self._write_sheet(empresa_id, rows_sorted)
+        self._write_glossario_sheet()
         return len(rows_sorted)
 
     def _query(self, empresa_id: str, session: Session) -> List[dict]:
@@ -118,6 +121,8 @@ class SheetsExporter:
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
+                "fipe": av.fipe,
+                "webmotors_mediana": av.webmotors_mediana,
                 "preco_giro_fipe": av.preco_giro_fipe,
                 "preco_giro_aa": av.preco_giro_aa,
                 "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
@@ -158,6 +163,8 @@ class SheetsExporter:
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
                 r["preco_max"],
+                r["fipe"] if r["fipe"] is not None else "—",
+                r["webmotors_mediana"] if r["webmotors_mediana"] is not None else "—",
                 r["preco_giro_fipe"],
                 r["preco_giro_aa"] if r["preco_giro_aa"] is not None else "—",
                 f"{r['fipe_pct_lance_minimo']}%" if r["fipe_pct_lance_minimo"] is not None else "—",
@@ -176,6 +183,161 @@ class SheetsExporter:
         ws.update(sheet_rows, value_input_option="USER_ENTERED")
 
         # Congela linha do header
+        ws.freeze(rows=1)
+
+    def _write_glossario_sheet(self) -> None:
+        """Aba fixa 'Glossário' com origem, cálculo e racional de cada coluna da triagem.
+
+        Escrita toda vez que o exportador roda pra garantir que a doc não sai
+        de sincronia com o código. Usa sempre o mesmo nome de aba ('Glossário'),
+        então multi-tenant compartilha essa doc.
+        """
+        gc = self._client()
+        sh = gc.open_by_key(self._spreadsheet_id)
+        aba_nome = "Glossário"
+        try:
+            ws = sh.worksheet(aba_nome)
+        except Exception:
+            ws = sh.add_worksheet(title=aba_nome, rows=60, cols=4)
+
+        glossario = [
+            ["Campo", "Origem", "Cálculo / Fórmula", "Racional"],
+            [
+                "Rank",
+                "Derivado",
+                "Posição após ordenar viáveis primeiro, maior folga (max − atual) primeiro",
+                "Lotes que cabem no nosso teto e com mais espaço de negociação sobem",
+            ],
+            [
+                "Situação",
+                "Derivado",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais",
+                "Filtro de sanidade: se o mínimo já passou do nosso teto, não há lance a fazer",
+            ],
+            [
+                "Lote ID",
+                "Auto Avaliar",
+                "Segmento numérico da URL /avaliacoes/<empresa>/<ID>/<slug>",
+                "Chave estável pra deduplicar e reabrir o anúncio",
+            ],
+            [
+                "Modelo",
+                "Auto Avaliar (listagem)",
+                "Marca + modelo + ano extraídos do card via regex",
+                "Identificação humana do veículo",
+            ],
+            [
+                "Fim do Leilão",
+                "Auto Avaliar",
+                "Timer DD:HH:MM:SS do card convertido pra datetime absoluto",
+                "Urgência — lotes com fim próximo precisam de decisão antes",
+            ],
+            [
+                "KM",
+                "Auto Avaliar",
+                "Número parseado da página de detalhe (specs)",
+                "Input pro giro (KM alto = revenda mais difícil)",
+            ],
+            [
+                "Lance Atual (R$)",
+                "Auto Avaliar",
+                "Maior lance no momento da raspagem (campo 'ULTIMA AVALIAÇÃO' da plataforma)",
+                "Piso que precisamos cobrir pra entrar no leilão",
+            ],
+            [
+                "Lance Máximo (R$)",
+                "Precificador",
+                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade: taxa é cobrada sobre o próprio lance vencedor (~8%).",
+                "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada mesmo no melhor cenário",
+            ],
+            [
+                "FIPE (R$)",
+                "API FIPE Parallelum",
+                "Valor da tabela FIPE pro modelo+ano, R$ bruto",
+                "Âncora pública de preço de varejo — linha de base nacional",
+            ],
+            [
+                "Webmotors Mediana (R$)",
+                "Webmotors scraper",
+                "Mediana dos preços dos anúncios ativos do mesmo modelo/ano",
+                "Preço real de mercado (varejo) agora, não 'oficial' como FIPE",
+            ],
+            [
+                "Preço Giro FIPE (R$)",
+                "Precificador",
+                "min(FIPE × 0.95, Webmotors p25). Corta 5% da FIPE pra aproximar de atacado e limita pelo p25 (25% mais baratos) do Webmotors.",
+                "Preço de venda conservador ancorado em FIPE — linha de base se não tiver dado Auto Avaliar",
+            ],
+            [
+                "Preço Giro Auto Avaliar (R$)",
+                "Precificador",
+                "min(Auto Avaliar ref, Webmotors p25). 'Auto Avaliar ref' vem da 'ULTIMA AVALIAÇÃO' do anúncio (tabela do próprio marketplace de atacado).",
+                "Preço atacado real — geralmente mais baixo que FIPE. Quando presente, ganha peso no preco_giro final (menor entre os dois)",
+            ],
+            [
+                "FIPE % (lance min)",
+                "Auto Avaliar",
+                "Atributo .tag-percent-value no DOM do anúncio (badge na foto)",
+                "Sinal do vendedor sobre valor relativo: % baixo = modelo desvalorizado, alto = perto da FIPE",
+            ],
+            [
+                "ROI se pagar o máximo (%)",
+                "Derivado",
+                "(preco_giro − capital_total) ÷ capital_total × 100, onde capital_total = lance_max + reforma + frete + taxas(~8% do max) + custo_op",
+                "Retorno PERCENTUAL no pior cenário aceitável (se ganhar o lote pagando exatamente o teto)",
+            ],
+            [
+                "Fator Risco",
+                "Precificador",
+                "bounds.lo + (bounds.hi − bounds.lo) × peso, onde peso = severidade_laudo + documentação + motor + (1 − confidence laudo)",
+                "Multiplica a margem exigida. Lote mais arriscado → margem maior → lance mais baixo",
+            ],
+            [
+                "Severidade Laudo",
+                "ExtratorLaudo",
+                "Classificação do laudo em nenhuma / leve / média / grave / estrutural, via análise do PDF + fotos com LLM",
+                "Sinal primário de risco — 'estrutural' é descartado automaticamente no scraper",
+            ],
+            [
+                "Motor OK",
+                "ExtratorLaudo",
+                "Bool do campo motor_ok do laudo estruturado",
+                "Motor comprometido destrói margem de revenda; penaliza fator_risco forte",
+            ],
+            [
+                "Reforma Estimada (R$)",
+                "EstimadorReforma",
+                "Σ (família_peça × severidade) na tabela YAML da empresa + adicional estrutural se aplicável",
+                "Custo ANTES de vender — sai direto do preço de giro. Empresa-específico (mão de obra varia por cidade)",
+            ],
+            [
+                "Frete (R$)",
+                "Tabela da empresa",
+                "empresa.frete_para(km_origem→pátio, categoria_veículo) com extrapolação +30% acima da maior faixa",
+                "Custo de trazer o carro ao pátio — aumenta com distância e peso do veículo",
+            ],
+            [
+                "Justificativa",
+                "Precificador",
+                "String montada com todas as variáveis da fórmula pra auditoria humana",
+                "Facilita revisar por que um lote ficou com aquele preco_alvo sem abrir código",
+            ],
+            [
+                "URL",
+                "Auto Avaliar",
+                "Link direto do anúncio no b2b.autoavaliar.com.br",
+                "Ir ao anúncio original pra checagens manuais ou lance",
+            ],
+            [
+                "Atualizado em",
+                "Derivado",
+                "Timestamp local do momento em que a aba foi reescrita",
+                "Saber se os números são frescos (pipeline diário roda às 7h)",
+            ],
+        ]
+
+        ws.clear()
+        ws.update(glossario, value_input_option="USER_ENTERED")
         ws.freeze(rows=1)
 
     @property

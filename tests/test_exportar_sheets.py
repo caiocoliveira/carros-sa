@@ -140,9 +140,10 @@ class TestSheetsExporterQuery:
                 n = exporter.exportar("uberlandia_mg", session)
 
         assert n == 2
-        mock_ws.update.assert_called_once()
-        # Verifica que o header foi escrito
-        call_args = mock_ws.update.call_args[0][0]
+        # update é chamado 2x: primeira = aba da empresa, segunda = aba Glossário
+        assert mock_ws.update.call_count == 2
+        # Verifica que o header da aba da empresa é o HEADER correto
+        call_args = mock_ws.update.call_args_list[0][0][0]
         assert call_args[0] == HEADER
 
     def test_exportar_viaveis_aparecem_primeiro(self):
@@ -168,7 +169,7 @@ class TestSheetsExporterQuery:
             with Session(engine) as session:
                 exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args[0][0]
+        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         # row[0] = header, row[1] = rank 1, row[2] = rank 2
         idx_lote_id = HEADER.index("Lote ID")
         idx_situacao = HEADER.index("Situação")
@@ -199,7 +200,7 @@ class TestSheetsExporterQuery:
                 n = exporter.exportar("uberlandia_mg", session)
 
         assert n == 1
-        rows = mock_ws.update.call_args[0][0]
+        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         data_row = rows[1]
         # Severidade e Motor OK devem ser "—"
         idx_severidade = HEADER.index("Severidade Laudo")
@@ -228,7 +229,7 @@ class TestSheetsExporterQuery:
 
         assert n == 0
         # update é chamado com só o header
-        rows = mock_ws.update.call_args[0][0]
+        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         assert len(rows) == 1
         assert rows[0] == HEADER
 
@@ -251,7 +252,7 @@ class TestSheetsExporterQuery:
             with Session(engine) as session:
                 exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args[0][0]
+        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         idx_situacao = HEADER.index("Situação")
         assert "Viável" in rows[1][idx_situacao]
 
@@ -275,7 +276,7 @@ class TestSheetsExporterQuery:
             with Session(engine) as session:
                 exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args[0][0]
+        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         idx_roi = HEADER.index("ROI se pagar o máximo (%)")
         roi_val = rows[1][idx_roi]
         # ROI ≈ 10-12% (baseado no lance máximo, não no lance atual de 20k)

@@ -115,6 +115,8 @@ def _avaliacao_obj(lote_id: str = "L001") -> Avaliacao:
         preco_giro=24000,
         preco_giro_fipe=24000,
         preco_giro_aa=None,
+        fipe=28000,
+        webmotors_mediana=25000,
         justificativa="Teste.",
     )
 

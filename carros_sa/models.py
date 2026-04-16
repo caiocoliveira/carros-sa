@@ -163,6 +163,10 @@ class Avaliacao(BaseModel):
     # ambas as âncoras (FIPE e Tabela Auto Avaliar) lado a lado.
     preco_giro_fipe: int                  # ancorado em FIPE descontado ∩ webmotors p25
     preco_giro_aa: Optional[int] = None   # ancorado em Tabela Auto Avaliar; None se sem dado
+    # Âncoras brutas — persistidas pra que o relatório mostre FIPE puro e a mediana
+    # Webmotors ao lado do preço de giro, facilitando auditoria humana.
+    fipe: int
+    webmotors_mediana: int
     justificativa: str
 
 
@@ -284,6 +288,10 @@ class AvaliacaoLote(SQLModel, table=True):
     preco_giro: int                                # consolidado (menor entre FIPE e AA)
     preco_giro_fipe: int                           # decomposto — ancorado em FIPE
     preco_giro_aa: Optional[int] = None            # decomposto — ancorado em Tabela Auto Avaliar
+    # Âncoras brutas pro relatório — FIPE puro e mediana Webmotors no momento da avaliação.
+    # Podem ficar NULL em registros antigos (pré-workstream K).
+    fipe: Optional[int] = None
+    webmotors_mediana: Optional[int] = None
     justificativa: str
     criado_em: datetime = SQLField(default_factory=datetime.utcnow)
 

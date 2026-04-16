@@ -247,6 +247,8 @@ def _upsert_avaliacao(avaliacao, empresa_id: str, session: Session) -> None:
         preco_giro=avaliacao.preco_giro,
         preco_giro_fipe=avaliacao.preco_giro_fipe,
         preco_giro_aa=avaliacao.preco_giro_aa,
+        fipe=avaliacao.fipe,
+        webmotors_mediana=avaliacao.webmotors_mediana,
         justificativa=avaliacao.justificativa,
         criado_em=datetime.utcnow(),
     )

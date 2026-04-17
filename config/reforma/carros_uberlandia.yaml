@@ -1,6 +1,13 @@
 # Tabela de custos de reforma — Carros SA Uberlândia.
 # Preços em reais por família de peça × severidade da intervenção.
 # Famílias casadas por prefixo no nome da `Avaria.parte` (ver estimador_reforma.py).
+#
+# Nota de calibração (16/04/2026): valores de lataria externa (porta, paralama,
+# capo_tampa, tampa, teto) recalibrados após comparação LLM×tabela mostrar que
+# o preço cru da peça + funilaria subestima o custo real — pintura/acabamento
+# adiciona ~2× por peça em Uberlândia. Os números abaixo JÁ INCLUEM peça +
+# reparo + pintura + acabamento. Coluna/longarina/painel mantiveram (pintura
+# entra junto no bloco estrutural via `adicional_estrutural`).
 empresa_id: carros_uberlandia
 
 pecas:
@@ -14,31 +21,32 @@ pecas:
     media: 1500
     grave: 3500
     estrutural: 7000
+  # LATARIA EXTERNA — valores incluem peça + reparo + pintura + acabamento.
   porta:
-    leve: 400
-    media: 900
-    grave: 2200
-    estrutural: 4000
+    leve: 700      # era 400 — +pintura/acabamento
+    media: 1500    # era 900
+    grave: 3500    # era 2200
+    estrutural: 6000  # era 4000
   paralama:
-    leve: 350
-    media: 750
-    grave: 1800
-    estrutural: 3500
+    leve: 600      # era 350
+    media: 1500    # era 750  (LLM observou ~1600/paralama média no Toro)
+    grave: 3000    # era 1800
+    estrutural: 5500  # era 3500
   capo_tampa:
-    leve: 400
-    media: 900
-    grave: 2200
-    estrutural: 4000
+    leve: 700      # era 400
+    media: 1500    # era 900
+    grave: 3500    # era 2200
+    estrutural: 6000  # era 4000
   tampa:
-    leve: 400
-    media: 900
-    grave: 2200
-    estrutural: 4000
+    leve: 700      # era 400
+    media: 1500    # era 900
+    grave: 3500    # era 2200
+    estrutural: 6000  # era 4000
   teto:
-    leve: 500
-    media: 1100
-    grave: 3000
-    estrutural: 6000
+    leve: 900      # era 500
+    media: 1800    # era 1100
+    grave: 4500    # era 3000
+    estrutural: 8500  # era 6000
   painel:
     leve: 500
     media: 1200

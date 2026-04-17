@@ -1,4 +1,6 @@
 # Tabela de custos de reforma — Fake Auto SP (mais cara que MG: mão de obra metropolitana).
+# Lataria externa inclui peça + reparo + pintura + acabamento (mesma calibração da
+# empresa carros_uberlandia — ver comentário lá). SP ~25% acima de MG.
 empresa_id: empresa_fake_sp
 
 pecas:
@@ -12,31 +14,32 @@ pecas:
     media: 1900
     grave: 4400
     estrutural: 8500
+  # LATARIA EXTERNA — valores incluem peça + reparo + pintura + acabamento.
   porta:
-    leve: 500
-    media: 1100
-    grave: 2700
-    estrutural: 4800
+    leve: 900       # era 500
+    media: 1900     # era 1100
+    grave: 4400     # era 2700
+    estrutural: 7500  # era 4800
   paralama:
-    leve: 450
-    media: 950
-    grave: 2200
-    estrutural: 4200
+    leve: 800       # era 450
+    media: 1900     # era 950
+    grave: 3800     # era 2200
+    estrutural: 6900  # era 4200
   capo_tampa:
-    leve: 500
-    media: 1100
-    grave: 2700
-    estrutural: 4800
+    leve: 900       # era 500
+    media: 1900     # era 1100
+    grave: 4400     # era 2700
+    estrutural: 7500  # era 4800
   tampa:
-    leve: 500
-    media: 1100
-    grave: 2700
-    estrutural: 4800
+    leve: 900       # era 500
+    media: 1900     # era 1100
+    grave: 4400     # era 2700
+    estrutural: 7500  # era 4800
   teto:
-    leve: 650
-    media: 1400
-    grave: 3700
-    estrutural: 7200
+    leve: 1150      # era 650
+    media: 2300     # era 1400
+    grave: 5600     # era 3700
+    estrutural: 10200 # era 7200
   painel:
     leve: 650
     media: 1500

@@ -151,8 +151,8 @@ def test_motor_nao_ok_sem_estrutural_adiciona_pendencia_mecanica():
     custo = estimar(laudo, carregar_empresa("carros_uberlandia"))
     descricoes = [i.descricao for i in custo.itens]
     assert any("motor não conforme" in d for d in descricoes)
-    # paralama LEVE = 350, adicional_motor = 4000
-    assert custo.custo_total == 4350
+    # paralama LEVE = 600 (peça + pintura/acabamento), adicional_motor = 4000
+    assert custo.custo_total == 4600
 
 
 def test_motor_nao_ok_com_estrutural_nao_dobra_adicional():

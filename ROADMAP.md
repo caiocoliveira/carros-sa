@@ -168,6 +168,21 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - A lógica de descoberta de `total_paginas` depende do seletor `a.button[data-page]`. Se o site mudar o DOM de paginação, cai no fallback de 1 página (regressão silenciosa pro comportamento antigo — conservador, não quebra o pipeline).
   - "Horizonte 7 dias" virou parâmetro morto na prática até a plataforma mudar o ciclo. Mantido no código pela genericidade do contrato.
 
+### Q — Auditoria automática de colunas (SessionEnd hook) ✅
+- **Branch:** `claude/generic-hopping-wadler`
+- **Arquivos:**
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — `CHECKS` (invariante por coluna HEADER) + `COLUMN_EXTRACTORS` + `audit(engine, sample_size=20)`. Espelha a ordenação de `SheetsExporter.exportar` pra que o Rank auditado coincida com o que o operador veria.
+  - [`scripts/audit_columns.py`](scripts/audit_columns.py) — CLI que lê `carros_sa.db`, chama `audit()`, imprime violações em stderr, exit code sempre 0.
+  - [`.claude/settings.json`](.claude/settings.json) — registra hook `SessionEnd` que dispara o script ao encerrar qualquer sessão do Claude Code no worktree.
+  - [`Makefile`](Makefile) — alvo `make audit` pra rodar sob demanda.
+- **Motivação:** operador reclamou que o progresso dependia dele apontar manualmente "essa coluna tá sem sentido". Agora cada sessão termina com uma checagem automática das 24 colunas contra o racional do Glossário (`sheets.py:252-398`).
+- **Como funciona:** valida invariantes determinísticas por coluna (ex: `ROI > 500%` = improvável, `dias_giro <=0` = bug no CalibracaoGiro, `fator_risco ∉ [0.5, 1.5]` = fora dos bounds, severidade ∉ domínio do enum, reforma/frete negativos, URL sem HYPERLINK, Coletado em vazio, etc.). Agregação por `(coluna, motivo)` — violações do mesmo tipo viram uma única linha com contagem + exemplo de lote. Silencioso quando tudo ok.
+- **Cobertura:** 13 testes em [`tests/test_audit_columns.py`](tests/test_audit_columns.py) — paridade HEADER↔CHECKS (pega coluna nova sem invariante), DB vazio silencioso, linha válida silenciosa, detecção de ROI absurdo / dias_giro zero / severidade fora do domínio / fator_risco fora dos bounds / reforma negativa / KM absurdo / modelo vazio, agregação por coluna, violações em colunas diferentes reportadas separadas.
+- **Limitações conhecidas:**
+  - MVP sem LLM — só invariantes de domínio. Casos "tecnicamente válidos mas contextualmente absurdos" (ex: ROI 80% num lote com severidade estrutural) não são pegos. Extensão futura plugar Gemini Flash com o Glossário no prompt.
+  - Amostra fixa de 20 linhas mais recentes — problemas em percentuais raros podem passar.
+  - Invariantes duplicam o Glossário em linguagem imperativa; manutenção exige editar os dois (teste de paridade protege contra colunas novas sem check, mas não contra divergência semântica).
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

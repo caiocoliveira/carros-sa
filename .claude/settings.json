@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && PYTHONPATH=. .venv/bin/python scripts/audit_columns.py || true"
+          }
+        ]
+      }
+    ]
+  }
+}

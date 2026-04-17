@@ -40,6 +40,7 @@ def init_db(db_path: Path | str | None = None) -> None:
 # quando o projeto sair de PoC.
 _MIGRACOES_ADD_COLUMN = [
     ("avaliacao_lote", "dias_giro_estimado", "INTEGER"),
+    ("avaliacao_lote", "reforma_racional", "TEXT"),
 ]
 
 

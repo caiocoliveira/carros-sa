@@ -157,11 +157,17 @@ def _parse_resposta(raw: dict) -> CustoReforma:
         range_min = int(custo_total * 0.75)
         range_max = int(custo_total * 1.25)
 
+    # Justificativa livre do LLM — sobrevive em CustoReforma.racional pra ser
+    # exibida na planilha. Opcional: LLMs podem omitir o campo sem quebrar.
+    racional_raw = raw.get("justificativa")
+    racional = str(racional_raw).strip() if isinstance(racional_raw, str) and racional_raw.strip() else None
+
     return CustoReforma(
         itens=itens,
         custo_total=custo_total,
         range_min=range_min,
         range_max=range_max,
+        racional=racional,
     )
 
 

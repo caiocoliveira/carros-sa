@@ -386,6 +386,7 @@ def _upsert_avaliacao(avaliacao, empresa_id: str, session: Session) -> None:
         webmotors_mediana=avaliacao.webmotors_mediana,
         dias_giro_estimado=avaliacao.dias_giro_estimado,
         justificativa=avaliacao.justificativa,
+        reforma_racional=avaliacao.reforma_racional,
         criado_em=datetime.utcnow(),
     )
     if existente:

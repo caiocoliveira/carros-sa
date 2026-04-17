@@ -178,6 +178,17 @@ def precificar(
         f"margem={margem_aplicada:.1%} (risco={fator_risco:.2f}, liq={fator_liquidez:.2f})"
     )
 
+    # Racional da reforma: prioriza a justificativa do LLM; fallback é sumário
+    # dos itens (determinístico não tem narrativa). None quando reforma vazia.
+    if reforma.racional:
+        reforma_racional = reforma.racional
+    elif reforma.itens:
+        reforma_racional = " · ".join(
+            f"{it.descricao} (R${it.custo})" for it in reforma.itens
+        )
+    else:
+        reforma_racional = None
+
     return Avaliacao(
         lote_id=lote.lote_id,
         empresa_id=empresa.empresa_id,
@@ -197,4 +208,5 @@ def precificar(
         webmotors_mediana=mercado.webmotors_mediana,
         dias_giro_estimado=mercado.dias_giro_estimado,
         justificativa=justificativa,
+        reforma_racional=reforma_racional,
     )

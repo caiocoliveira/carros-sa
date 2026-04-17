@@ -315,6 +315,23 @@ Já registrado:
   - Prompt pede regra "SEMPRE incluir alinhamento de chassi quando estrutural" — se LLM ignorar, o custo fica baixo demais. Nos testes de fixture o LLM respeitou, mas em produção pode falhar silenciosamente. Validar com 20 lotes reais quando Gemini voltar ao ar.
   - Tabela determinística em `config/reforma/*.yaml` **fica como safety net** — usada no fallback e pode ser auditada em paralelo. Não remover até termos confiança em 50+ lotes reais.
 
+### O.1 — Coluna "Racional Reforma" na planilha ✅
+- **Branch:** `claude/gifted-bassi-a24b51`
+- **Arquivos:**
+  - [`carros_sa/models.py`](carros_sa/models.py) — +campo `racional: Optional[str]` em `CustoReforma`; +campo `reforma_racional: Optional[str]` em `Avaliacao` e `AvaliacaoLote` (aditivos, nullable, aprovados explicitamente).
+  - [`carros_sa/db.py`](carros_sa/db.py) — migração leve `ALTER TABLE avaliacao_lote ADD COLUMN reforma_racional TEXT` pros DBs existentes.
+  - [`carros_sa/agents/estimador_reforma_llm.py`](carros_sa/agents/estimador_reforma_llm.py) — `_parse_resposta` agora preserva `justificativa` do LLM em `CustoReforma.racional`.
+  - [`carros_sa/precificador.py`](carros_sa/precificador.py) — popula `Avaliacao.reforma_racional`: prioriza LLM (`reforma.racional`), fallback é sumário "descrição (R$valor)" dos itens do determinístico, None quando reforma vazia.
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_upsert_avaliacao` passa o novo campo pra SQLite.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — nova coluna "Racional Reforma" entre "Reforma Estimada" e "Frete" + entrada no Glossário explicando fonte LLM vs fallback + lotes sem racional mostram "—".
+  - [`tests/test_precificador.py`](tests/test_precificador.py) — 3 testes (montagem de itens, justificativa LLM prioritária, reforma vazia → None).
+  - [`tests/test_estimador_reforma_llm.py`](tests/test_estimador_reforma_llm.py) — 2 testes (LLM justificativa vira `CustoReforma.racional`, fallback determinístico deixa None).
+  - [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — 3 testes (header inclui a coluna, valor renderiza correto, None mostra "—").
+- **Motivação:** Usuário (2026-04-17) pediu pra ver NA PLANILHA o racional do valor da reforma, pra operador auditar rapidamente sem abrir laudo ou código.
+- **Como funciona:** LLM devolve "justificativa" → sobrevive em `CustoReforma.racional` → `precificar()` propaga pra `Avaliacao.reforma_racional` → `_upsert_avaliacao` salva → `SheetsExporter` renderiza na coluna dedicada. Quando LLM não responde (cascata caiu no determinístico), precificador monta sumário curto ("Coluna B (R$3500) · Coluna C (R$3500) · adicional estrutural (R$3000)") dos itens. Nulo renderiza "—".
+- **Cobertura:** 8 testes novos (202 total verde). Migração SQLite validada: campo aparece tanto em DB fresco quanto em DB existente sem perda de dados.
+- **Limitações:** coluna tem largura livre — se LLM retornar justificativa muito longa (>500 chars) vai ficar feia no Google Sheets. Prompt hoje pede "uma frase", mas não enforce. Mitigável com truncagem se virar problema.
+
 ---
 
 ## Marcos (do plano arquitetural original)

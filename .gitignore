@@ -20,6 +20,9 @@ build/
 data/scrapes/*.json
 data/laudos_amostra/*.pdf
 data/cache/
+# PDFs baixados pelo scraper em runtime (dir criado por _pdf_persistente_path).
+# Não versionados — são cache local grande (3-14MB por PDF × centenas de lotes).
+data/laudos_pdfs/
 # Exceções: dataset de referência — usado como fixture pelos testes/workstreams
 !data/scrapes/2026-04-14_uberlandia_listagem.json
 !data/scrapes/2026-04-14_webmotors_fiesta.json

@@ -31,10 +31,40 @@ from carros_sa.tenancy import EmpresaConfig
 
 logger = logging.getLogger(__name__)
 
+# Piso fixo de imprevistos. Premissa operacional: qualquer carro que passa pelo
+# nosso pátio gera uns R$ 1.000 de "coisinhas" que só aparecem quando você tem
+# o carro em mãos (retoque de pintura pontual, troca de borracha de porta,
+# limpeza profunda de estofado com mancha, pequenos ajustes). Aplicado tanto no
+# determinístico quanto no LLM pra que as duas estimativas sejam comparáveis.
+MINIMO_RESERVA_IMPREVISTOS = 1000
+_ITEM_RESERVA = "reserva pra imprevistos (ajustes/retoques que aparecem no pátio)"
+
+
+def aplicar_piso_imprevistos(custo: "CustoReforma") -> "CustoReforma":
+    """Garante custo_total >= MINIMO_RESERVA_IMPREVISTOS.
+
+    Se o custo já passa do piso, não faz nada. Caso contrário, adiciona (ou
+    eleva) o item "reserva pra imprevistos" até bater o piso. Mantém o range
+    em ±25% do novo custo_total.
+    """
+    if custo.custo_total >= MINIMO_RESERVA_IMPREVISTOS:
+        return custo
+
+    faltante = MINIMO_RESERVA_IMPREVISTOS - custo.custo_total
+    itens_novos = list(custo.itens) + [ItemReforma(descricao=_ITEM_RESERVA, custo=faltante)]
+    custo_total = MINIMO_RESERVA_IMPREVISTOS
+    return CustoReforma(
+        itens=itens_novos,
+        custo_total=custo_total,
+        range_min=int(custo_total * 0.75),
+        range_max=int(custo_total * 1.25),
+    )
+
 
 _PROMPT_TEMPLATE = """Você é um perito em reforma de veículos pós-leilão no Brasil.
-Estime o CUSTO TOTAL de reparo/reforma em REAIS para o veículo abaixo, considerando
-o mercado de peças, mão-de-obra e complexidade do carro.
+Estime o CUSTO de REPARO DE DANOS em REAIS — APENAS os serviços necessários
+pra devolver o carro à condição de revenda, considerando as avarias listadas
+e o status mecânico/documental.
 
 Veículo:
   Marca: {marca}
@@ -56,17 +86,29 @@ Diagnóstico do laudo cautelar:
 Observações livres do inspetor (pode estar vazio):
 {observacoes}
 
-Regras:
-  1. Seja ESPECÍFICO por carro — um Range Rover com motor suspeito custa MUITO mais
-     que um Gol 1.0 com motor suspeito, porque peças importadas + mão-de-obra
-     especializada. Fuja de valores genéricos.
-  2. Mão-de-obra em São Paulo capital é ~25% mais cara que interior de MG.
-  3. Quando severidade_geral é 'estrutural', SEMPRE inclua um item de
-     "alinhamento de chassi + calibração de airbag/ADAS".
-  4. Motor não original + sem dano estrutural → estime retífica/inspeção segundo
-     complexidade do motor daquele modelo específico (atmosférico popular <
-     turbo premium < motor importado).
-  5. Devolva entre 1 e 8 itens. Cada item é uma linha de serviço real.
+Regras de ESCOPO (o que SIM e o que NÃO incluir):
+  1. INCLUA somente reparos DIRETAMENTE causados pelas avarias listadas acima
+     ou pelo status de motor/documentação.
+  2. NÃO INCLUA — esses custos já estão fora do orçamento de reforma:
+     - Manutenção preventiva (troca de óleo, filtros, fluidos de rotina)
+     - Detalhamento / polimento / higienização / estética pós-leilão
+     - Revisão elétrica geral ou inspeção de sistemas sem problema relatado
+     - Regularização de documentação em cartório/DETRAN
+     - Alinhamento de suspensão preventivo (só se chassi foi batido)
+     - Diagnóstico eletrônico de praxe (sem falha indicada)
+  3. Se NÃO há avarias listadas E motor_ok='sim' E documentação='ok', retorne
+     `itens: []` — não invente serviços. Piso de imprevistos é aplicado pós-LLM.
+  4. "Alinhamento de chassi + calibração ADAS/airbag" SOMENTE quando
+     severidade_geral == 'estrutural' (não aplique em severidade média/grave
+     de lataria sem comprometimento estrutural).
+  5. Motor não original + severidade NÃO estrutural → estime retífica/inspeção
+     segundo complexidade do motor (atmosférico popular R$ 2-4k, turbo comum
+     R$ 4-6k, turbo premium/importado R$ 6-15k). NÃO aplique este item quando
+     severidade é estrutural (motor já entra junto com a colisão na tabela).
+  6. Seja ESPECÍFICO por carro — Range Rover com peça importada custa MUITO
+     mais que Gol popular. Fuja de valores genéricos.
+  7. Mão-de-obra em São Paulo capital ~25% mais cara que interior de MG.
+  8. Devolva entre 0 e 8 itens. 0 = veículo limpo, sem reparo necessário.
 
 Responda APENAS em JSON no formato:
 {{
@@ -116,14 +158,16 @@ def _build_prompt(
 def _parse_resposta(raw: dict) -> CustoReforma:
     """Valida e normaliza a resposta do LLM em CustoReforma.
 
-    - `itens` precisa ser lista não vazia com {descricao, custo} válidos.
+    - `itens` pode ser lista vazia (carro sem avarias → 0 reparos).
     - `custo_total` é recomputado como soma dos itens (LLM às vezes erra a aritmética).
     - `range_min/range_max` — se ausentes/ruins, deriva como custo_total ± 25%.
-    Levanta ValueError se a resposta for inutilizável.
+    - Piso `MINIMO_RESERVA_IMPREVISTOS` aplicado via `aplicar_piso_imprevistos`.
+    Levanta ValueError se a resposta for estruturalmente inutilizável
+    (shape inválido).
     """
     itens_raw = raw.get("itens")
-    if not isinstance(itens_raw, list) or not itens_raw:
-        raise ValueError("resposta do LLM sem lista 'itens' válida")
+    if not isinstance(itens_raw, list):
+        raise ValueError("resposta do LLM sem campo 'itens' como lista")
 
     itens: list[ItemReforma] = []
     for entry in itens_raw:
@@ -138,9 +182,7 @@ def _parse_resposta(raw: dict) -> CustoReforma:
             continue
         itens.append(ItemReforma(descricao=descricao, custo=custo))
 
-    if not itens:
-        raise ValueError("nenhum item válido na resposta do LLM")
-
+    # Itens vazios é caso VÁLIDO agora (veículo limpo).
     custo_total = sum(it.custo for it in itens)
 
     range_min_raw = raw.get("range_min")
@@ -157,12 +199,13 @@ def _parse_resposta(raw: dict) -> CustoReforma:
         range_min = int(custo_total * 0.75)
         range_max = int(custo_total * 1.25)
 
-    return CustoReforma(
+    custo = CustoReforma(
         itens=itens,
         custo_total=custo_total,
         range_min=range_min,
         range_max=range_max,
     )
+    return aplicar_piso_imprevistos(custo)
 
 
 def estimar_llm(

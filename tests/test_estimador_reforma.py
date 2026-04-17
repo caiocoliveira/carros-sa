@@ -129,12 +129,17 @@ def _laudo_sintetico(
     )
 
 
-def test_laudo_limpo_custo_zero():
+def test_laudo_limpo_aplica_piso_de_imprevistos():
+    """Laudo sem avarias ganha apenas o piso de reserva (R$ 1.000) — nenhum
+    item de peça, nenhum adicional de motor/estrutural. Premissa operacional:
+    qualquer carro consome uns R$ 1k de ajustes menores no pátio mesmo quando
+    o laudo vem limpo."""
+    from carros_sa.agents.estimador_reforma_llm import MINIMO_RESERVA_IMPREVISTOS
     laudo = _laudo_sintetico([])
     custo = estimar(laudo, carregar_empresa("carros_uberlandia"))
-    assert custo.custo_total == 0
-    assert custo.itens == []
-    assert custo.range_min == 0 and custo.range_max == 0
+    assert custo.custo_total == MINIMO_RESERVA_IMPREVISTOS
+    assert len(custo.itens) == 1
+    assert "reserva" in custo.itens[0].descricao.lower()
 
 
 def test_motor_nao_ok_sem_estrutural_adiciona_pendencia_mecanica():
@@ -167,11 +172,15 @@ def test_motor_nao_ok_com_estrutural_nao_dobra_adicional():
 
 
 def test_avaria_nenhuma_e_ignorada():
+    """Avaria com severidade NENHUMA não vira item; só o piso de imprevistos fica."""
+    from carros_sa.agents.estimador_reforma_llm import MINIMO_RESERVA_IMPREVISTOS
     laudo = _laudo_sintetico(
         [Avaria(parte="porta_dianteira_esquerda", severidade=SeveridadeAvaria.NENHUMA)],
     )
     custo = estimar(laudo, carregar_empresa("carros_uberlandia"))
-    assert custo.custo_total == 0
+    # Só o item de reserva — avaria NENHUMA foi ignorada
+    assert custo.custo_total == MINIMO_RESERVA_IMPREVISTOS
+    assert all("reserva" in i.descricao.lower() for i in custo.itens)
 
 
 def test_carregar_tabela_cache_e_isolado_por_empresa():

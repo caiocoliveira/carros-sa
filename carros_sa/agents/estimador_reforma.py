@@ -125,9 +125,13 @@ def estimar(
     range_min = int(custo_total * (1.0 - incerteza))
     range_max = int(custo_total * (1.0 + incerteza))
 
-    return CustoReforma(
+    custo = CustoReforma(
         itens=itens,
         custo_total=custo_total,
         range_min=range_min,
         range_max=range_max,
     )
+    # Piso de imprevistos (mesma premissa usada no estimador LLM): carro não
+    # sai do pátio sem consumir ao menos uns R$ 1.000 de ajustes menores.
+    from carros_sa.agents.estimador_reforma_llm import aplicar_piso_imprevistos
+    return aplicar_piso_imprevistos(custo)

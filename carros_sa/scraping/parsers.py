@@ -50,6 +50,35 @@ def _timer_para_fim_em(agora: datetime, timer: str) -> Optional[datetime]:
         return None
 
 
+def is_laudo_pdf_url(url: Optional[str]) -> bool:
+    """True só se a URL parece um PDF de laudo de lote real.
+
+    Valida contra decoys observados no DOM do Auto Avaliar — principalmente o
+    link de rodapé pro Relatório de Transparência Salarial, que mora em
+    storage.googleapis.com e foi sequestrando ~73% dos lotes na triagem antes
+    do aperto do `_EXTRACT_PDF_URL_JS`. Também usado como filtro de render no
+    sheets exporter pra não mostrar link clicável pra PDF errado que já está
+    persistido em `lote.raw_json["detalhe"]["laudo_pdf_url"]` de coletas
+    anteriores.
+    """
+    if not url:
+        return False
+    low = url.lower()
+    if "relatorio-de-transparencia" in low:
+        return False
+    if "/app/uploads/" in low:          # WordPress do site público
+        return False
+    if "/avaliacoes?" in low:            # URL de listagem
+        return False
+    if "storage.googleapis.com/doc-b2b" in low:
+        return True
+    if "cdn-aav.autoavaliar.com.br" in low:
+        return True
+    if low.endswith(".pdf") and "laudo" in low:
+        return True
+    return False
+
+
 _BADGES_IGNORADOS = {"anúncio destaque", "showroom", "oportunidade", "destaque"}
 _COMBUSTIVEIS = {"FLEX", "GASOLINA", "DIESEL", "ETANOL", "ALCOOL", "ÁLCOOL", "HIBRIDO", "HÍBRIDO", "ELETRICO", "ELÉTRICO", "GNV"}
 

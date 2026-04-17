@@ -39,9 +39,13 @@ def main(
         False, "--somente-sem-avaliacao",
         help="Filtra só lotes ainda não avaliados pra esta empresa (útil pra re-tentar erros).",
     ),
+    somente_ativos: bool = typer.Option(
+        False, "--somente-ativos",
+        help="Filtra só lotes com leilão ainda aberto (fim_em no futuro). Evita gastar tempo/LLM em lotes já encerrados.",
+    ),
 ) -> None:
     """Reprocessa lotes já ingeridos sem re-scraping da listagem."""
-    asyncio.run(_run(empresa, max_lotes, headless, sem_sheets, somente_sem_avaliacao))
+    asyncio.run(_run(empresa, max_lotes, headless, sem_sheets, somente_sem_avaliacao, somente_ativos))
 
 
 async def _run(
@@ -50,8 +54,11 @@ async def _run(
     headless: bool,
     sem_sheets: bool,
     somente_sem_avaliacao: bool = False,
+    somente_ativos: bool = False,
 ) -> None:
     from playwright.async_api import async_playwright
+
+    from datetime import datetime
 
     from carros_sa.agents.vision_clients import build_default_client
     from carros_sa.db import get_session, init_db
@@ -97,6 +104,10 @@ async def _run(
                 }
                 lotes = [l for l in lotes if l.id not in ja]
                 console.print(f"[cyan]Filtro ativo: só lotes sem avaliação → {len(lotes)} candidatos[/cyan]")
+            if somente_ativos:
+                agora = datetime.now()
+                lotes = [l for l in lotes if l.fim_em is not None and l.fim_em > agora]
+                console.print(f"[cyan]Filtro ativo: só leilões abertos → {len(lotes)} candidatos[/cyan]")
             if max_lotes:
                 lotes = lotes[:max_lotes]
             console.print(f"[cyan]Reprocessando {len(lotes)} lotes…[/cyan]\n")

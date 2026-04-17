@@ -76,32 +76,46 @@ _EXTRACT_CARDS_JS = """
 
 _EXTRACT_PDF_URL_JS = """
 () => {
-    // 1. Links diretos <a href> — padrão mais comum
+    // Allowlist rígida: só URLs claramente de laudo de LOTE são aceitas.
+    // Antes a regra "tem .pdf ou storage.googleapis" pegava o link de rodapé
+    // do Auto Avaliar pro Relatório de Transparência Salarial (que mora em
+    // storage.googleapis.com/app/uploads/...), contaminando ~73% dos lotes.
+    // Resultado: laudo_pdf_url "válido" mas apontando pro PDF errado, e o
+    // ExtratorLaudo rodava em texto institucional → severidade=nenhuma em
+    // massa. Por isso a heurística agora é positiva, não negativa.
+    function pareceLaudo(u) {
+        if (!u) return false;
+        const low = u.toLowerCase();
+        // Rejeita decoys conhecidos (defesa em profundidade mesmo com allowlist)
+        if (low.includes('relatorio-de-transparencia')) return false;
+        if (low.includes('/app/uploads/')) return false;      // wordpress do site público
+        if (low.includes('/avaliacoes?')) return false;        // URL de listagem
+        // Aceita os dois hosts que realmente servem laudos
+        if (low.includes('storage.googleapis.com/doc-b2b')) return true;
+        if (low.includes('cdn-aav.autoavaliar.com.br')) return true;
+        // Aceita URLs do próprio domínio que contenham "laudo" no path
+        // (defensivo pra casos em que a AA rebatiza a pasta)
+        if (low.endsWith('.pdf') && low.includes('laudo')) return true;
+        return false;
+    }
+
+    // 1. Links diretos <a href>
     const links = Array.from(document.querySelectorAll('a[href]'));
     for (const a of links) {
         const h = a.href || '';
-        if (h.includes('.pdf')
-            || h.includes('doc-b2b')
-            || h.includes('storage.googleapis')
-            || (h.includes('laudo') && !h.includes('/assets/'))) {
-            return h;
-        }
+        if (pareceLaudo(h)) return h;
     }
-    // 2. Atributos data-* ou href em <button> / <div> (Auto Avaliar às vezes usa onclick+data)
+    // 2. Atributos data-* ou href em <button> / <div>
     const candidatos = Array.from(document.querySelectorAll('[data-url], [data-href], [data-pdf]'));
     for (const el of candidatos) {
         const h = el.dataset.url || el.dataset.href || el.dataset.pdf || '';
-        if (h.includes('.pdf') || h.includes('doc-b2b') || h.includes('storage.googleapis')) {
-            return h;
-        }
+        if (pareceLaudo(h)) return h;
     }
-    // 3. iframes (modal do laudo pode renderizar dentro de um)
+    // 3. iframes (modal do laudo às vezes renderiza dentro)
     const iframes = Array.from(document.querySelectorAll('iframe[src]'));
     for (const f of iframes) {
         const s = f.src || '';
-        if (s.includes('.pdf') || s.includes('doc-b2b')) {
-            return s;
-        }
+        if (pareceLaudo(s)) return s;
     }
     // 4. Fallback: regex no HTML inteiro (pega URLs assinadas mesmo em JS inline)
     const html = document.documentElement.outerHTML;
@@ -379,11 +393,19 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
     ainda retorna None (pipeline cai em `_laudo_sem_pdf` que agora aproveita
     `flags.reprovado_estrutural` quando aplicável).
     """
+    from carros_sa.scraping.parsers import is_laudo_pdf_url
+
     await page.goto(url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(1500)
 
     body_text: str = await page.evaluate("() => document.body.innerText")
     laudo_pdf_url: Optional[str] = await page.evaluate(_EXTRACT_PDF_URL_JS)
+
+    # Sanity check em Python — o JS já rejeita decoys, mas se algum vazar
+    # (p.ex. padrão novo que ainda não mapeamos) evita baixar PDF errado e
+    # deixa claro no log que não temos laudo válido.
+    if laudo_pdf_url and not is_laudo_pdf_url(laudo_pdf_url):
+        laudo_pdf_url = None
 
     # 2ª passada: se PDF não foi achado no DOM inicial, tenta revelar o modal
     # do laudo (Auto Avaliar às vezes lazy-loada). Só abre o modal se valer a pena.
@@ -393,6 +415,8 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
             if clicou:
                 await page.wait_for_timeout(1500)
                 laudo_pdf_url = await page.evaluate(_EXTRACT_PDF_URL_JS)
+                if laudo_pdf_url and not is_laudo_pdf_url(laudo_pdf_url):
+                    laudo_pdf_url = None
         except Exception:
             pass
 

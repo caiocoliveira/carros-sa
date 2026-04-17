@@ -4,7 +4,12 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from carros_sa.scraping.parsers import _timer_para_fim_em, parse_card_lines, parse_detalhe
+from carros_sa.scraping.parsers import (
+    _timer_para_fim_em,
+    is_laudo_pdf_url,
+    parse_card_lines,
+    parse_detalhe,
+)
 
 
 # =============================================================================
@@ -340,6 +345,61 @@ def test_parse_detalhe_palavra_vendido_em_observacao_nao_falso_positiva():
     )
     flags = parse_detalhe(body)
     assert flags.encerrado is False
+
+
+class TestIsLaudoPdfUrl:
+    """Defesa contra decoys observados no DOM do Auto Avaliar.
+
+    Contexto: antes da blindagem, 83/85 lotes ingeridos tinham `laudo_pdf_url`
+    apontando pro "Relatório de Transparência e Igualdade Salarial" (link de
+    rodapé institucional) hospedado em storage.googleapis.com — contaminando
+    111/112 laudos extraídos para severidade=nenhuma/avarias=[]. A allowlist
+    aqui garante que só URLs de laudo real passam, e que decoys conhecidos
+    são rejeitados mesmo que a estrutura do site mude.
+    """
+
+    def test_url_relatorio_transparencia_e_rejeitada(self):
+        """Link de rodapé do Auto Avaliar pro PDF de RH — não é laudo."""
+        decoy = (
+            "https://repo-site-aav-production.storage.googleapis.com/app/uploads/"
+            "2025/10/Relatorio-de-Transparencia-e-igualdade-Salarial-"
+            "de-Mulheres-e-Homens-2-o-semestre.pdf"
+        )
+        assert is_laudo_pdf_url(decoy) is False
+
+    def test_url_listagem_com_query_entity_e_rejeitada(self):
+        """URL da página de listagem (?entity=...) não é um PDF."""
+        decoy = (
+            "https://b2b.autoavaliar.com.br/avaliacoes?entity=hazul,allegro"
+            "&models=hb20&report=yes"
+        )
+        assert is_laudo_pdf_url(decoy) is False
+
+    def test_url_doc_b2b_googleapis_e_aceita(self):
+        """Storage oficial dos laudos de lote — principal host observado."""
+        ok = (
+            "https://storage.googleapis.com/doc-b2b/laudos/12345/laudo.pdf"
+            "?X-Goog-Signature=abc"
+        )
+        assert is_laudo_pdf_url(ok) is True
+
+    def test_url_cdn_aav_e_aceita(self):
+        """CDN do Auto Avaliar, host alternativo de laudos."""
+        ok = "https://cdn-aav.autoavaliar.com.br/laudos/2026/abc.pdf"
+        assert is_laudo_pdf_url(ok) is True
+
+    def test_url_pdf_generico_com_laudo_no_path_e_aceito(self):
+        """PDF em host não mapeado mas com 'laudo' no path — aceito."""
+        ok = "https://exemplo.com/laudos/laudo-12345.pdf"
+        assert is_laudo_pdf_url(ok) is True
+
+    def test_url_pdf_generico_sem_laudo_e_rejeitada(self):
+        """PDF qualquer sem indício de ser laudo — rejeita."""
+        assert is_laudo_pdf_url("https://exemplo.com/manual.pdf") is False
+
+    def test_url_vazia_ou_none(self):
+        assert is_laudo_pdf_url(None) is False
+        assert is_laudo_pdf_url("") is False
 
 
 def test_parse_detalhe_encerrado_tem_precedencia_sobre_estrutural():

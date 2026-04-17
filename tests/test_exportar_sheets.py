@@ -299,6 +299,94 @@ class TestSheetsExporterQuery:
         assert "https://autoavaliar.com.br/lote/L001" in url_cell
         assert "Abrir anúncio" in url_cell
 
+    def test_exportar_laudo_url_valida_vira_hyperlink_ver_laudo(self):
+        """Se `lote.raw_json['detalhe']['laudo_pdf_url']` passar pelo filtro
+        de decoy, a coluna 'Laudo (PDF)' deve virar =HYPERLINK('Ver laudo')."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.raw_json = {
+                "detalhe": {
+                    "laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/laudos/L001/laudo.pdf?sig=abc",
+                }
+            }
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_laudo = HEADER.index("Laudo (PDF)")
+        cell = rows[2][idx_laudo]
+        assert cell.startswith("=HYPERLINK(")
+        assert "doc-b2b/laudos/L001/laudo.pdf" in cell
+        assert "Ver laudo" in cell
+
+    def test_exportar_laudo_url_decoy_transparencia_vira_placeholder(self):
+        """URL de Relatório de Transparência (decoy conhecido) NÃO deve virar
+        hyperlink — célula fica '—'. Evita o usuário clicar num PDF de RH
+        achando que é laudo do carro. Cobre 83/85 lotes afetados antes do fix."""
+        engine = _engine_mem()
+        decoy = (
+            "https://repo-site-aav-production.storage.googleapis.com/app/uploads/"
+            "2025/10/Relatorio-de-Transparencia-e-igualdade-Salarial-"
+            "de-Mulheres-e-Homens-2-o-semestre.pdf"
+        )
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.raw_json = {"detalhe": {"laudo_pdf_url": decoy}}
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_laudo = HEADER.index("Laudo (PDF)")
+        assert rows[2][idx_laudo] == "—"
+
+    def test_exportar_laudo_url_ausente_vira_placeholder(self):
+        """Lote sem `laudo_pdf_url` em raw_json → célula '—', sem crash."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))   # raw_json default = {}
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_laudo = HEADER.index("Laudo (PDF)")
+        assert rows[2][idx_laudo] == "—"
+
     def test_exportar_url_vazia_nao_gera_hyperlink(self):
         """Lote sem URL deve cair pro placeholder '—', sem fórmula HYPERLINK quebrada."""
         engine = _engine_mem()

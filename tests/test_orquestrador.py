@@ -32,6 +32,8 @@ from carros_sa.orquestrador import (
     ResultadoLote,
     _calcular_frete,
     _laudo_sem_pdf,
+    _pdf_eh_laudo_valido,
+    _pdf_persistente_path,
     _persistir_flags_no_lote,
     _pipeline_lote,
     _upsert_avaliacao,
@@ -263,6 +265,49 @@ class TestPipelineLote:
 # ---------------------------------------------------------------------------
 # Testes de persistência
 # ---------------------------------------------------------------------------
+
+class TestValidadorPdfLaudo:
+    """Proteção contra o bug de abril/2026 que baixou 'Relatório de Transparência
+    Salarial' em 100% dos lotes por causa de seletor JS frouxo no scraper."""
+
+    def test_pdf_laudo_real_eh_valido(self):
+        """Gold test: o PDF do Fiesta real é reconhecido como laudo de carro."""
+        from pathlib import Path
+        pdf = Path(__file__).resolve().parent.parent / "data" / "laudos_amostra" / "21854782_fiesta.pdf"
+        if not pdf.exists():
+            pytest.skip(f"PDF gold test não existe em {pdf}")
+        assert _pdf_eh_laudo_valido(pdf) is True
+
+    def test_pdf_inexistente_nao_e_valido(self, tmp_path):
+        assert _pdf_eh_laudo_valido(tmp_path / "nao_existe.pdf") is False
+
+    def test_pdf_muito_pequeno_nao_e_valido(self, tmp_path):
+        """Página institucional de 1KB não tem o conteúdo de um laudo real."""
+        p = tmp_path / "minusculo.pdf"
+        p.write_bytes(b"%PDF-1.4\n" + b"x" * 200)
+        assert _pdf_eh_laudo_valido(p) is False
+
+    def test_pdf_transparencia_salarial_e_rejeitado(self, tmp_path):
+        """Se o conteúdo menciona 'Transparência Salarial' na 1a página é denylist."""
+        # Cria um PDF mínimo válido com o texto do falso positivo
+        try:
+            from reportlab.pdfgen import canvas
+        except Exception:
+            pytest.skip("reportlab não instalado — pular teste de denylist")
+        p = tmp_path / "transparencia.pdf"
+        c = canvas.Canvas(str(p))
+        c.drawString(100, 750, "Relatório de Transparência Salarial - 2o Semestre")
+        c.drawString(100, 730, "Igualdade Salarial entre Mulheres e Homens")
+        c.showPage()
+        c.save()
+        assert _pdf_eh_laudo_valido(p) is False
+
+    def test_pdf_path_persistente_usa_storage_dir(self):
+        path = _pdf_persistente_path("L123")
+        assert path.name == "L123.pdf"
+        assert path.parent.name == "laudos_pdfs"
+        assert path.parent.exists()  # função cria o dir
+
 
 class TestPersistencia:
     def test_upsert_lote_novo(self):

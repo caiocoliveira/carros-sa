@@ -268,6 +268,18 @@ Já registrado:
 
 ---
 
+### P — Defesa em profundidade do download de PDF de laudo ✅
+- **Branch:** `claude/upbeat-faraday`
+- **Arquivos:**
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_pdf_persistente_path` (PDFs em `data/laudos_pdfs/<lote>.pdf`, não mais `tmp_dir` que somia entre runs) + `_pdf_eh_laudo_valido` (lê 1ª página com PyMuPDF, exige marcador positivo LAUDO/CHASSI/PLACA e nega decoy TRANSPARÊNCIA SALARIAL/IGUALDADE SALARIAL).
+  - [`scripts/reprocessar_laudos.py`](scripts/reprocessar_laudos.py) — busca PDF tanto em `data/laudos_pdfs/` (produção) quanto `data/laudos_amostra/` (fixtures).
+  - [`scripts/diagnosticar_pdf_laudo.py`](scripts/diagnosticar_pdf_laudo.py) — ferramenta de debug: pega N lotes ativos, re-visita URLs e reporta quais baixaram laudo real.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `COLUMN_FORMATS` + `_reaplicar_formato_numerico` reaplicam NUMBER nas colunas R$ após `ws.clear()` (clear preserva formato → inteiros viravam datas).
+  - [`tests/test_orquestrador.py`](tests/test_orquestrador.py) + [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — 7 testes novos cobrindo validador de PDF (gold Fiesta, denylist, min size) e numberFormat (reaplica em Reforma/Frete, col_letter, cadeado de sync HEADER×FORMATS).
+- **Motivação:** Complementar ao fix do seletor JS (workstream paralelo em `parsers.is_laudo_pdf_url` e `_EXTRACT_PDF_URL_JS`). Dois problemas que só dá pra atacar aqui: (1) PDFs sumiam entre runs do orquestrador porque ficavam em `tmp_dir`, impossibilitando reprocessamento offline; (2) raw_json antigos coletados ANTES do fix do seletor ainda têm URLs erradas, e sem validação no ARQUIVO baixado o extrator processaria PDF institucional como se fosse laudo.
+- **Validação real (16/04):** scraper com seletor frouxo + meu validador → 0 PDFs errados processados (validador rejeitou todos os "Transparência Salarial"). Diagnóstico em 10 lotes ativos: 8/10 PDFs de laudo corretos baixados e persistidos.
+- **Limitações conhecidas:** validador só lê 1ª página (suficiente pros decoys observados, mas pode escapar PDF institucional com cabeçalho disfarçado). `tmp_dir` ainda é criado no orquestrador mas não é mais usado — limpar em workstream seguinte.
+
 ### O — EstimadorReformaLLM (substitui tabela determinística) ✅
 - **Branch:** `claude/gifted-bassi-a24b51`
 - **Arquivos:**

@@ -32,6 +32,10 @@ console = Console()
 app = typer.Typer(add_completion=False)
 
 PDF_DIR = Path("data/laudos_amostra")
+# data/laudos_pdfs/ é onde o orquestrador persiste PDFs frescos baixados do
+# Auto Avaliar. data/laudos_amostra/ é o bucket de fixtures / gold tests. O
+# script procura nos DOIS pra cobrir os dois fluxos.
+PDF_DIR_PERSISTIDO = Path("data/laudos_pdfs")
 
 
 @app.command()
@@ -159,12 +163,19 @@ def _reprocessar_um(
     resultado: dict = {"lote_id": lote.id, "modelo": modelo, "status": "—"}
 
     # 1. Laudo: tenta PDF → visão → textual → sem PDF
-    pdf_path = PDF_DIR / f"{lote.id}.pdf"
+    # Procura em data/laudos_pdfs/ (scraper de produção) primeiro; fallback em
+    # data/laudos_amostra/ (fixtures de teste).
+    pdf_path = PDF_DIR_PERSISTIDO / f"{lote.id}.pdf"
     if not pdf_path.exists():
-        # Tenta variações de nome comuns
-        for candidato in PDF_DIR.glob(f"{lote.id}*.pdf"):
-            pdf_path = candidato
-            break
+        pdf_path = PDF_DIR / f"{lote.id}.pdf"
+    if not pdf_path.exists():
+        # Tenta variações de nome comuns em ambos os diretórios
+        for base in (PDF_DIR_PERSISTIDO, PDF_DIR):
+            for candidato in base.glob(f"{lote.id}*.pdf"):
+                pdf_path = candidato
+                break
+            if pdf_path.exists():
+                break
 
     try:
         if pdf_path.exists() and vision_client:

@@ -55,6 +55,45 @@ from carros_sa.tenancy import EmpresaConfig, carregar_empresa
 # UFs adjacentes a MG (para heurística de frete)
 _UFS_ADJACENTES_MG = {"SP", "RJ", "ES", "BA", "GO", "MS", "DF"}
 
+# Diretório permanente de PDFs de laudo. Fora de tmp_dir pra permitir reprocessamento
+# offline (sem re-baixar, sem re-autenticar) via `scripts/reprocessar_laudos.py`.
+_PDF_STORAGE_DIR = Path(__file__).resolve().parent.parent / "data" / "laudos_pdfs"
+
+
+def _pdf_persistente_path(lote_id: str) -> Path:
+    """Path onde o PDF do laudo é salvo — um por lote_id."""
+    _PDF_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    return _PDF_STORAGE_DIR / f"{lote_id}.pdf"
+
+
+def _pdf_eh_laudo_valido(pdf_path: Path) -> bool:
+    """Heurística barata pra rejeitar PDFs que NÃO são laudos de carro.
+
+    Motivação: em abril/2026 um seletor JS frouxo pegou o link do rodapé
+    institucional ("Relatório de Transparência Salarial") em 100% dos lotes e
+    contaminou a base inteira. Esta checagem bate no conteúdo textual do PDF
+    procurando marcadores típicos de laudo de inspeção veicular.
+    """
+    if not pdf_path.exists() or pdf_path.stat().st_size < 5_000:
+        return False
+    try:
+        import fitz  # PyMuPDF, já é dep do extrator de laudo
+        with fitz.open(str(pdf_path)) as pdf:
+            if pdf.page_count == 0:
+                return False
+            txt = (pdf[0].get_text() or "").upper()
+    except Exception:
+        return False
+    # Marcadores positivos — qualquer um bate
+    positivos = ("LAUDO", "INSPEÇÃO", "INSPECAO", "AVALIAÇÃO", "AVALIACAO", "VEÍCULO", "VEICULO", "CHASSI", "PLACA")
+    if not any(m in txt for m in positivos):
+        return False
+    # Marcadores negativos — se aparece, NÃO é laudo
+    negativos = ("TRANSPARÊNCIA SALARIAL", "TRANSPARENCIA SALARIAL", "IGUALDADE SALARIAL", "RELATÓRIO DE TRANSPARÊNCIA")
+    if any(m in txt for m in negativos):
+        return False
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Frete heurístico (sem geo lookup externo)
@@ -434,11 +473,26 @@ async def _pipeline_lote(
                                  avaliado=False, motivo_descarte=flags.early_exit)
 
         # 3. PDF + Laudo
+        # Persistimos o PDF em data/laudos_pdfs/<lote>.pdf (não em tmp_dir) —
+        # assim reprocessar_laudos.py pode re-rodar extração sem baixar de novo,
+        # e dá pra auditar manualmente o PDF depois. PDF é pequeno (~300KB) e o
+        # volume total (~600 lotes/mês × 300KB = 180MB/mês) é gerenciável.
         laudo: LaudoEstruturado
+        pdf_dest: Optional[Path] = None
         if pdf_url:
-            pdf_dest = tmp_dir / f"{lote.id}.pdf"
+            pdf_dest = _pdf_persistente_path(lote.id)
             cookies = await page.context.cookies()
-            await baixar_pdf(pdf_url, pdf_dest, cookies)
+            try:
+                await baixar_pdf(pdf_url, pdf_dest, cookies)
+                if not _pdf_eh_laudo_valido(pdf_dest):
+                    # PDF baixado não é um laudo de carro (ex.: footer institucional
+                    # pego por seletor frouxo no passado) — descarta e trata como sem PDF.
+                    pdf_dest.unlink(missing_ok=True)
+                    pdf_dest = None
+            except Exception:
+                pdf_dest = None
+
+        if pdf_dest is not None:
             try:
                 # Tentativa 1: extração completa (textual + visão)
                 laudo = extrair_laudo(pdf_dest, vision_client)

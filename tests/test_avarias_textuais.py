@@ -8,8 +8,6 @@ pipeline ainda consiga gerar `avarias` e `severidade_geral` a partir do PDF.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from carros_sa.agents.extrator_laudo import (
@@ -23,14 +21,9 @@ from carros_sa.models import SeveridadeAvaria
 # Fiesta 21854782 — gold test (texto real do PDF)
 # =============================================================================
 
-FIESTA_PDF = Path(__file__).resolve().parent.parent / "data" / "laudos_amostra" / "21854782_fiesta.pdf"
-
-
 @pytest.fixture
-def laudo_fiesta():
-    if not FIESTA_PDF.exists():
-        pytest.skip(f"PDF de teste não encontrado: {FIESTA_PDF}")
-    return parse_laudo_textual(FIESTA_PDF)
+def laudo_fiesta(pdf_fiesta_real):
+    return parse_laudo_textual(pdf_fiesta_real)
 
 
 def test_parse_laudo_fiesta_encontra_observacao_do_reparo(laudo_fiesta):

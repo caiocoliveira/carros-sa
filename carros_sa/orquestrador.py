@@ -28,6 +28,7 @@ from typing import List, Optional
 from sqlmodel import Session, select
 
 from carros_sa.agents.avaliador_mercado import avaliar as avaliar_mercado
+from carros_sa.agents.calibracao_giro import _categoria_de_modelo
 from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
 from carros_sa.agents.extrator_laudo import extrair_laudo
 from carros_sa.models import (
@@ -94,21 +95,7 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
         else:
             distancia_km = 700
 
-    # Categoria do veículo — usa OUTRO se não tiver laudo ainda
-    categoria = CategoriaVeiculo.OUTRO
-    try:
-        # Tenta inferir da marca/modelo (heurística simples)
-        modelo_lower = (lote.modelo or "").lower()
-        if any(k in modelo_lower for k in ("hilux", "s10", "saveiro", "strada", "ranger")):
-            categoria = CategoriaVeiculo.PICAPE
-        elif any(k in modelo_lower for k in ("compass", "hr-v", "tracker", "creta", "haval", "evoque")):
-            categoria = CategoriaVeiculo.SUV
-        elif any(k in modelo_lower for k in ("onix", "hb20", "gol", "fiesta", "polo", "ka ")):
-            categoria = CategoriaVeiculo.HATCH
-        elif any(k in modelo_lower for k in ("cruze", "corolla", "civic", "jetta")):
-            categoria = CategoriaVeiculo.SEDAN
-    except Exception:
-        pass
+    categoria = _categoria_de_modelo(lote.modelo)
 
     frete = empresa.frete_para(distancia_km, categoria)
 
@@ -393,6 +380,7 @@ async def _pipeline_lote(
     empresa: EmpresaConfig,
     session: Session,
     tmp_dir: Path,
+    webmotors_fetch=None,
 ) -> ResultadoLote:
     """Roda pipeline completo para um lote. Retorna ResultadoLote."""
 
@@ -469,7 +457,6 @@ async def _pipeline_lote(
         # Compass vira SUV e Toro vira PICAPE, ativando a calibração correta de dias_giro.
         categoria = laudo.categoria_veiculo
         if categoria == CategoriaVeiculo.OUTRO:
-            from carros_sa.agents.calibracao_giro import _categoria_de_modelo
             categoria = _categoria_de_modelo(lote.modelo)
 
         mercado = avaliar_mercado(
@@ -481,6 +468,7 @@ async def _pipeline_lote(
             categoria=categoria,
             session=session,
             empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
+            webmotors_fetch=webmotors_fetch,
         )
 
         # 6. Reforma
@@ -516,6 +504,7 @@ async def orquestrar(
     page,
     vision_client,
     horizonte_dias: int = 7,
+    webmotors_cache_dir: Optional[Path] = None,
 ) -> OrquestradorResult:
     """
     Coleta listagem, ingere lotes novos e roda pipeline de avaliação.
@@ -571,8 +560,16 @@ async def orquestrar(
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="carros_sa_"))
 
+    webmotors_fetch = None
+    if webmotors_cache_dir is not None:
+        from carros_sa.tools.webmotors import fetch_from_cache_dir
+        webmotors_fetch = fetch_from_cache_dir(webmotors_cache_dir)
+
     for lote in lotes_a_avaliar:
-        res = await _pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir)
+        res = await _pipeline_lote(
+            lote, page, vision_client, empresa, session, tmp_dir,
+            webmotors_fetch=webmotors_fetch,
+        )
         result.lotes.append(res)
         if res.erro:
             result.n_erros += 1

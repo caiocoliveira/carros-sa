@@ -9,7 +9,7 @@ Cobre:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterator
 
 import pytest
@@ -214,3 +214,93 @@ def test_roi_anualizado_dias_none_usa_fallback_90():
 
 def test_roi_anualizado_score_zero_e_zero():
     assert roi_anualizado(0.0, 30) == 0.0
+
+
+# =============================================================================
+# Sub-bucket por idade (Bloco C.1, pendência Caio 2026-04-16)
+# =============================================================================
+
+def test_subbucket_hatch_novo_distingue_de_velho(session_isolada):
+    """3 hatches novos (≤3 anos) com ~200d + 3 velhos com ~30d → calibração
+    por sub-bucket dá média diferente por faixa etária."""
+    session_isolada.add(Empresa(id="emp1", nome="x", config_yaml_path="x"))
+    ano_ref = 2026
+    # 3 novos (2024, 2025, 2024) com dias_venda = 200, 220, 180
+    for i, (ano, dias) in enumerate([(2024, 200), (2025, 220), (2024, 180)]):
+        lote_id = f"novo{i}"
+        _criar_lote(session_isolada, lote_id, "VW", "Polo Track 1.0", ano, 70000)
+        compra = datetime(2025, 1, 1)
+        venda = compra + timedelta(days=dias)
+        _criar_arrematado(session_isolada, "emp1", lote_id, 70000, compra, venda)
+    # 3 velhos (2014, 2015, 2014) com dias_venda = 25, 30, 35
+    for i, (ano, dias) in enumerate([(2014, 25), (2015, 30), (2014, 35)]):
+        lote_id = f"velho{i}"
+        _criar_lote(session_isolada, lote_id, "VW", "Gol 1.0", ano, 20000)
+        compra = datetime(2026, 1, 1)
+        venda = compra + timedelta(days=dias)
+        _criar_arrematado(session_isolada, "emp1", lote_id, 20000, compra, venda)
+    session_isolada.commit()
+    invalidar_cache()
+
+    dias_novo = calibrar_dias_giro(
+        "emp1", CategoriaVeiculo.HATCH, session_isolada,
+        fallback=999, ano=2024, ano_referencia=ano_ref,
+    )
+    dias_velho = calibrar_dias_giro(
+        "emp1", CategoriaVeiculo.HATCH, session_isolada,
+        fallback=999, ano=2014, ano_referencia=ano_ref,
+    )
+    # Sub-bucket novo: média (200+220+180)/3 = 200
+    assert dias_novo == 200
+    # Sub-bucket velho: média (25+30+35)/3 = 30
+    assert dias_velho == 30
+
+
+def test_subbucket_cai_pra_categoria_quando_poucos_no_sub(session_isolada):
+    """Só 1 hatch novo + 3 velhos → consulta por ano novo usa média DA CATEGORIA
+    toda (não do sub-bucket vazio). Nível 2 do cascade."""
+    session_isolada.add(Empresa(id="emp1", nome="x", config_yaml_path="x"))
+    # 1 novo com 300 dias
+    _criar_lote(session_isolada, "n1", "VW", "Polo", 2024, 70000)
+    _criar_arrematado(
+        session_isolada, "emp1", "n1", 70000,
+        datetime(2025, 1, 1), datetime(2025, 1, 1) + timedelta(days=300),
+    )
+    # 3 velhos com ~30 dias cada
+    for i, dias in enumerate([25, 30, 35]):
+        lote_id = f"v{i}"
+        _criar_lote(session_isolada, lote_id, "VW", "Gol 1.0", 2014, 20000)
+        _criar_arrematado(
+            session_isolada, "emp1", lote_id, 20000,
+            datetime(2026, 1, 1), datetime(2026, 1, 1) + timedelta(days=dias),
+        )
+    session_isolada.commit()
+    invalidar_cache()
+
+    # Consultando por ano "novo" com só 1 amostra nova → cascade pro nível 2
+    # (categoria inteira = 4 amostras, média = (300+25+30+35)/4 = 97.5 → 98)
+    dias = calibrar_dias_giro(
+        "emp1", CategoriaVeiculo.HATCH, session_isolada,
+        fallback=999, ano=2024, ano_referencia=2026,
+    )
+    assert dias == 98
+
+
+def test_subbucket_retrocompat_sem_ano(session_isolada):
+    """Chamada sem `ano` (legado) agrega toda a categoria — comportamento
+    equivalente ao pre-sub-bucket."""
+    session_isolada.add(Empresa(id="emp1", nome="x", config_yaml_path="x"))
+    for i, dias in enumerate([25, 30, 35]):
+        lote_id = f"v{i}"
+        _criar_lote(session_isolada, lote_id, "VW", "Gol 1.0", 2014, 20000)
+        _criar_arrematado(
+            session_isolada, "emp1", lote_id, 20000,
+            datetime(2026, 1, 1), datetime(2026, 1, 1) + timedelta(days=dias),
+        )
+    session_isolada.commit()
+    invalidar_cache()
+
+    dias = calibrar_dias_giro(
+        "emp1", CategoriaVeiculo.HATCH, session_isolada, fallback=999,
+    )
+    assert dias == 30  # média das 3

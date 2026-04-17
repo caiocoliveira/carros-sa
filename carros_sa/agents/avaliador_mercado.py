@@ -18,8 +18,9 @@ from typing import List, Optional
 
 from sqlmodel import Session, select
 
-from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, SinalMercado
+from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, PrecoReferenciaAA, SinalMercado
 from carros_sa.tools.fipe import FipeClient
+from carros_sa.tools.webmotors import FetchFn as WebmotorsFetchFn, estatisticas as webmotors_estatisticas
 
 # Heurística inicial de giro por categoria. Calibrar com workstream H quando
 # tivermos dados de `arrematado.vendido_em - data`.
@@ -77,6 +78,9 @@ def _percentil_25(valores: List[int]) -> int:
     return int(round(s[lo] + (s[hi] - s[lo]) * frac))
 
 
+_MIN_WEBMOTORS_AMOSTRAS = 3
+
+
 def avaliar(
     marca: str,
     modelo: str,
@@ -88,12 +92,15 @@ def avaliar(
     session: Optional[Session] = None,
     empresa_id: Optional[str] = None,
     aplicar_popularidade: bool = True,
+    webmotors_fetch: Optional[WebmotorsFetchFn] = None,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
     `similares_precos` é a lista de preços que a página de detalhe de Auto
-    Avaliar mostra na seção 'Talvez se interesse por'. Quando vazio, caímos
-    na heurística FIPE × 0.9 (mediana) / 0.78 (p25).
+    Avaliar mostra na seção 'Talvez se interesse por'. Quando vazio, tenta
+    `webmotors_fetch` (workstream B — ligar via `webmotors.fetch_from_cache_dir`
+    em batches offline, ou fetcher ao vivo quando G chegar). Só cai na
+    heurística FIPE × 0.97/0.88 se ambas as fontes falharem.
 
     Quando `empresa_id` e `session` são passados, `dias_giro_estimado` é
     calibrado a partir do histórico real (Arrematado da empresa) — fallback
@@ -107,11 +114,28 @@ def avaliar(
         mediana = int(round(statistics.median(sim)))
         p25 = _percentil_25(sim)
         n = len(sim)
+    elif webmotors_fetch is not None:
+        # Webmotors usa nomes curtos (ex.: "FIESTA", "COMPASS"). FIPE aceita
+        # string completa com versão. Normaliza pro primeiro termo pra casar.
+        modelo_curto = (modelo or "").strip().split()[0] if modelo else ""
+        try:
+            stats = webmotors_estatisticas(
+                marca, modelo_curto or modelo, ano, fetch=webmotors_fetch,
+            )
+        except Exception:
+            stats = None
+        if stats and stats.n_anuncios >= _MIN_WEBMOTORS_AMOSTRAS:
+            mediana = stats.mediana
+            p25 = stats.p25
+            n = stats.n_anuncios
+        else:
+            mediana = int(round(fipe_valor * 0.97))
+            p25 = int(round(fipe_valor * 0.88))
+            n = 0
     else:
         # sem dados de competidores: usa FIPE como referência de revenda.
         # O usuário confirmou que vende próximo da FIPE — então mediana≈97%
         # (margem de negociação de ~3%). p25≈88% é conservador pra ranking.
-        # Webmotors (workstream B) substituirá esses fallbacks por dados reais.
         mediana = int(round(fipe_valor * 0.97))
         p25 = int(round(fipe_valor * 0.88))
         n = 0
@@ -122,7 +146,9 @@ def avaliar(
     # Calibração com Arrematado (Bloco C) — só ativa quando empresa+session presentes
     if empresa_id and session is not None:
         from carros_sa.agents.calibracao_giro import calibrar_dias_giro
-        dias_giro = calibrar_dias_giro(empresa_id, categoria, session, fallback=prior)
+        dias_giro = calibrar_dias_giro(
+            empresa_id, categoria, session, fallback=prior, ano=ano,
+        )
     else:
         dias_giro = prior
 
@@ -142,10 +168,28 @@ def avaliar(
         bucket = bucket_modelo(marca, modelo, categoria, ano=ano)
         dias_giro = ajustar_dias_giro(dias_giro, bucket)
 
+    # Referência Auto Avaliar histórica (workstream K): se já vimos o mesmo
+    # (marca, modelo, ano) em algum anúncio anterior, usa a ULTIMA AVALIAÇÃO
+    # como sinal adicional. O precificador combina com FIPE/Webmotors e escolhe
+    # o menor preço-giro entre as fontes (conservador).
+    auto_avaliar_ref: Optional[int] = None
+    if session is not None:
+        stmt = (
+            select(PrecoReferenciaAA)
+            .where(PrecoReferenciaAA.marca == marca.upper().strip())
+            .where(PrecoReferenciaAA.modelo == modelo.upper().strip())
+            .where(PrecoReferenciaAA.ano == ano)
+            .order_by(PrecoReferenciaAA.coletado_em.desc())
+        )
+        hit = session.exec(stmt).first()
+        if hit and hit.preco > 0:
+            auto_avaliar_ref = hit.preco
+
     return SinalMercado(
         fipe=fipe_valor,
         webmotors_mediana=mediana,
         webmotors_p25=p25,
         n_anuncios_competidores=n,
         dias_giro_estimado=dias_giro,
+        auto_avaliar_ref=auto_avaliar_ref,
     )

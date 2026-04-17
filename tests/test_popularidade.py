@@ -147,6 +147,24 @@ def test_ranking_real_carrega_e_polo_track_eh_blockbuster_hatch():
     assert b == BucketPopularidade.BLOCKBUSTER
 
 
+def test_bucket_modelo_tolera_acentos_e_caixa_alta(yaml_temporario):
+    """Auto Avaliar escreve tudo em caixa alta; ranking YAML em Title Case.
+    Slug normalization garante o match."""
+    b_upper = bucket_modelo("HYUNDAI", "HB20 1.0", CategoriaVeiculo.HATCH, ano=2020,
+                            yaml_path=yaml_temporario)
+    b_title = bucket_modelo("Hyundai", "hb20 1.0", CategoriaVeiculo.HATCH, ano=2020,
+                            yaml_path=yaml_temporario)
+    assert b_upper == b_title == BucketPopularidade.BLOCKBUSTER
+
+
+def test_bucket_modelo_ano_desconhecido_nao_dispara_iliquido(yaml_temporario):
+    """Sem `ano`, um modelo fora do ranking deve cair em NICHO (não ILIQUIDO),
+    porque ILIQUIDO exige idade ≥ 10 anos confirmada."""
+    b = bucket_modelo("Fiat", "Bravo 1.8", CategoriaVeiculo.HATCH, ano=None,
+                      yaml_path=yaml_temporario)
+    assert b == BucketPopularidade.NICHO
+
+
 def test_ranking_real_strada_eh_blockbuster_picape():
     invalidar_cache()
     b = bucket_modelo("Fiat", "Strada Adventure", CategoriaVeiculo.PICAPE, ano=2023)

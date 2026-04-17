@@ -69,9 +69,9 @@ def test_familia_desconhecida_vai_pra_default():
 # Gold test — Fiesta REPROVADO ESTRUTURAL
 # =============================================================================
 
-@pytest.mark.skipif(not PDF.exists() or not FIXTURE.exists(), reason="PDF ou fixture ausente")
-def test_estimar_fiesta_reprovado_estrutural_uberlandia():
-    laudo = extrair_laudo(PDF, FixedResponseClient(FIXTURE))
+@pytest.mark.requires_real_data
+def test_estimar_fiesta_reprovado_estrutural_uberlandia(pdf_fiesta_real, fixture_visual_fiesta):
+    laudo = extrair_laudo(pdf_fiesta_real, FixedResponseClient(fixture_visual_fiesta))
     empresa = carregar_empresa("carros_uberlandia")
 
     custo = estimar(laudo, empresa)
@@ -95,10 +95,10 @@ def test_estimar_fiesta_reprovado_estrutural_uberlandia():
     assert custo.custo_total > 5000
 
 
-@pytest.mark.skipif(not PDF.exists() or not FIXTURE.exists(), reason="PDF ou fixture ausente")
-def test_estimar_fiesta_multi_empresa_sp_mais_caro_que_mg():
+@pytest.mark.requires_real_data
+def test_estimar_fiesta_multi_empresa_sp_mais_caro_que_mg(pdf_fiesta_real, fixture_visual_fiesta):
     """Mesmo laudo, empresas diferentes, custos coerentes (SP > MG)."""
-    laudo = extrair_laudo(PDF, FixedResponseClient(FIXTURE))
+    laudo = extrair_laudo(pdf_fiesta_real, FixedResponseClient(fixture_visual_fiesta))
     mg = carregar_empresa("carros_uberlandia")
     sp = carregar_empresa("empresa_fake_sp")
 

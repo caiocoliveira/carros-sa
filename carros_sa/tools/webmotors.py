@@ -208,6 +208,40 @@ def estatisticas(
 
 
 # =============================================================================
+# Fetch offline — lê cards de fixtures JSON em disco (seguro, sem rede)
+# =============================================================================
+
+def fetch_from_cache_dir(cache_dir) -> FetchFn:
+    """Factory: retorna FetchFn que lê `<cache_dir>/*_webmotors_<modelo>.json`.
+
+    Convenção de arquivo: `<data>_webmotors_<modelo>.json` onde `modelo` é o
+    mesmo usado em `estatisticas(modelo=...)` em lowercase. Casa o mais recente
+    por ordem lexicográfica da data. Retorna [] silenciosamente se não achar
+    (deixa o avaliador cair no fallback FIPE).
+    """
+    import json
+    from pathlib import Path
+
+    cache = Path(cache_dir)
+
+    def _fetch(marca: str, modelo: str) -> List[AnuncioWM]:
+        if not cache.is_dir():
+            return []
+        modelo_norm = modelo.lower().strip()
+        candidatos = sorted(cache.glob(f"*_webmotors_{modelo_norm}.json"))
+        if not candidatos:
+            return []
+        mais_recente = candidatos[-1]  # ordem lex = ordem temporal no formato YYYY-MM-DD
+        try:
+            payload = json.loads(mais_recente.read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        return parse_resultados(payload.get("cards", []))
+
+    return _fetch
+
+
+# =============================================================================
 # Fetch ao vivo — esqueleto, NÃO ligar sem discussão (workstream G)
 # =============================================================================
 

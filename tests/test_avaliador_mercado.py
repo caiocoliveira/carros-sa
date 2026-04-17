@@ -20,7 +20,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from carros_sa.agents.avaliador_mercado import avaliar
-from carros_sa.models import CategoriaVeiculo, ModeloFipeCache
+from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, PrecoReferenciaAA
 from carros_sa.tools.fipe import FipeClient, _parse_valor
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "fipe_fiesta_2013.json"
@@ -135,6 +135,97 @@ def test_cache_persistente_evita_segunda_chamada(fipe_responses, in_memory_sessi
     rows = in_memory_session.exec(select(ModeloFipeCache)).all()
     assert len(rows) == 1
     assert rows[0].valor == 30876
+
+
+def test_webmotors_fetch_ativa_quando_sem_similares(fipe_responses, in_memory_session):
+    """Workstream A wire-up: sem similares AA, `webmotors_fetch` vira fonte
+    primária de mediana/p25 (desde que n >= 3)."""
+    from carros_sa.tools.webmotors import fetch_from_cache_dir
+
+    fake = FakeFipeClient(fipe_responses)
+    cache_dir = Path(__file__).resolve().parent.parent / "data" / "scrapes"
+
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=None,
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+        webmotors_fetch=fetch_from_cache_dir(cache_dir),
+    )
+    # Fixture Fiesta 2013 tem 11 anúncios reais. Valores exatos vêm do gold
+    # de tests/test_webmotors.py (mediana=35900, p25=33745).
+    assert sinal.n_anuncios_competidores == 11
+    assert sinal.webmotors_mediana == 35900
+    assert sinal.webmotors_p25 == 33745
+    assert sinal.fipe == 30876  # FIPE continua vindo da Parallelum
+
+
+def test_webmotors_fetch_cai_pro_fallback_sem_dados(fipe_responses, in_memory_session, tmp_path):
+    """Cache dir vazio → comportamento igual ao fallback FIPE-only antigo."""
+    from carros_sa.tools.webmotors import fetch_from_cache_dir
+
+    fake = FakeFipeClient(fipe_responses)
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=None,
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+        webmotors_fetch=fetch_from_cache_dir(tmp_path),
+    )
+    assert sinal.n_anuncios_competidores == 0
+    assert sinal.webmotors_mediana == round(30876 * 0.97)
+    assert sinal.webmotors_p25 == round(30876 * 0.88)
+
+
+def test_auto_avaliar_ref_populado_quando_ha_historico(fipe_responses, in_memory_session):
+    """Workstream K wire-up: se PrecoReferenciaAA tem o (marca,modelo,ano),
+    auto_avaliar_ref vem preenchido com o mais recente."""
+    from datetime import datetime, timedelta
+
+    ref_antiga = PrecoReferenciaAA(
+        marca="FORD", modelo="FIESTA 1.6 SE HATCH", ano=2013,
+        preco=28000, coletado_em=datetime.utcnow() - timedelta(days=30),
+    )
+    ref_nova = PrecoReferenciaAA(
+        marca="FORD", modelo="FIESTA 1.6 SE HATCH", ano=2013,
+        preco=29500, coletado_em=datetime.utcnow(),
+    )
+    in_memory_session.add(ref_antiga)
+    in_memory_session.add(ref_nova)
+    in_memory_session.commit()
+
+    fake = FakeFipeClient(fipe_responses)
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=[28000, 30000, 32000],
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+    )
+    assert sinal.auto_avaliar_ref == 29500  # mais recente
+
+
+def test_auto_avaliar_ref_none_sem_historico(fipe_responses, in_memory_session):
+    """Sem registro em PrecoReferenciaAA, auto_avaliar_ref fica None (default)."""
+    fake = FakeFipeClient(fipe_responses)
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=[28000, 30000, 32000],
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+    )
+    assert sinal.auto_avaliar_ref is None
 
 
 def test_fallback_sem_similares(fipe_responses, in_memory_session):

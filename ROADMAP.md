@@ -33,10 +33,11 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestrador (E).
 
 ### A — AvaliadorMercado ✅
-- **Branch:** `feat/avaliador-mercado`
+- **Branch:** `feat/avaliador-mercado` + wire-up Webmotors em `claude/review-open-issues-axSx2`
 - **Arquivos:** [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py), [`carros_sa/tools/fipe.py`](carros_sa/tools/fipe.py)
-- **Cobertura:** 4 testes em [`tests/test_avaliador_mercado.py`](tests/test_avaliador_mercado.py) com fixture FIPE real ([`tests/fixtures/fipe_fiesta_2013.json`](tests/fixtures/fipe_fiesta_2013.json)) — Fiesta 2013 FIPE R$ 30.876 + similares reais do lote 21854782, cache persistente em `modelo_fipe_cache` e fallback FIPE-only.
-- **Pendente:** trocar fonte de mediana/p25 por Webmotors quando workstream B chegar (contrato `SinalMercado` já preparado).
+- **Cobertura:** 8 testes em [`tests/test_avaliador_mercado.py`](tests/test_avaliador_mercado.py) com fixture FIPE real ([`tests/fixtures/fipe_fiesta_2013.json`](tests/fixtures/fipe_fiesta_2013.json)) — Fiesta 2013 FIPE R$ 30.876 + similares reais, cache persistente em `modelo_fipe_cache`, wire-up Webmotors offline + populate `auto_avaliar_ref` a partir de `PrecoReferenciaAA`, fallback FIPE-only.
+- **Wire-up Webmotors:** `avaliar(..., webmotors_fetch=fn)` ativa a fonte Webmotors via `carros_sa/tools/webmotors.py::fetch_from_cache_dir()` (lê `data/scrapes/*_webmotors_<modelo>.json`). Quando `n ≥ 3`, p25/mediana vêm de Webmotors em vez do fallback FIPE × 0.88/0.97.
+- **auto_avaliar_ref:** populado por SELECT no `PrecoReferenciaAA` por (marca, modelo, ano) — mais recente ganha. Integração com workstream K completa.
 
 ### B — Webmotors Scraper ✅
 - **Branch:** `feat/avaliador-mercado` (worktree `amazing-saha`)
@@ -127,6 +128,19 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Haversine é linha reta — rodovia no Brasil costuma ser ~20% maior. Tabela de frete já absorve isso nas faixas largas (0-300km, 300-600km).
   - Cidades com grafia "esquisita" (ex.: "São Gotardo" vs "Sao Gotardo") são normalizadas (lowercase + sem acento), mas se o Auto Avaliar usar nome que não bate com o IBGE, o frete cai no fallback heurístico UF.
 
+### O — Limpeza técnica (claude/review-open-issues-axSx2) ✅
+- **Branch:** `claude/review-open-issues-axSx2`
+- **Mudanças:**
+  1. **Unificação de `_categoria_de_modelo`**: duplicata em `orquestrador.py:_calcular_frete` removida; ambos os call sites agora importam de `carros_sa/agents/calibracao_giro.py`.
+  2. **Migrações workstream K em `db.py`**: `_MIGRACOES_ADD_COLUMN` passou de 1 ALTER pra 7 + create implícito de `preco_referencia_aa` via `SQLModel.metadata`. Backfill de `preco_giro_fipe ← preco_giro` pra DBs legados. `scripts/migrar_schema_workstream_k.py` removido. `_aplicar_migracoes_leves` é tolerante a tabelas ausentes (DB legado parcial) e usa `commit` único no final.
+  3. **Wire-up Webmotors** em AvaliadorMercado (ver workstream A).
+  4. **Wire-up `auto_avaliar_ref`** (ver workstream A).
+  5. **Sub-bucket `dias_giro` por idade** (ver Bloco C).
+  6. **`tests/conftest.py`**: fixtures `pdf_fiesta_real` e `fixture_visual_fiesta` centralizam skips condicionados a dados reais; marker `requires_real_data` permite `pytest -m "not requires_real_data"` pra subset 100% determinístico em CI.
+  7. **Cobertura nova**: [`tests/test_db.py`](tests/test_db.py) (3 testes — init idempotente, schema K, backfill), [`tests/test_tenancy.py`](tests/test_tenancy.py) (7 testes — `frete_para` faixas/zero/extrapolação + carregar_empresa real), +2 testes em [`tests/test_popularidade.py`](tests/test_popularidade.py) (slug case-insensitive, `ano=None` não dispara ILIQUIDO).
+- **Baseline testes:** 177 → 196 passando (`make test -m "not requires_real_data"` → 189 passing + 7 deselected).
+- **Limitações:** `_fetch_playwright()` em `webmotors.py` continua bloqueado (red flag do CLAUDE.md). Coleta ao vivo requer estratégia anti-bot dedicada — sessão G futura.
+
 ### K — Referência de preço Tabela Auto Avaliar ✅
 - **Branch:** `claude/adoring-sinoussi`
 - **Arquivos:**
@@ -209,8 +223,13 @@ Cron semanal que popula `anuncio_webmotors.sumiu_em`. Só faz sentido depois de 
 #### Pendência identificada por Caio (2026-04-16): granularidade da calibração
 A categoria genérica é grosseira demais. O hatch 128d agrupa Polo Track 2024 (227d, preço-cheio) com Onix Joy 1.0 2018 (278d) e Gol 2014 (22d) — perfis muito diferentes.
 
-Caminhos pra refinar (em ordem de simplicidade):
-1. **Sub-bucket por idade** (`hatch_novo` ≤3 anos / `hatch_velho` >3 anos). Implementação: ~1h. Custo: precisa rodar mais lotes pra ter ≥3 amostras por sub-bucket.
+**Opção 1 (sub-bucket por idade) ✅ implementada em `claude/review-open-issues-axSx2`:**
+- [`carros_sa/agents/calibracao_giro.py`](carros_sa/agents/calibracao_giro.py) agora aceita `ano` + `ano_referencia`; separa `novo` (≤3 anos) de `velho` (>3). Cascade: (categoria, faixa) ≥3 → sub-bucket; senão categoria inteira ≥3 → média; senão fallback hardcoded. Retrocompat: sem `ano` mantém comportamento agregado.
+- [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py) propaga `ano` automaticamente.
+- Cobertura: 3 testes novos em [`tests/test_calibracao_giro.py`](tests/test_calibracao_giro.py) — sub-bucket distingue novo/velho, cascade pra categoria quando sub-bucket raso, retrocompat sem `ano`.
+
+**Próximos caminhos (ainda abertos, em ordem de simplicidade):**
+1. ~~Sub-bucket por idade~~ ✅
 2. **Calibração por modelo** quando há ≥2 amostras do MESMO modelo (cai pra categoria quando não). Mais granular, mas requer histórico denso.
 3. **Filtrar outliers**: usar mediana em vez de média; ou peso decrescente por idade da amostra.
 4. **Distinguir "demanda intrínseca" de "política de preço"**: o Polo demorou 227d porque vendeu na FIPE cheia. Dividir `dias_giro` em `dias_se_FIPE` vs `dias_se_FIPE-5%` exigiria histórico com info de quanto desconto deu (não temos hoje).

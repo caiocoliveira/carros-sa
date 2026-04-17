@@ -26,9 +26,26 @@ from carros_sa.models import Arrematado, CategoriaVeiculo, Lote
 _CACHE_TTL = timedelta(hours=1)
 _MIN_AMOSTRAS_CALIBRACAO = 3
 
+# Corte de idade pro sub-bucket (novo ≤ N anos, velho > N). Calibrado no
+# histórico real de Uberlândia onde hatch ≤3 anos gira muito diferente de >3.
+_CORTE_IDADE_ANOS = 3
 
-# (empresa_id, categoria) -> (dias_giro_calibrado, calculado_em)
-_cache: Dict[Tuple[str, CategoriaVeiculo], Tuple[int, datetime]] = {}
+# Faixas de idade + sentinela "any" pro fallback
+_FAIXA_NOVO = "novo"
+_FAIXA_VELHO = "velho"
+_FAIXA_ANY = "any"
+
+
+# (empresa_id, categoria, faixa_idade) -> (dias_giro_calibrado, calculado_em)
+_cache: Dict[Tuple[str, CategoriaVeiculo, str], Tuple[int, datetime]] = {}
+
+
+def _faixa_idade(ano_veiculo: Optional[int], ano_referencia: Optional[int] = None) -> str:
+    """Retorna 'novo' se ≤ _CORTE_IDADE_ANOS, 'velho' se mais, 'any' se desconhecido."""
+    if ano_veiculo is None:
+        return _FAIXA_ANY
+    ref = ano_referencia if ano_referencia is not None else datetime.now().year
+    return _FAIXA_NOVO if (ref - ano_veiculo) <= _CORTE_IDADE_ANOS else _FAIXA_VELHO
 
 
 def _categoria_de_modelo(modelo: str) -> CategoriaVeiculo:
@@ -63,14 +80,25 @@ def calibrar_dias_giro(
     categoria: CategoriaVeiculo,
     session: Optional[Session],
     fallback: int,
+    ano: Optional[int] = None,
+    ano_referencia: Optional[int] = None,
 ) -> int:
-    """Devolve dias_giro calibrado pra (empresa, categoria), ou `fallback` se sem dado.
+    """Devolve dias_giro calibrado pra (empresa, categoria[, faixa_idade]), ou `fallback`.
+
+    Cascade de fallback:
+      1. (categoria, faixa_idade) com ≥3 vendas → média por sub-bucket
+      2. categoria inteira com ≥3 vendas → média por categoria (comportamento antigo)
+      3. fallback hardcoded
 
     Args:
         empresa_id: empresa cujas vendas históricas serão usadas
         categoria: bucket de veículo
         session: SQLModel Session aberta (None → retorna direto fallback)
         fallback: prior hardcoded a usar quando não há amostras suficientes
+        ano: ano do veículo sendo avaliado. Se None, calibração agrega toda
+             a categoria (comportamento legado antes do Bloco C.1).
+        ano_referencia: ano corrente (injetável pra testes determinísticos).
+             None = `datetime.now().year`.
 
     Returns:
         Inteiro positivo de dias.
@@ -78,7 +106,8 @@ def calibrar_dias_giro(
     if session is None:
         return fallback
 
-    chave = (empresa_id, categoria)
+    faixa_alvo = _faixa_idade(ano, ano_referencia)
+    chave = (empresa_id, categoria, faixa_alvo)
     cached = _cache.get(chave)
     if cached and (datetime.utcnow() - cached[1]) < _CACHE_TTL:
         return cached[0]
@@ -92,26 +121,36 @@ def calibrar_dias_giro(
     )
     rows = session.exec(stmt).all()
 
-    # Filtra por categoria inferida do modelo
-    dias_observados = []
+    # Agrupa em dois níveis: (categoria, faixa) e (categoria) pra cascade
+    dias_categoria = []
+    dias_sub_bucket = []
     for arr, lote in rows:
         if _categoria_de_modelo(lote.modelo) != categoria:
             continue
         if arr.vendido_em is None or arr.data is None:
             continue
         delta = (arr.vendido_em - arr.data).days
-        if delta > 0:
-            dias_observados.append(delta)
+        if delta <= 0:
+            continue
+        dias_categoria.append(delta)
+        if faixa_alvo != _FAIXA_ANY and _faixa_idade(lote.ano, ano_referencia) == faixa_alvo:
+            dias_sub_bucket.append(delta)
 
-    if len(dias_observados) < _MIN_AMOSTRAS_CALIBRACAO:
-        # Cache o fallback também — evita re-query toda chamada quando
-        # categoria está vazia
-        _cache[chave] = (fallback, datetime.utcnow())
-        return fallback
+    # Nível 1: sub-bucket com amostras suficientes
+    if faixa_alvo != _FAIXA_ANY and len(dias_sub_bucket) >= _MIN_AMOSTRAS_CALIBRACAO:
+        media = int(round(sum(dias_sub_bucket) / len(dias_sub_bucket)))
+        _cache[chave] = (media, datetime.utcnow())
+        return media
 
-    media = int(round(sum(dias_observados) / len(dias_observados)))
-    _cache[chave] = (media, datetime.utcnow())
-    return media
+    # Nível 2: categoria inteira
+    if len(dias_categoria) >= _MIN_AMOSTRAS_CALIBRACAO:
+        media = int(round(sum(dias_categoria) / len(dias_categoria)))
+        _cache[chave] = (media, datetime.utcnow())
+        return media
+
+    # Nível 3: fallback hardcoded
+    _cache[chave] = (fallback, datetime.utcnow())
+    return fallback
 
 
 def invalidar_cache() -> None:

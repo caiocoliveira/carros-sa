@@ -15,8 +15,8 @@ import pytest
 from carros_sa.agents.extrator_laudo import extrair_laudo
 from carros_sa.models import SeveridadeAvaria, StatusDocumentacao
 
-PDF = Path(__file__).resolve().parent.parent / "data" / "laudos_amostra" / "21854782_fiesta.pdf"
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "21854782_visual_gemini.json"
+
+pytestmark = pytest.mark.requires_real_data
 
 
 class FixedResponseClient:
@@ -31,10 +31,9 @@ class FixedResponseClient:
         return self._response
 
 
-@pytest.mark.skipif(not PDF.exists() or not FIXTURE.exists(), reason="PDF ou fixture ausente")
-def test_consolidacao_fiesta_reprovado_estrutural():
-    client = FixedResponseClient(FIXTURE)
-    laudo = extrair_laudo(PDF, client)
+def test_consolidacao_fiesta_reprovado_estrutural(pdf_fiesta_real, fixture_visual_fiesta):
+    client = FixedResponseClient(fixture_visual_fiesta)
+    laudo = extrair_laudo(pdf_fiesta_real, client)
 
     assert laudo.severidade_geral == SeveridadeAvaria.ESTRUTURAL
     assert laudo.motor_ok is False                     # severidade estrutural anula motor_ok

@@ -35,16 +35,32 @@ def init_db(db_path: Path | str | None = None) -> None:
     _aplicar_migracoes_leves(engine)
 
 
-# Migrations adicionadas pelo Bloco C (dias_giro_estimado em avaliacao_lote).
 # Registrar aqui novas colunas opcionais quando surgirem — substituir por Alembic
 # quando o projeto sair de PoC.
+#
+# Cobre:
+#   - Bloco C: dias_giro_estimado
+#   - Workstream K: preco_referencia_aa + fipe_pct_lance_minimo em lote,
+#     preco_giro_fipe/_aa + fipe + webmotors_mediana em avaliacao_lote.
+#     (Tabela preco_referencia_aa é criada por SQLModel.metadata.create_all.)
 _MIGRACOES_ADD_COLUMN = [
     ("avaliacao_lote", "dias_giro_estimado", "INTEGER"),
+    ("lote", "preco_referencia_aa", "INTEGER"),
+    ("lote", "fipe_pct_lance_minimo", "INTEGER"),
+    ("avaliacao_lote", "preco_giro_fipe", "INTEGER"),
+    ("avaliacao_lote", "preco_giro_aa", "INTEGER"),
+    ("avaliacao_lote", "fipe", "INTEGER"),
+    ("avaliacao_lote", "webmotors_mediana", "INTEGER"),
 ]
 
 
 def _aplicar_migracoes_leves(engine) -> None:
-    """Adiciona colunas novas em tabelas existentes se ainda não estiverem lá."""
+    """Adiciona colunas novas em tabelas existentes se ainda não estiverem lá.
+
+    Backfill especial: `avaliacao_lote.preco_giro_fipe` herda de `preco_giro`
+    (comportamento FIPE-only pré-workstream-K) quando a coluna é criada pela
+    primeira vez.
+    """
     from sqlalchemy import text
 
     with engine.connect() as conn:
@@ -52,9 +68,17 @@ def _aplicar_migracoes_leves(engine) -> None:
             existentes = {
                 row[1] for row in conn.execute(text(f"PRAGMA table_info({tabela})")).all()
             }
+            if not existentes:
+                continue  # tabela não existe (DB legado parcial); create_all a criará completa
             if coluna not in existentes:
                 conn.execute(text(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {tipo}"))
-                conn.commit()
+                if tabela == "avaliacao_lote" and coluna == "preco_giro_fipe":
+                    if "preco_giro" in existentes:
+                        conn.execute(text(
+                            "UPDATE avaliacao_lote SET preco_giro_fipe = preco_giro "
+                            "WHERE preco_giro_fipe IS NULL"
+                        ))
+        conn.commit()
 
 
 def get_session(db_path: Path | str | None = None) -> Session:

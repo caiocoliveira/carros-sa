@@ -18,7 +18,7 @@ help:
 	@echo "  make triagem-debug [EMPRESA=<id>]  # idem com browser visível"
 	@echo "  make top [EMPRESA=<id>] [N=10]     # ranking offline das melhores avaliações"
 	@echo "  make empresas                      # lista empresas configuradas"
-	@echo "  make setup-cron                    # ativa cron diário às 7h"
+	@echo "  make setup-cron                    # ativa cron diário (7h e 13h)"
 	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
 	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
 

@@ -124,6 +124,9 @@ CHECKS: Dict[str, Validator] = {
         "Justificativa string vazia — precificador deveria sempre escrever o racional"
         if not v else None
     ),
+    # Opcional por design: só é preenchido quando o estimador LLM rodou (e o
+    # LLM devolveu campo 'justificativa'). Pode ser "—" ou string livre.
+    "Racional Reforma": lambda v, r: None,
     "URL": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
     "Laudo (PDF)": lambda v, r: None,  # "—" (sem URL de laudo ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
     "Coletado em": lambda v, r: (

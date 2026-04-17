@@ -14,7 +14,13 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.sheets import SheetsExporter, _calcular_roi_no_maximo, HEADER
+from carros_sa.tools.sheets import (
+    COLUMN_FORMATS,
+    HEADER,
+    SheetsExporter,
+    _calcular_roi_no_maximo,
+    _col_letter,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +323,53 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]
         idx_url = HEADER.index("URL")
         assert rows[2][idx_url] == "—"
+
+    def test_reaplica_formato_numerico_em_reforma_e_frete(self):
+        """ws.clear() preserva formato de célula; exporter DEVE reaplicar NUMBER
+        nas colunas R$ senão inteiros herdam formato DATE antigo e viram datas."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        # batch_format deve ter sido chamado com formato NUMBER pras colunas R$
+        assert mock_ws.batch_format.called, "batch_format não foi chamado"
+        formatos = mock_ws.batch_format.call_args_list[0][0][0]
+
+        # Mapeia range→pattern pra consulta fácil
+        ranges = {f["range"]: f["format"]["numberFormat"]["pattern"] for f in formatos}
+
+        # Reforma e Frete (o bug reportado) viram NUMBER, não DATE
+        reforma_letter = _col_letter(HEADER.index("Reforma Estimada (R$)"))
+        frete_letter = _col_letter(HEADER.index("Frete (R$)"))
+        assert ranges[f"{reforma_letter}:{reforma_letter}"] == "#,##0"
+        assert ranges[f"{frete_letter}:{frete_letter}"] == "#,##0"
+
+    def test_col_letter_converte_indices(self):
+        """Índice 0-based → letra de coluna (A, B, ..., Z, AA)."""
+        assert _col_letter(0) == "A"
+        assert _col_letter(17) == "R"   # Reforma Estimada
+        assert _col_letter(18) == "S"   # Frete
+        assert _col_letter(25) == "Z"
+        assert _col_letter(26) == "AA"
+
+    def test_todas_colunas_em_COLUMN_FORMATS_estao_no_HEADER(self):
+        """Cadeado contra typos — cada chave de COLUMN_FORMATS precisa bater
+        EXATAMENTE com um item do HEADER, senão o format não é aplicado."""
+        for col_name in COLUMN_FORMATS:
+            assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
     def test_exportar_roi_baseado_no_lance_maximo(self):
         """ROI deve ser calculado sobre o lance máximo, não sobre lance_atual."""

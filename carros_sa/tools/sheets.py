@@ -51,6 +51,41 @@ HEADER = [
     "Coletado em",
 ]
 
+# Formato numérico explícito por coluna. Necessário porque `ws.clear()` apaga
+# valores mas PRESERVA formatação de célula — colunas cuja posição já foi
+# ocupada por "Atualizado em" em versões anteriores do HEADER herdaram formato
+# DATE, e inteiros (R$) passaram a ser renderizados como datas (número serial).
+# Reaplicar NUMBER a cada export desfaz a contaminação histórica e blinda
+# contra reordenações futuras.
+_NUMBER_INTEIRO = {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}
+_NUMBER_DECIMAL_1 = {"numberFormat": {"type": "NUMBER", "pattern": "0.0"}}
+_NUMBER_DECIMAL_3 = {"numberFormat": {"type": "NUMBER", "pattern": "0.000"}}
+
+COLUMN_FORMATS = {
+    "KM": _NUMBER_INTEIRO,
+    "Lance Atual (R$)": _NUMBER_INTEIRO,
+    "Lance Máximo (R$)": _NUMBER_INTEIRO,
+    "FIPE (R$)": _NUMBER_INTEIRO,
+    "Webmotors Mediana (R$)": _NUMBER_INTEIRO,
+    "Preço Giro FIPE (R$)": _NUMBER_INTEIRO,
+    "Preço Giro Auto Avaliar (R$)": _NUMBER_INTEIRO,
+    "Reforma Estimada (R$)": _NUMBER_INTEIRO,
+    "Frete (R$)": _NUMBER_INTEIRO,
+    "ROI se pagar o máximo (%)": _NUMBER_DECIMAL_1,
+    "Fator Risco": _NUMBER_DECIMAL_3,
+}
+
+
+def _col_letter(idx_0based: int) -> str:
+    """Converte índice 0-based em letra de coluna estilo Sheets (A, B, ..., Z, AA, AB, ...)."""
+    letters = ""
+    idx = idx_0based
+    while True:
+        letters = chr(ord("A") + idx % 26) + letters
+        idx = idx // 26 - 1
+        if idx < 0:
+            return letters
+
 
 def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
     """ROI garantido se ganhar o lote exatamente pelo lance máximo.
@@ -246,10 +281,29 @@ class SheetsExporter:
             ])
 
         ws.clear()
+        self._reaplicar_formato_numerico(ws)
         ws.update(sheet_rows, value_input_option="USER_ENTERED")
 
         # Congela banner (linha 1) + header (linha 2)
         ws.freeze(rows=2)
+
+    @staticmethod
+    def _reaplicar_formato_numerico(ws) -> None:
+        """Reaplica NUMBER em colunas numéricas.
+
+        `ws.clear()` preserva formato de célula, então colunas cuja posição já
+        foi ocupada por um timestamp ("Atualizado em") em versões passadas do
+        HEADER continuam marcadas como DATE. Sem este reset, inteiros R$ são
+        renderizados como datas (ex.: 5000 → 1913-09-07).
+        """
+        formats = []
+        for col_name, cell_format in COLUMN_FORMATS.items():
+            if col_name not in HEADER:
+                continue
+            letter = _col_letter(HEADER.index(col_name))
+            formats.append({"range": f"{letter}:{letter}", "format": cell_format})
+        if formats:
+            ws.batch_format(formats)
 
     def _write_glossario_sheet(self) -> None:
         """Aba fixa 'Glossário' com origem, cálculo e racional de cada coluna da triagem.

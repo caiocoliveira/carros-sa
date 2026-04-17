@@ -125,6 +125,7 @@ CHECKS: Dict[str, Validator] = {
         if not v else None
     ),
     "URL": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
+    "Laudo (PDF)": lambda v, r: None,  # "—" (sem URL de laudo ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
     "Coletado em": lambda v, r: (
         "Coletado em vazio — Lote.scraped_at não foi populado"
         if not v or v == "—"
@@ -164,6 +165,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Frete (R$)": lambda r: r["frete"],
     "Justificativa": lambda r: r["justificativa"],
     "URL": lambda r: r["url"],
+    "Laudo (PDF)": lambda r: r.get("laudo_url") or "—",
     "Coletado em": lambda r: r["scraped_at"],
 }
 

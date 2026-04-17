@@ -22,6 +22,7 @@ from typing import List, Optional
 from sqlmodel import Session, select
 
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.scraping.parsers import is_laudo_pdf_url
 
 HEADER = [
     "Rank",
@@ -48,6 +49,7 @@ HEADER = [
     "Frete (R$)",
     "Justificativa",
     "URL",
+    "Laudo (PDF)",
     "Coletado em",
 ]
 
@@ -189,6 +191,12 @@ class SheetsExporter:
                 except Exception:
                     scraped_at_str = str(lote.scraped_at)
 
+            # URL do PDF do laudo — filtra decoys (Transparência, listing) que
+            # ainda podem estar em `raw_json` de coletas antigas. Só exibimos
+            # link clicável se a URL passa pelo `is_laudo_pdf_url`.
+            laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
+            laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
+
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo} {lote.ano}",
@@ -212,6 +220,7 @@ class SheetsExporter:
                 "frete": av.frete_incluso,
                 "justificativa": av.justificativa,
                 "url": lote.url,
+                "laudo_url": laudo_url,
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "scraped_at": scraped_at_str,
@@ -252,6 +261,15 @@ class SheetsExporter:
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
+            # Link pro PDF do laudo. Se URL passou pelo filtro de decoy
+            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, "—".
+            # Motivação: usuário quer conferir o laudo antes de dar lance
+            # sem precisar clicar no anúncio, abrir o modal e esperar carregar.
+            if r["laudo_url"]:
+                laudo_escaped = r["laudo_url"].replace('"', '""')
+                laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
+            else:
+                laudo_cell = "—"
             sheet_rows.append([
                 rank,
                 situacao,
@@ -277,6 +295,7 @@ class SheetsExporter:
                 r["frete"],
                 r["justificativa"],
                 url_cell,
+                laudo_cell,
                 r["scraped_at"],
             ])
 
@@ -459,6 +478,12 @@ class SheetsExporter:
                 "Auto Avaliar",
                 "=HYPERLINK do link direto do anúncio no b2b.autoavaliar.com.br, rotulado 'Abrir anúncio'",
                 "1 clique pra abrir o anúncio original e fazer checagens manuais ou lance",
+            ],
+            [
+                "Laudo (PDF)",
+                "Scraper detalhe",
+                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. Extraído do DOM do anúncio (storage.googleapis.com/doc-b2b ou cdn-aav.autoavaliar.com.br). URLs que não são laudo real (Relatório de Transparência Salarial, páginas de listagem) são filtradas e a célula fica '—'.",
+                "Olhar o laudo sem precisar abrir o anúncio — ajuda a bater olho em avarias antes de dar lance. '—' significa que o laudo não foi achado (pode existir lote com selo 'SEM LAUDO' ou modal que o scraper não conseguiu abrir).",
             ],
             [
                 "Coletado em",

@@ -183,6 +183,21 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Amostra fixa de 20 linhas mais recentes — problemas em percentuais raros podem passar.
   - Invariantes duplicam o Glossário em linguagem imperativa; manutenção exige editar os dois (teste de paridade protege contra colunas novas sem check, mas não contra divergência semântica).
 
+### R — Fix do decoy Relatório de Transparência + coluna Laudo na planilha ✅
+- **Branch:** `claude/musing-jemison-ba0f06`
+- **Arquivos:**
+  - [`carros_sa/scraping/parsers.py`](carros_sa/scraping/parsers.py) — nova `is_laudo_pdf_url()` com allowlist (hosts `storage.googleapis.com/doc-b2b`, `cdn-aav.autoavaliar.com.br`, ou `.pdf` com "laudo" no path) e blocklist explícita de decoys (`relatorio-de-transparencia`, `/app/uploads/`, `/avaliacoes?`).
+  - [`carros_sa/scraping/scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) — `_EXTRACT_PDF_URL_JS` refeito com função `pareceLaudo()` que usa a mesma allowlist. `coletar_detalhe` também aplica `is_laudo_pdf_url` em Python como defesa em profundidade caso o JS encontre padrão novo.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — nova coluna "Laudo (PDF)" com `=HYPERLINK(url, "Ver laudo")`, filtrando decoys já persistidos em `raw_json["detalhe"]["laudo_pdf_url"]` pra não exibir link clicável pro PDF errado. Glossário atualizado.
+  - [`scripts/reprocessar_lotes_do_db.py`](scripts/reprocessar_lotes_do_db.py) — novo flag `--somente-ativos` filtra lotes com `fim_em > now()` (evita gastar LLM em lotes já encerrados).
+- **Diagnóstico:** 83 de 85 lotes no DB tinham `laudo_pdf_url` apontando pro rodapé institucional do Auto Avaliar ("Relatório de Transparência e Igualdade Salarial" hospedado em `storage.googleapis.com/app/uploads/...`). Causa: `_EXTRACT_PDF_URL_JS` aceitava QUALQUER link com `.pdf` ou `storage.googleapis` sem validar que o conteúdo era mesmo de laudo de lote. Resultado: ExtratorLaudo rodava em PDF institucional (texto sobre equidade de gênero), zerava avarias e toda pipeline rotulava como "limpo". 111/112 laudos ficaram com `severidade=nenhuma, avarias=[]`.
+- **Validação pós-fix:** 9 lotes ativos foram reprocessados. **7/9 pegaram URL de laudo correta** (hosts `doc-b2b` e `sa-laudo`). **1 detectou avaria real** (Fiat Toro — paralamas reparados, severidade=media, confidence 0.95). Os 2 sem URL (`pdf_ok=False`) têm status "Laudo Aprovado" mas PDF não renderiza no DOM inicial — fallback do modal lazy também não achou; limitação conhecida.
+- **Cobertura:** 10 testes novos — 7 em [`tests/test_parsers.py`](tests/test_parsers.py) (classe `TestIsLaudoPdfUrl`: decoy transparência, decoy listing, doc-b2b ok, cdn-aav ok, pdf com "laudo" ok, pdf sem "laudo" rejeitado, None/vazio) + 3 em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) (URL válida vira hyperlink, decoy vira "—", URL ausente vira "—"). 196/196 passando.
+- **Limitações conhecidas:**
+  - Fix só ajuda coletas **futuras**. Os 103 lotes encerrados/sem fim_em continuam com `severidade=nenhuma` e `laudo_pdf_url` decoy — mas não são afetados operacionalmente porque já estão filtrados do export (`fim_em=None` → descartado) ou ordenados pro final (`⚠ Encerrado`).
+  - Gemini 2.5 Flash teve overload (`ServerError`) durante o reprocessamento — 5/9 lotes caíram em fallback textual (confidence 0.5). Rodar de novo quando API normalizar, ou garantir `ANTHROPIC_API_KEY` ativa pra cascatear pro Haiku.
+  - Allowlist cobre os hosts observados até hoje. Se Auto Avaliar mudar pra CDN novo (ex.: Cloudflare próprio), `pareceLaudo()` rejeita silenciosamente e cai no fallback do modal — monitorar taxa de `pdf_ok=False` na triagem pra detectar.
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

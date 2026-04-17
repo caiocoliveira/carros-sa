@@ -241,6 +241,28 @@ Já registrado:
 
 ---
 
+### O — EstimadorReformaLLM (substitui tabela determinística) ✅
+- **Branch:** `claude/gifted-bassi-a24b51`
+- **Arquivos:**
+  - [`carros_sa/agents/text_llm_clients.py`](carros_sa/agents/text_llm_clients.py) — `TextLLMClient` ABC + `GeminiTextClient` + `AnthropicTextClient` + `FallbackTextLLMClient` + `build_default_text_client`. Espelha `vision_clients.py` mas text-only.
+  - [`carros_sa/agents/estimador_reforma_llm.py`](carros_sa/agents/estimador_reforma_llm.py) — `estimar_llm(laudo, lote_info, empresa, llm_client, observacoes_pdf)` com prompt estruturado (carro + severidade + região + avarias + observações livres) e parsing robusto (JSON malformado, custo_total mentiroso, range ausente → fallbacks internos).
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_pipeline_lote` e `orquestrar` aceitam `text_llm_client=None`; quando presente, usa LLM + extrai `observacoes` via `parse_laudo_textual`. Qualquer falha no LLM cai pro determinístico internamente (em `estimar_llm`), pipeline não quebra.
+  - [`carros_sa/cli.py`](carros_sa/cli.py) + [`scripts/triagem_diaria.py`](scripts/triagem_diaria.py) + [`scripts/reprocessar_laudos.py`](scripts/reprocessar_laudos.py) — instanciam `build_default_text_client` e injetam no orquestrador.
+  - [`tests/test_estimador_reforma_llm.py`](tests/test_estimador_reforma_llm.py) — 8 testes novos: gold Fiesta, diferenciação Gol × Range Rover Evoque com motor suspeito, 2× fallback pro determinístico, parsing robusto (soma itens, range derivado), prompt contém campos mínimos.
+  - [`tests/fixtures/21854782_reforma_llm.json`](tests/fixtures/21854782_reforma_llm.json) — fixture gold da resposta esperada do LLM.
+- **Motivação:** Tabela determinística YAML zerava todos os "motor não original" em R$ 4.000 fixo independente do carro — um Gol 2014 com peças baratas e um Range Rover 2018 com peças importadas saíam com o mesmo número. Usuário pediu: LLM que lê laudo + carro + região e estima caso-a-caso.
+- **Como funciona:** Prompt inclui marca/modelo/ano/km, pátio da empresa (Uberlândia/MG × São Paulo capital muda mão-de-obra ~25%), severidade geral, lista de avarias específicas do laudo, status do motor + documentação, e bloco "Observações" livre do inspetor (capado em 2000 chars). LLM responde JSON com 1-8 itens + custo_total + range + justificativa + confidence. Parser recalcula `custo_total = sum(itens)` (LLM às vezes erra a soma) e deriva range se LLM omitir. Em qualquer erro (timeout, JSON inválido, shape ruim), `estimar_llm` cai transparentemente pro `estimar` determinístico — pipeline nunca fica sem custo.
+- **Cascata de providers:** Gemini Flash primário (grátis) → Haiku fallback (~$0.001/chamada, ativa com `ANTHROPIC_API_KEY`). Validado em cima do Fiesta real: quando Gemini entrou em 503 UNAVAILABLE nos 3 retries, o determinístico absorveu e devolveu R$ 10.000 como antes.
+- **Validação gold (Fiesta 21854782):** LLM com fixture → 3 itens, R$ ~10.400 com range R$ 8.300–13.000. Determinístico (fallback) → R$ 10.000. Patamares compatíveis, mas LLM detalha os itens (solda + pintura + calibração de airbag separadas). Teste Gol × Evoque: mesma `motor_ok=False, sem avarias`, Gol → R$ 1.800, Evoque → R$ 12.000 (multiplicador 6×, objetivo central do workstream).
+- **Custo operacional:** Gemini grátis no caso feliz; pior caso Haiku a ~$0.001/lote. Para 100 lotes/dia e 30% fallback pago, ~$0,03/dia → ~$1/mês. Operacionalmente negligível.
+- **Limitações conhecidas:**
+  - Variância do LLM: dois runs do mesmo laudo podem variar ±10% no custo (temperature=0 já). Aceitável porque o precificador usa `custo_total` como uma componente entre várias (FIPE, Webmotors, frete) — erro no reforma não inverte ranking por conta própria.
+  - Custo-teto: hoje não há limite superior. Se LLM alucinar "R$ 200k pra trocar motor", isso mataria ROI mas não quebra pipeline. Mitigação futura: comparar com determinístico e, se LLM >3× determinístico, usar max dos dois + log de auditoria.
+  - Prompt pede regra "SEMPRE incluir alinhamento de chassi quando estrutural" — se LLM ignorar, o custo fica baixo demais. Nos testes de fixture o LLM respeitou, mas em produção pode falhar silenciosamente. Validar com 20 lotes reais quando Gemini voltar ao ar.
+  - Tabela determinística em `config/reforma/*.yaml` **fica como safety net** — usada no fallback e pode ser auditada em paralelo. Não remover até termos confiança em 50+ lotes reais.
+
+---
+
 ## Marcos (do plano arquitetural original)
 
 - ✅ **M1** — Scraper listagem + 10 LoteRaw no SQLite

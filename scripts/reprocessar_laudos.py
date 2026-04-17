@@ -43,7 +43,9 @@ def main(
     """Reprocessa LaudoCache + AvaliacaoLote dos lotes já ingeridos."""
     from carros_sa.agents.avaliador_mercado import avaliar as avaliar_mercado
     from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
+    from carros_sa.agents.estimador_reforma_llm import estimar_llm as estimar_reforma_llm
     from carros_sa.agents.extrator_laudo import extrair_laudo, parse_laudo_textual
+    from carros_sa.agents.text_llm_clients import build_default_text_client
     from carros_sa.agents.vision_clients import build_default_client
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, LaudoCache, Lote, LoteRaw
@@ -68,6 +70,13 @@ def main(
         console.print(f"[yellow]Vision indisponível ({e}) — usando fallback textual puro[/yellow]")
         vision_client = None
 
+    try:
+        text_llm_client = build_default_text_client()
+        console.print(f"[cyan]Reforma LLM:[/cyan] {type(text_llm_client).__name__}")
+    except Exception:
+        text_llm_client = None
+        console.print("[yellow]Reforma LLM desabilitado → usando tabela determinística[/yellow]")
+
     with get_session() as session:
         query = select(Lote)
         if lote:
@@ -84,6 +93,8 @@ def main(
                 laudo_sem_pdf=_laudo_sem_pdf,
                 avaliar_mercado=avaliar_mercado,
                 estimar_reforma=estimar_reforma,
+                estimar_reforma_llm=estimar_reforma_llm,
+                text_llm_client=text_llm_client,
                 calcular_frete=_calcular_frete,
                 precificar_fn=precificar,
                 upsert_laudo=_upsert_laudo_cache,
@@ -133,6 +144,8 @@ def _reprocessar_um(
     laudo_sem_pdf,
     avaliar_mercado,
     estimar_reforma,
+    estimar_reforma_llm,
+    text_llm_client,
     calcular_frete,
     precificar_fn,
     upsert_laudo,
@@ -204,7 +217,27 @@ def _reprocessar_um(
             similares_precos=None, categoria=laudo_est.categoria_veiculo,
             session=session,
         )
-        reforma = estimar_reforma(laudo_est, empresa_cfg)
+        if text_llm_client is not None:
+            observacoes = ""
+            try:
+                from pathlib import Path as _P
+                pdf_local = _P("data/laudos_amostra") / f"{lote.id}.pdf"
+                if pdf_local.exists():
+                    observacoes = parse_laudo_textual(pdf_local).observacoes or ""
+            except Exception:
+                observacoes = ""
+            reforma = estimar_reforma_llm(
+                laudo=laudo_est,
+                lote_info={
+                    "marca": lote.marca, "modelo": lote.modelo, "ano": lote.ano,
+                    "km": lote.km, "lance_atual": lote.lance_atual,
+                },
+                empresa=empresa_cfg,
+                llm_client=text_llm_client,
+                observacoes_pdf=observacoes,
+            )
+        else:
+            reforma = estimar_reforma(laudo_est, empresa_cfg)
         frete = calcular_frete(lote, empresa_cfg)
         avaliacao = precificar_fn(lote_raw, laudo_est, mercado, reforma, frete, empresa_cfg)
         if not dry_run:

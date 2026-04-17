@@ -367,6 +367,7 @@ async def _run_triagem(
     from playwright.async_api import async_playwright
 
     from carros_sa.agents.vision_clients import build_default_client
+    from carros_sa.agents.text_llm_clients import build_default_text_client
     from carros_sa.db import get_session, init_db
     from carros_sa.orquestrador import orquestrar
     from carros_sa.scraping.scraper_autoavaliar import garantir_autenticado
@@ -374,6 +375,15 @@ async def _run_triagem(
     init_db()
     vision_client = build_default_client()
     console.print(f"[cyan]Vision provider:[/cyan] {type(vision_client).__name__}")
+
+    # Text LLM pro EstimadorReformaLLM. Se nada configurado, pipeline usa
+    # determinístico (sem quebrar). Log explícito pra transparência do custo.
+    try:
+        text_llm_client = build_default_text_client()
+        console.print(f"[cyan]Reforma LLM:[/cyan] {type(text_llm_client).__name__}")
+    except RuntimeError:
+        text_llm_client = None
+        console.print("[yellow]Reforma LLM: desabilitado (sem API key) → usando tabela determinística[/yellow]")
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
@@ -405,6 +415,7 @@ async def _run_triagem(
                 page=page,
                 vision_client=vision_client,
                 horizonte_dias=horizonte_dias,
+                text_llm_client=text_llm_client,
             )
 
         await browser.close()

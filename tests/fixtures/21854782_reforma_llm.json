@@ -1,0 +1,12 @@
+{
+  "itens": [
+    {"descricao": "Coluna B esquerda reparada — retrabalho de solda + repintura", "custo": 3800},
+    {"descricao": "Coluna C esquerda reparada — retrabalho de solda + repintura", "custo": 3800},
+    {"descricao": "Alinhamento de chassi + calibração de airbag (dano estrutural)", "custo": 2800}
+  ],
+  "custo_total": 10400,
+  "range_min": 8300,
+  "range_max": 13000,
+  "confidence": 0.85,
+  "justificativa": "Fiesta 2013 com 2 colunas estruturais (B+C) do lado esquerdo reparadas/soldadas — retrabalho + pintura compatível com carro popular; adicional de chassi reflete necessidade de realinhamento pós-impacto lateral."
+}

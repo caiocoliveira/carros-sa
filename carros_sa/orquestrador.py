@@ -29,6 +29,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.avaliador_mercado import avaliar as avaliar_mercado
 from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
+from carros_sa.agents.estimador_reforma_llm import estimar_llm as estimar_reforma_llm
 from carros_sa.agents.extrator_laudo import extrair_laudo
 from carros_sa.models import (
     AvaliacaoLote,
@@ -393,6 +394,7 @@ async def _pipeline_lote(
     empresa: EmpresaConfig,
     session: Session,
     tmp_dir: Path,
+    text_llm_client=None,
 ) -> ResultadoLote:
     """Roda pipeline completo para um lote. Retorna ResultadoLote."""
 
@@ -498,8 +500,30 @@ async def _pipeline_lote(
                 motivo_descarte=f"fipe_indisponivel: {exc}",
             )
 
-        # 6. Reforma
-        reforma = estimar_reforma(laudo, empresa)
+        # 6. Reforma — LLM quando disponível (itens específicos por carro),
+        # fallback interno pro determinístico se LLM falha/JSON ruim. Sem LLM
+        # configurado, determinístico direto.
+        if text_llm_client is not None:
+            # Observações do inspetor enriquecem o prompt quando temos o PDF.
+            observacoes = ""
+            if pdf_url and pdf_dest.exists():
+                try:
+                    from carros_sa.agents.extrator_laudo import parse_laudo_textual
+                    observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
+                except Exception:
+                    observacoes = ""
+            reforma = estimar_reforma_llm(
+                laudo=laudo,
+                lote_info={
+                    "marca": lote.marca, "modelo": lote.modelo, "ano": lote.ano,
+                    "km": lote.km, "lance_atual": lote.lance_atual,
+                },
+                empresa=empresa,
+                llm_client=text_llm_client,
+                observacoes_pdf=observacoes,
+            )
+        else:
+            reforma = estimar_reforma(laudo, empresa)
 
         # 7. Frete
         frete = _calcular_frete(lote, empresa)
@@ -541,6 +565,7 @@ async def orquestrar(
     page,
     vision_client,
     horizonte_dias: int = 7,
+    text_llm_client=None,
 ) -> OrquestradorResult:
     """
     Coleta listagem, ingere lotes novos e roda pipeline de avaliação.
@@ -597,7 +622,10 @@ async def orquestrar(
     tmp_dir = Path(tempfile.mkdtemp(prefix="carros_sa_"))
 
     for lote in lotes_a_avaliar:
-        res = await _pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir)
+        res = await _pipeline_lote(
+            lote, page, vision_client, empresa, session, tmp_dir,
+            text_llm_client=text_llm_client,
+        )
         result.lotes.append(res)
         if res.erro:
             result.n_erros += 1

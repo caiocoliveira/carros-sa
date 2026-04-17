@@ -28,7 +28,13 @@ def _engine_mem():
 
 
 def _lote(lote_id: str = "L001", marca: str = "Ford", modelo: str = "Fiesta", ano: int = 2013,
-          km: Optional[int] = 45000, lance_atual: int = 20000) -> Lote:
+          km: Optional[int] = 45000, lance_atual: int = 20000,
+          fim_em: Optional[datetime] = None) -> Lote:
+    # fim_em default no futuro pra passar pelo filtro de "sem data de leilão" do
+    # exportador. Testes que querem cobrir o caso None (lote fora de leilão ativo)
+    # passam fim_em=... explicitamente como sentinela.
+    if fim_em is None:
+        fim_em = datetime.now() + timedelta(days=3)
     return Lote(
         id=lote_id,
         leilao="auto_arremate",
@@ -38,6 +44,7 @@ def _lote(lote_id: str = "L001", marca: str = "Ford", modelo: str = "Fiesta", an
         ano=ano,
         km=km,
         lance_atual=lance_atual,
+        fim_em=fim_em,
         scraped_at=datetime.utcnow(),
     )
 
@@ -336,6 +343,67 @@ class TestSheetsExporterQuery:
         roi_val = rows[2][idx_roi]
         # ROI ≈ 10-12% (baseado no lance máximo, não no lance atual de 20k)
         assert 5 < roi_val < 20
+
+
+class TestSheetsExporterFimEmObrigatorio:
+    """Lotes sem fim_em (Auto Avaliar não está mais mostrando countdown = lote
+    saiu do leilão ativo) não entram no export. Feedback do usuário 2026-04-16:
+    100% dos lotes sem data de leilão estavam arrematados ou com link morto.
+    """
+
+    def test_lote_sem_fim_em_e_excluido_do_export(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # L001: com fim_em → aparece
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            # L002: sem fim_em → filtrado
+            l2 = _lote("L002", modelo="Gol", fim_em=datetime.now() + timedelta(days=3))
+            l2.fim_em = None
+            session.add(l2)
+            session.add(_avaliacao("L002"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar("uberlandia_mg", session)
+
+        assert n == 1, "só L001 deve entrar; L002 sem fim_em é filtrado"
+        rows = mock_ws.update.call_args_list[0][0][0]
+        # rows[0]=banner, rows[1]=header, rows[2]=L001 (único dado)
+        assert len(rows) == 3
+        idx_lote_id = HEADER.index("Lote ID")
+        assert rows[2][idx_lote_id] == "L001"
+
+    def test_sem_fim_em_e_sem_avaliacoes_retorna_zero_limpo(self):
+        """Todos os lotes sem fim_em → export vazio (só banner+header), sem crash."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            l = _lote("L001")
+            l.fim_em = None
+            session.add(l)
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar("uberlandia_mg", session)
+
+        assert n == 0
 
 
 class TestSheetsExporterEncerrados:

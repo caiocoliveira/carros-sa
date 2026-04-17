@@ -108,14 +108,23 @@ class SheetsExporter:
             lote = session.get(Lote, av.lote_id)
             if lote is None:
                 continue
+
+            # Filtro duro: lote sem Fim do Leilão visível não entra na planilha.
+            # Observação empírica (feedback usuário 2026-04-16): 100% dos lotes
+            # com `fim_em=None` coletados em triagens anteriores já estavam
+            # arrematados/vendidos OU o link do anúncio não abria mais. Auto
+            # Avaliar só mostra countdown enquanto o lote está em leilão ativo;
+            # sumiu o countdown = já saiu do leilão. Melhor esconder do que
+            # mandar o usuário clicar em link morto.
+            if lote.fim_em is None:
+                continue
+
             laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)
 
-            fim_em_str = "—"
-            if lote.fim_em is not None:
-                try:
-                    fim_em_str = lote.fim_em.strftime("%d/%m/%Y %H:%M")
-                except Exception:
-                    fim_em_str = str(lote.fim_em)
+            try:
+                fim_em_str = lote.fim_em.strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                fim_em_str = str(lote.fim_em)
 
             viavel = av.preco_max > (lote.lance_atual or 0)
 
@@ -286,8 +295,8 @@ class SheetsExporter:
             [
                 "Fim do Leilão",
                 "Auto Avaliar",
-                "Timer DD:HH:MM:SS do card convertido pra datetime absoluto",
-                "Urgência — lotes com fim próximo precisam de decisão antes",
+                "Timer HH:MM:SS[:centésimos] do card convertido pra datetime absoluto. Lotes SEM fim visível são filtrados do export (Auto Avaliar só mostra countdown enquanto o lote está em leilão ativo; sem countdown = já arrematado ou link morto).",
+                "Urgência — lotes com fim próximo precisam de decisão antes. Ausência da coluna significa que o lote deixou de ser visível no leilão.",
             ],
             [
                 "KM",

@@ -38,6 +38,29 @@ app = typer.Typer(
 console = Console()
 
 
+def _imprimir_vision_provider(client) -> None:
+    """Mostra qual provider de visão está ativo + warn se sem cascata.
+
+    Quando só Gemini está configurado (sem ANTHROPIC_API_KEY no .env), o
+    fallback Haiku não roda. Triagem 2026-04-16 mostrou que isso resulta em
+    ~75% dos lotes caindo no fallback textual quando Gemini dá erro
+    silencioso, viesando fator_risco. O warn lembra de configurar.
+    """
+    nome = type(client).__name__
+    if nome == "FallbackVisionClient":
+        # Cascata ativa: Gemini → Haiku (ou qualquer combinação configurada)
+        cliente_nomes = [type(c).__name__ for c in client._clients]
+        console.print(f"[cyan]Vision provider:[/cyan] {nome} → {' → '.join(cliente_nomes)}")
+    else:
+        console.print(f"[cyan]Vision provider:[/cyan] {nome}")
+        if nome == "GeminiVisionClient":
+            console.print(
+                "[yellow]⚠ Apenas Gemini ativo. Setar ANTHROPIC_API_KEY no .env "
+                "ativa cascata Gemini→Haiku — cobre overload silencioso "
+                "(~$5-15/mês em volumes de PoC).[/yellow]"
+            )
+
+
 # ---------------------------------------------------------------------------
 # top — ranking offline a partir do SQLite
 # ---------------------------------------------------------------------------
@@ -47,11 +70,18 @@ def top(
     empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
     n: int = typer.Option(10, "--n", "--top", help="Quantos lotes mostrar (top N por ROI)"),
     por_absoluto: bool = typer.Option(False, "--absoluto", help="Ordena por ROI absoluto (sem anualizar)"),
+    incluir_inviaveis: bool = typer.Option(
+        False, "--incluir-inviaveis",
+        help="Mostra também lotes onde lance_atual > preco_max (default: oculta)",
+    ),
 ) -> None:
     """Lista as top N avaliações da empresa já persistidas no SQLite.
 
     Ordenação default: ROI anualizado (score_roi × 365 / dias_giro). Premia
     carros de giro rápido. `--absoluto` volta pro score_roi puro (legado).
+
+    Filtro default: oculta lotes inviáveis (lance atual já passou do nosso teto).
+    Use `--incluir-inviaveis` pra ver tudo (útil pra calibrar fórmula).
     """
     from sqlmodel import select
 
@@ -76,6 +106,22 @@ def top(
         )
         raise typer.Exit(0)
 
+    # Filtro de viabilidade: lance atual já passou do preco_max → não cabe lance.
+    # Sem isso, ranking enche de lotes "caros demais" e esconde os de fato comprávies.
+    total_avaliados = len(todas)
+    if not incluir_inviaveis:
+        todas = [(av, lote) for av, lote in todas if av.preco_max > (lote.lance_atual or 0)]
+
+    if not todas:
+        console.print(
+            f"[yellow]Nenhum lote viável (lance atual ≤ preço máximo) entre os "
+            f"{total_avaliados} avaliados. Use [bold]--incluir-inviaveis[/bold] "
+            "pra ver todos.[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    n_inviaveis = total_avaliados - len(todas)
+
     # Anota cada linha com ROI anualizado e ordena
     enriquecidas = [
         (av, lote, roi_anualizado(av.score_roi, av.dias_giro_estimado))
@@ -92,7 +138,10 @@ def top(
     from carros_sa.tools.popularidade import bucket_modelo
 
     sufixo = "ROI absoluto" if por_absoluto else "ROI anualizado"
-    tbl = Table(title=f"Top {len(rows)} lotes — {empresa} (ordem: {sufixo})")
+    titulo = f"Top {len(rows)} lotes — {empresa} (ordem: {sufixo})"
+    if not incluir_inviaveis and n_inviaveis > 0:
+        titulo += f" — {n_inviaveis} inviável(is) ocultado(s)"
+    tbl = Table(title=titulo)
     tbl.add_column("Lote")
     tbl.add_column("Modelo")
     tbl.add_column("Ano", justify="right")
@@ -290,7 +339,7 @@ def extrair_laudo_cmd(
     from carros_sa.agents.vision_clients import build_default_client
 
     client = build_default_client()
-    console.print(f"[cyan]Vision provider:[/cyan] {type(client).__name__}")
+    _imprimir_vision_provider(client)
     laudo = extrair_laudo(pdf, client)
     console.print_json(laudo.model_dump_json(indent=2))
 
@@ -374,7 +423,7 @@ async def _run_triagem(
 
     init_db()
     vision_client = build_default_client()
-    console.print(f"[cyan]Vision provider:[/cyan] {type(vision_client).__name__}")
+    _imprimir_vision_provider(vision_client)
 
     # Text LLM pro EstimadorReformaLLM. Se nada configurado, pipeline usa
     # determinístico (sem quebrar). Log explícito pra transparência do custo.

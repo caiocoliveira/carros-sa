@@ -117,6 +117,81 @@ def test_top_respeita_limite_n(db_tmp):
     assert "LOT002" not in result.stdout
 
 
+def test_top_filtra_inviaveis_por_default(db_tmp):
+    """lance_atual > preco_max → lote inviável → some do top default."""
+    engine = create_engine(f"sqlite:///{db_tmp}", connect_args={"check_same_thread": False})
+    from sqlmodel import Session
+    with Session(engine) as session:
+        # Viável: lance 20k, preco_max 25k
+        session.add(Lote(id="VIAVEL", leilao="x", url="x", marca="VW", modelo="Polo",
+                         ano=2024, lance_atual=20000, raw_json={}))
+        session.add(AvaliacaoLote(
+            empresa_id="carros_uberlandia", lote_id="VIAVEL",
+            preco_alvo=18000, preco_max=25000, score_roi=0.20,
+            fator_risco=1.0, fator_liquidez=1.0, margem_aplicada=0.20,
+            frete_incluso=0, reforma_estimada=0, taxas_leilao=999,
+            preco_giro=24000, preco_giro_fipe=24000, preco_giro_aa=None,
+            dias_giro_estimado=60, justificativa="ok",
+            criado_em=datetime.utcnow(),
+        ))
+        # Inviável: lance 50k, preco_max 30k (lance ja passou)
+        session.add(Lote(id="CARO", leilao="x", url="x", marca="VW", modelo="Polo",
+                        ano=2024, lance_atual=50000, raw_json={}))
+        session.add(AvaliacaoLote(
+            empresa_id="carros_uberlandia", lote_id="CARO",
+            preco_alvo=28000, preco_max=30000, score_roi=0.99,  # ROI altíssimo, mas inviável
+            fator_risco=1.5, fator_liquidez=1.5, margem_aplicada=0.45,
+            frete_incluso=0, reforma_estimada=0, taxas_leilao=999,
+            preco_giro=40000, preco_giro_fipe=40000, preco_giro_aa=None,
+            dias_giro_estimado=30, justificativa="caro",
+            criado_em=datetime.utcnow(),
+        ))
+        session.commit()
+
+    # Default: só VIAVEL aparece, CARO some apesar do ROI maior
+    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia"],
+                           env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert "VIAVEL" in result.stdout
+    assert "CARO" not in result.stdout
+    assert "1 inviável" in result.stdout  # contador no título
+
+    # Com --incluir-inviaveis: ambos aparecem, CARO no topo (ROI maior)
+    result_all = runner.invoke(
+        app, ["top", "--empresa", "carros_uberlandia", "--incluir-inviaveis", "--absoluto"],
+        env={"COLUMNS": "200"},
+    )
+    assert result_all.exit_code == 0
+    assert "VIAVEL" in result_all.stdout
+    assert "CARO" in result_all.stdout
+    assert result_all.stdout.index("CARO") < result_all.stdout.index("VIAVEL")
+
+
+def test_top_zero_viaveis_emite_aviso(db_tmp):
+    """Quando todos os lotes são inviáveis, default mostra aviso e não tabela."""
+    engine = create_engine(f"sqlite:///{db_tmp}", connect_args={"check_same_thread": False})
+    from sqlmodel import Session
+    with Session(engine) as session:
+        session.add(Lote(id="CARO", leilao="x", url="x", marca="VW", modelo="Gol",
+                        ano=2014, lance_atual=50000, raw_json={}))
+        session.add(AvaliacaoLote(
+            empresa_id="carros_uberlandia", lote_id="CARO",
+            preco_alvo=20000, preco_max=25000, score_roi=0.30,
+            fator_risco=1.0, fator_liquidez=1.0, margem_aplicada=0.20,
+            frete_incluso=0, reforma_estimada=0, taxas_leilao=999,
+            preco_giro=30000, preco_giro_fipe=30000, preco_giro_aa=None,
+            dias_giro_estimado=30, justificativa="x",
+            criado_em=datetime.utcnow(),
+        ))
+        session.commit()
+
+    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia"],
+                           env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert "Nenhum lote viável" in result.stdout
+    assert "--incluir-inviaveis" in result.stdout
+
+
 def test_top_filtra_por_empresa(db_tmp):
     _seed_avaliacoes(db_tmp, empresa="carros_uberlandia", n=2, prefix="UBE")
     _seed_avaliacoes(db_tmp, empresa="outra_empresa", n=2, prefix="OUT")
@@ -167,14 +242,18 @@ def test_top_ranqueia_por_roi_anualizado_default(db_tmp):
             session.add(r)
         session.commit()
 
-    # Default: por ROI anualizado → RAPIDO vem antes
-    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia"], env={"COLUMNS": "200"})
+    # Default: por ROI anualizado → RAPIDO vem antes.
+    # --incluir-inviaveis pq fixture tem lance > preco_max (escolha intencional
+    # pra isolar a regra de ranking do filtro de viabilidade).
+    result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--incluir-inviaveis"],
+                           env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert result.stdout.index("RAPIDO") < result.stdout.index("LENTO")
     assert "ROI anualizado" in result.stdout
 
     # --absoluto inverte: por score_roi puro → LENTO (30%) vem antes de RAPIDO (20%)
-    result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--absoluto"],
+    result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--absoluto",
+                                     "--incluir-inviaveis"],
                                env={"COLUMNS": "200"})
     assert result_abs.exit_code == 0
     assert result_abs.stdout.index("LENTO") < result_abs.stdout.index("RAPIDO")

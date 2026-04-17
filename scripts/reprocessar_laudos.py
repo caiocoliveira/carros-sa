@@ -162,6 +162,13 @@ def _reprocessar_um(
     modelo = f"{lote.marca} {lote.modelo} {lote.ano}"
     resultado: dict = {"lote_id": lote.id, "modelo": modelo, "status": "—"}
 
+    # 0. Marca fora do escopo FIPE (Triumph, Harley, Ducati etc — motos).
+    # Descarta ANTES de gastar LLM com laudo. Marca como "fora de escopo".
+    from carros_sa.tools.fipe import marca_fora_do_escopo_fipe
+    if marca_fora_do_escopo_fipe(lote.marca):
+        resultado["status"] = f"fora_fipe_moto: {lote.marca}"
+        return resultado
+
     # 1. Laudo: tenta PDF → visão → textual → sem PDF
     # Procura em data/laudos_pdfs/ (scraper de produção) primeiro; fallback em
     # data/laudos_amostra/ (fixtures de teste).

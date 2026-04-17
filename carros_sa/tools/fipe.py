@@ -27,6 +27,26 @@ FIPE_BASE_URL = "https://parallelum.com.br/fipe/api/v1"
 
 _PRECO_RE = re.compile(r"R\$\s*([\d\.]+),(\d{2})")
 
+# Marcas fora do escopo da FIPE /carros/ — principalmente fabricantes exclusivos
+# de motos. Sem FIPE não temos âncora de preço, e o pipeline não consegue
+# precificar. Detecção antecipada economiza 1 chamada ao Parallelum + dá motivo
+# de descarte claro ("moto") em vez do LookupError genérico do _resolve_marca.
+# Honda/Yamaha/Suzuki/BMW são EXCLUÍDAS dessa lista porque também fazem carros
+# — deixamos o LookupError normal tratar se vier um modelo de moto delas.
+MARCAS_NON_FIPE = frozenset({
+    "triumph", "harley-davidson", "harley davidson", "harley",
+    "ducati", "kawasaki", "dafra", "kasinski", "royal enfield",
+    "royal-enfield", "mv agusta", "mv-agusta", "ktm", "piaggio",
+    "vespa",
+})
+
+
+def marca_fora_do_escopo_fipe(marca: str) -> bool:
+    """True se a marca é fabricante exclusivo de moto (fora da FIPE carros)."""
+    if not marca:
+        return False
+    return marca.strip().lower() in MARCAS_NON_FIPE
+
 # Rate limit: Parallelum não documenta, mas experimentalmente ~1 req/s é seguro.
 # Um pipeline de 50 lotes × 4 chamadas/consulta = 200 requests, o que sem throttle
 # bate em 429. Com 0.3s entre chamadas + cache persistente da lista-mestre de

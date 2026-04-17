@@ -473,6 +473,17 @@ async def _pipeline_lote(
             return ResultadoLote(lote_id=lote.id, modelo=modelo_str,
                                  avaliado=False, motivo_descarte=flags.early_exit)
 
+        # 2b. Marca fora do catálogo FIPE (Triumph, Harley, Ducati, etc — motos).
+        # Sem FIPE não conseguimos ancorar preço. Descartamos AQUI em vez de
+        # gastar LLM no laudo + bater num LookupError lá na frente. Motivo claro
+        # na planilha, fluxo não quebra.
+        from carros_sa.tools.fipe import marca_fora_do_escopo_fipe
+        if marca_fora_do_escopo_fipe(lote.marca):
+            return ResultadoLote(
+                lote_id=lote.id, modelo=modelo_str, avaliado=False,
+                motivo_descarte=f"marca_fora_fipe_moto: {lote.marca}",
+            )
+
         # 3. PDF + Laudo
         # Persistimos o PDF em data/laudos_pdfs/<lote>.pdf (não em tmp_dir) —
         # assim reprocessar_laudos.py pode re-rodar extração sem baixar de novo,

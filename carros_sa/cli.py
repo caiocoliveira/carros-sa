@@ -28,7 +28,11 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-load_dotenv()
+# override=True faz secrets do .env vencerem o que estiver exportado no shell.
+# Sem isso, vars vazias herdadas do parent (ex.: outro tooling que setou
+# ANTHROPIC_API_KEY="" pra própria execução) sobrescrevem silenciosamente
+# a chave real do .env e o pipeline cai pro fallback Gemini-only sem aviso.
+load_dotenv(override=True)
 
 app = typer.Typer(
     add_completion=False,

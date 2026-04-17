@@ -271,6 +271,46 @@ def test_llm_sem_range_deriva_do_custo_total():
 # Prompt shape — garante que o LLM recebe os campos mínimos
 # =============================================================================
 
+def test_custoreforma_preserva_justificativa_do_llm_como_racional():
+    """Quando LLM devolve 'justificativa', ela sobrevive em CustoReforma.racional
+    pra ser propagada até o Sheets (coluna 'Racional Reforma')."""
+    laudo = _laudo_fiesta_estrutural()
+    empresa = carregar_empresa("carros_uberlandia")
+    fake = FakeTextLLMClient([{
+        "itens": [{"descricao": "Solda coluna B", "custo": 3800}],
+        "custo_total": 3800, "range_min": 3000, "range_max": 4700,
+        "confidence": 0.85,
+        "justificativa": "Fiesta 2013 com coluna estrutural reparada — retrabalho de solda.",
+    }])
+
+    custo = estimar_llm(
+        laudo=laudo,
+        lote_info={"marca": "FORD", "modelo": "Fiesta", "ano": 2013},
+        empresa=empresa, llm_client=fake,
+    )
+
+    assert custo.racional == (
+        "Fiesta 2013 com coluna estrutural reparada — retrabalho de solda."
+    )
+
+
+def test_fallback_deterministico_nao_tem_racional():
+    """LLM falhou → cai no determinístico → racional fica None
+    (precificador então monta a partir dos itens)."""
+    laudo = _laudo_fiesta_estrutural()
+    empresa = carregar_empresa("carros_uberlandia")
+    fake = FakeTextLLMClient([], raise_on_call=RuntimeError("API down"))
+
+    custo = estimar_llm(
+        laudo=laudo,
+        lote_info={"marca": "FORD", "modelo": "Fiesta", "ano": 2013},
+        empresa=empresa, llm_client=fake,
+    )
+
+    assert custo.racional is None
+    assert custo.custo_total > 0  # determinístico respondeu
+
+
 def test_prompt_inclui_carro_severidade_regiao_e_avarias():
     laudo = _laudo_fiesta_estrutural()
     empresa = carregar_empresa("carros_uberlandia")

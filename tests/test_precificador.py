@@ -466,3 +466,62 @@ def test_yaml_antigo_so_custo_op_fixo_funciona():
     # taxa_leilao_fixa default 0 (não tem no YAML legado)
     assert empresa_sp.taxa_leilao_fixa == 0
     assert empresa_sp.taxa_leilao_pct == 0.08
+
+
+# =============================================================================
+# Reforma racional — propaga do CustoReforma pra Avaliacao
+# =============================================================================
+
+def test_reforma_racional_montado_a_partir_dos_itens(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado
+):
+    """Precificador deve preencher avaliacao.reforma_racional com sumário dos itens."""
+    reforma = CustoReforma(
+        itens=[
+            ItemReforma(descricao="Funilaria porta dianteira", custo=2_000),
+            ItemReforma(descricao="Pintura + polimento", custo=1_500),
+        ],
+        custo_total=3_500, range_min=2_800, range_max=4_500,
+    )
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, reforma, frete, empresa)
+
+    assert av.reforma_racional is not None
+    assert "Funilaria porta dianteira" in av.reforma_racional
+    assert "Pintura" in av.reforma_racional
+    assert "2000" in av.reforma_racional or "2.000" in av.reforma_racional
+    assert "1500" in av.reforma_racional or "1.500" in av.reforma_racional
+
+
+def test_reforma_racional_usa_justificativa_do_llm_quando_disponivel(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado
+):
+    """Quando CustoReforma vem com racional (do LLM), Avaliacao herda esse texto."""
+    reforma = CustoReforma(
+        itens=[ItemReforma(descricao="Reparo genérico", custo=4_000)],
+        custo_total=4_000, range_min=3_000, range_max=5_000,
+        racional="Gol 2014 com motor suspeito — retífica parcial VW AP, mão-de-obra local.",
+    )
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, reforma, frete, empresa)
+
+    assert av.reforma_racional == (
+        "Gol 2014 com motor suspeito — retífica parcial VW AP, mão-de-obra local."
+    )
+
+
+def test_reforma_racional_sem_itens_e_sem_llm_fica_none(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado
+):
+    """Reforma vazia (nenhum item, sem racional LLM) → reforma_racional=None (mostra '—' na planilha)."""
+    reforma = CustoReforma(itens=[], custo_total=0, range_min=0, range_max=0)
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, reforma, frete, empresa)
+
+    assert av.reforma_racional is None

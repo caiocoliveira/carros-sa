@@ -584,3 +584,62 @@ class TestSheetsExporterTimestamp:
 
         # O primeiro freeze é da aba de dados (o segundo é o Glossário)
         mock_ws.freeze.assert_any_call(rows=2)
+
+
+class TestReformaRacional:
+    """Racional do valor da reforma aparece na planilha como coluna dedicada."""
+
+    def test_header_inclui_coluna_racional_reforma(self):
+        assert "Racional Reforma" in HEADER
+
+    def test_exporta_racional_reforma_da_avaliacao(self):
+        engine = _engine_mem()
+        racional = "Coluna B esq. solda+pintura R$3800 · Alinhamento chassi R$2800"
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            av = _avaliacao("L001", score_roi=0.3)
+            av.reforma_racional = racional
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_racional = HEADER.index("Racional Reforma")
+        # row[2] é a primeira linha de dados (rank 1)
+        assert rows[2][idx_racional] == racional
+
+    def test_racional_ausente_mostra_travessao(self):
+        """Avaliações antigas sem racional_reforma populado exibem '—' sem quebrar."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            av = _avaliacao("L001")  # reforma_racional fica None
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_racional = HEADER.index("Racional Reforma")
+        assert rows[2][idx_racional] == "—"

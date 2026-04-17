@@ -129,6 +129,10 @@ class CustoReforma(BaseModel):
     custo_total: int
     range_min: int
     range_max: int
+    # Justificativa livre do LLM (quando estimativa veio via EstimadorReformaLLM).
+    # Preenchida apenas no caminho LLM; estimador determinístico deixa None e o
+    # precificador monta um sumário a partir dos itens pra salvar em Avaliacao.
+    racional: Optional[str] = None
 
 
 class CustoLogistico(BaseModel):
@@ -171,6 +175,10 @@ class Avaliacao(BaseModel):
     # cálculo de ROI anualizado no ranking sem re-derivar (workstream calibração).
     dias_giro_estimado: Optional[int] = None
     justificativa: str
+    # Racional do custo de reforma, exibido na planilha como coluna dedicada.
+    # LLM → frase do próprio modelo; determinístico → sumário dos itens montado
+    # no precificador. None quando reforma=0 (sem itens e sem justificativa).
+    reforma_racional: Optional[str] = None
 
 
 # =============================================================================
@@ -300,6 +308,9 @@ class AvaliacaoLote(SQLModel, table=True):
     # absoluto.
     dias_giro_estimado: Optional[int] = None
     justificativa: str
+    # Texto exibido como "Racional Reforma" na planilha. Nullable em registros
+    # pré-workstream O; nesses casos a planilha mostra '—'.
+    reforma_racional: Optional[str] = None
     criado_em: datetime = SQLField(default_factory=datetime.utcnow)
 
 

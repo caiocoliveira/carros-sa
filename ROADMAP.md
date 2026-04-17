@@ -156,6 +156,18 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Os badges no b2b.autoavaliar foram inferidos das palavras portuguesas mais comuns ("ARREMATADO", "VENDIDO", "ENCERRADO", "FINALIZADO"). Se a plataforma introduzir nova label (ex.: "LOTE FECHADO"), o regex falha silencioso e cai pro fallback do timer.
   - Lotes sem `fim_em` (SHOWROOM, venda direta) nunca são marcados como encerrados pelo timer — precisam do badge pra sair da lista ativa.
 
+### O — Paginação real do scraper de listagem ✅
+- **Branch:** `claude/vigorous-lichterman-f70777`
+- **Arquivos:**
+  - [`carros_sa/scraping/scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) — `_coletar_listagem_cidade` agora itera `?p=1..N` em vez de scroll infinito. Lê `max(data-page)` do DOM de paginação (`<a class="button" data-page="N">`) e limita a `_MAX_PAGINAS=20` como guard-rail.
+  - [`tests/test_scraper_paginacao.py`](tests/test_scraper_paginacao.py) — 5 testes com `FakePage` stub (1 página, N páginas, dedup cross-page, filtro de horizonte pós-agregação, limite de runaway).
+- **Diagnóstico (via Chrome MCP na triagem ao vivo):** Uberlândia/MG mostra 148 lotes no contador mas o scraper só pegava ~48 (página 1). Causa: site usa paginação real com param `p` (não scroll infinito). Além disso, todos os 148 lotes encerram no MESMO dia — Auto Avaliar roda ciclo diário, então "horizonte 7 dias" é uma abstração que na prática é sempre ~20h máx.
+- **Impacto:** triagem passa a cobrir ~3x mais inventário por run. O feeling do usuário de "leilões muito em cima" vinha da planilha magra, não do horizonte curto — a distribuição real de `fim_em` no DB (0 lotes além de 24h, 54/63 já encerrados) confirmou que o problema era coleta incompleta.
+- **Limitações conhecidas:**
+  - Com 4 páginas × 1 request = 4 requests extra por cidade (vs 1 antes). Raio de 61 cidades × 4 = 244 requests/run. Se Auto Avaliar apertar rate-limit, talvez precise reduzir raio ou adicionar backoff.
+  - A lógica de descoberta de `total_paginas` depende do seletor `a.button[data-page]`. Se o site mudar o DOM de paginação, cai no fallback de 1 página (regressão silenciosa pro comportamento antigo — conservador, não quebra o pipeline).
+  - "Horizonte 7 dias" virou parâmetro morto na prática até a plataforma mudar o ciclo. Mantido no código pela genericidade do contrato.
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

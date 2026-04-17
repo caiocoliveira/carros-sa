@@ -243,38 +243,72 @@ async def garantir_autenticado(page, email: str, password: str) -> None:
 # Coleta de listagem
 # ---------------------------------------------------------------------------
 
+_MAX_PAGINAS = 20  # teto defensivo pro range de `?p=N`
+
+
+_CONTA_PAGINAS_JS = """
+() => {
+    const nums = Array.from(document.querySelectorAll('a.button[data-page]'))
+        .map(a => parseInt(a.getAttribute('data-page'), 10))
+        .filter(n => !Number.isNaN(n));
+    return nums.length ? Math.max(...nums) : 1;
+}
+"""
+
+
 async def _coletar_listagem_cidade(
     page,
     cidade: str,
     uf: str,
     horizonte_dias: int,
 ) -> list:
-    """Coleta cards de UMA cidade específica. Helper interno do coletar_listagem."""
-    url = (
+    """Coleta cards de UMA cidade, iterando TODAS as páginas via `?p=N`.
+
+    Auto Avaliar pagina com param `p` (não scroll infinito) — o DOM mostra os
+    links da paginação como `<a class="button" data-page="N">`. A gente lê
+    `max(data-page)` na primeira página e itera até lá, limitando a
+    `_MAX_PAGINAS` pra não rodar loop runaway se o DOM mudar.
+    """
+    base_url = (
         f"{LISTAGEM_URL}?location={uf.lower()}&cities={quote(cidade.lower())}"
         f"&report=yes&order=recforyou"
     )
 
-    await page.goto(url, wait_until="networkidle", timeout=30000)
+    # Página 1: descobre total de páginas
+    await page.goto(base_url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(2000)
 
-    # Scroll infinito — rola até parar de aparecer novos cards
-    cards_anterior = 0
-    for _ in range(30):
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    total_paginas = await page.evaluate(_CONTA_PAGINAS_JS)
+    try:
+        total_paginas = int(total_paginas)
+    except (TypeError, ValueError):
+        total_paginas = 1
+    total_paginas = max(1, min(total_paginas, _MAX_PAGINAS))
+
+    vistos: set = set()
+    agregado: list = []
+
+    async def _coleta_pagina_atual() -> None:
+        raw_cards = await page.evaluate(_EXTRACT_CARDS_JS)
+        for card in raw_cards or []:
+            lote_id = card.get("loteId")
+            if not lote_id or lote_id in vistos:
+                continue
+            vistos.add(lote_id)
+            agregado.append(card)
+
+    await _coleta_pagina_atual()
+
+    for p in range(2, total_paginas + 1):
+        await page.goto(f"{base_url}&p={p}", wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(1500)
-        cards_agora = await page.evaluate("document.querySelectorAll('a[href*=\"/avaliacoes/\"]').length")
-        if cards_agora == cards_anterior:
-            break
-        cards_anterior = cards_agora
+        await _coleta_pagina_atual()
 
-    raw_cards: list = await page.evaluate(_EXTRACT_CARDS_JS)
-
-    # Filtra por horizonte
+    # Filtra por horizonte DEPOIS de agregar todas as páginas
     agora = datetime.now()
     limite = agora + timedelta(days=horizonte_dias)
     resultado = []
-    for card in raw_cards:
+    for card in agregado:
         from carros_sa.scraping.parsers import _timer_para_fim_em, _TIMER_RE
         timer_linha = next((l for l in card["lines"] if _TIMER_RE.match(l)), None)
         if timer_linha:

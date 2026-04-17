@@ -35,24 +35,41 @@ def _categoria_de_modelo(modelo: str) -> CategoriaVeiculo:
     """Inferência grosseira por substring no nome do modelo.
 
     Mantém alinhado com [orquestrador._calcular_frete](../orquestrador.py)
-    pra que histórico e novos lotes caiam na mesma bucket.
+    pra que histórico e novos lotes caiam na mesma bucket. Lista expandida
+    após rodagens reais — incluindo marcas chinesas (Tiggo/Haval), lançamentos
+    Fiat recentes (Fastback/Pulse/Cronos), SUVs compactos e picapes menos
+    comuns (Oroch/Maverick/Montana/Triton).
     """
     m = (modelo or "").lower()
-    if any(k in m for k in ("hilux", "s10", "saveiro", "strada", "ranger", "frontier", "amarok", "toro")):
+    if any(k in m for k in (
+        "hilux", "s10", "saveiro", "strada", "ranger", "frontier", "amarok", "toro",
+        "l200", "oroch", "maverick", "montana", "courier", "triton", "dakota",
+        "f-250", "f-1000", "d-20", "hoggar", "f-100",
+    )):
         return CategoriaVeiculo.PICAPE
     if any(k in m for k in (
         "compass", "hr-v", "tracker", "creta", "haval", "evoque", "spin", "renegade",
         "pajero", "freelander", "750i", "activ", "longitude", "sport", "duster", "ecosport",
+        # Lançamentos Fiat recentes: Pulse (SUV) e Fastback (SUV coupé)
+        "pulse", "fastback",
+        # Chineses + SUVs recentes
+        "tiggo", "tucson", "cherokee", "commander", "territory", "santa fe", "trailblazer",
+        "kicks", "captur", "t-cross", "corolla cross", "wr-v", "outlander", "sportage",
+        # Premium SUVs
+        "x1", "x3", "x5", "x6", "q3", "q5", "q7", "glk", "gla", "glb",
     )):
         return CategoriaVeiculo.SUV
     if any(k in m for k in (
         "onix", "hb20", "gol", "fiesta", "polo", "ka ", "march", "sandero", "uno", "mobi",
-        "argo", "biz", "bizz",
+        "argo", "biz", "bizz", "kwid", "208", "c3", "up", "palio", "punto",
+        "i30", "picanto", "soul", "jazz", "yaris", "bravo", "etios", "astra", "celta",
     )):
         return CategoriaVeiculo.HATCH
     if any(k in m for k in (
         "cruze", "corolla", "civic", "jetta", "voyage", "virtus", "logan", "prisma",
         "versa", "fluence", "focus sedan", "ka sedan", "j5", "j5i", "cobalt",
+        "city", "cronos", "grand siena", "hb20s", "onix plus", "sentra", "linea",
+        "megane", "vectra", "astra sedan", "lancer", "yaris sedan",
     )):
         return CategoriaVeiculo.SEDAN
     return CategoriaVeiculo.OUTRO

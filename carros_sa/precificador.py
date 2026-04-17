@@ -145,11 +145,22 @@ def precificar(
     bruto_alvo = preco_giro - reforma.custo_total - frete_incluso - custo_op - margem_reais
     preco_alvo = int(max(bruto_alvo - taxa_leilao_fixa, 0) / (1 + taxa_leilao_pct))
 
-    # 7. Score ROI — retorno % se ganhar pelo lance máximo (pior caso aceitável).
-    #    É o ROI mínimo garantido se pagarmos o teto.
-    capital_max = max(preco_max + reforma.custo_total + frete_incluso + taxas_leilao_max + custo_op, 1)
-    retorno_max = preco_giro - capital_max
-    score_roi = retorno_max / capital_max
+    # 7. Score ROI — retorno % esperado se ganharmos pelo preço-ALVO (margem
+    #    calibrada por risco/liquidez). Usamos o alvo, NÃO o teto, por dois motivos:
+    #      a) ROI baseado no `preco_max` é sempre idêntico entre lotes — cai em
+    #         `margem_min / (1 - margem_min)` por construção (o teto é definido
+    #         pra deixar exatamente a margem mínima). Vira tautologia, não sinal.
+    #      b) O alvo é o "caso esperado" da empresa — quanto pretendemos ganhar
+    #         se comprarmos bem. Laudo pior / mercado saturado → fator_risco
+    #         ou fator_liquidez maior → margem_aplicada maior → score_roi maior.
+    #         Ranking fica de fato informativo.
+    taxas_leilao_alvo = int(preco_alvo * taxa_leilao_pct) + taxa_leilao_fixa
+    capital_alvo = max(
+        preco_alvo + reforma.custo_total + frete_incluso + taxas_leilao_alvo + custo_op,
+        1,
+    )
+    retorno_alvo = preco_giro - capital_alvo
+    score_roi = retorno_alvo / capital_alvo
 
     aa_txt = f" AA_ref={mercado.auto_avaliar_ref}" if mercado.auto_avaliar_ref else ""
     if taxa_leilao_fixa and taxa_leilao_pct:

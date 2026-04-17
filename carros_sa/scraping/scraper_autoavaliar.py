@@ -369,8 +369,20 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
 # Download de PDF
 # ---------------------------------------------------------------------------
 
-async def baixar_pdf(url: str, dest: Path, cookies: Optional[list[dict]] = None) -> Path:
-    """Baixa PDF do laudo via httpx. Usa cookies da sessão se disponíveis."""
+async def baixar_pdf(
+    url: str,
+    dest: Path,
+    cookies: Optional[list[dict]] = None,
+    max_retries: int = 3,
+) -> Path:
+    """Baixa PDF do laudo via httpx com retry-após-429.
+
+    Auto Avaliar rate-limita agressivamente o download do laudo
+    (triagem 2026-04-16: 49/55 pdfs deram 429). Backoff exponencial:
+    15s, 30s, 60s entre tentativas. Após max_retries, propaga a exceção.
+    """
+    import asyncio as _aio
+
     cookie_header = ""
     if cookies:
         cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
@@ -378,12 +390,30 @@ async def baixar_pdf(url: str, dest: Path, cookies: Optional[list[dict]] = None)
     headers = {"Cookie": cookie_header} if cookie_header else {}
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-        r = await client.get(url, headers=headers)
-        r.raise_for_status()
-        dest.write_bytes(r.content)
+    delays = [15, 30, 60]  # segundos entre retries 1→2→3
+    ultima_exc: Optional[Exception] = None
 
-    return dest
+    for tentativa in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+                r = await client.get(url, headers=headers)
+                if r.status_code == 429 and tentativa < max_retries:
+                    await _aio.sleep(delays[tentativa])
+                    continue
+                r.raise_for_status()
+                dest.write_bytes(r.content)
+                return dest
+        except httpx.HTTPStatusError as exc:
+            ultima_exc = exc
+            if exc.response.status_code == 429 and tentativa < max_retries:
+                await _aio.sleep(delays[tentativa])
+                continue
+            raise
+
+    # Se chegou aqui, esgotou retries (só cai aqui em 429 cronicamente)
+    if ultima_exc:
+        raise ultima_exc
+    raise RuntimeError(f"baixar_pdf falhou após {max_retries+1} tentativas: {url}")
 
 
 def _sleep_aleatorio(min_s: float = 2.0, max_s: float = 4.0) -> None:

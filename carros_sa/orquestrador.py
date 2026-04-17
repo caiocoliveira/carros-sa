@@ -410,8 +410,11 @@ async def _pipeline_lote(
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))
 
     try:
-        # 1. Detalhe (sleep anti-bot antes de cada request)
-        await asyncio.sleep(random.uniform(2.0, 4.0))
+        # 1. Detalhe (sleep anti-bot antes de cada request).
+        # Subido de (2-4s) pra (5-8s) após observar 49/55 requests caírem com
+        # HTTP 429 no baixar_pdf na triagem de 2026-04-16. Auto Avaliar tem
+        # rate-limit agressivo no download de laudos.
+        await asyncio.sleep(random.uniform(5.0, 8.0))
         body_text, pdf_url = await coletar_detalhe(page, lote.url)
         flags = parse_detalhe(body_text, pdf_url)
 

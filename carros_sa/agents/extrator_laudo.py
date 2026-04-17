@@ -395,12 +395,23 @@ def extrair_laudo(
     Se a camada de visão falhar (ex.: Gemini 503 UNAVAILABLE), cai pra apenas o
     extrator textual (observações + documentação), com confidence reduzida.
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     txt = parse_laudo_textual(pdf_path)
     visual: Optional[dict] = None
     visao_falhou = False
     try:
         visual = extrair_laudo_visual(pdf_path, vision_client)
-    except Exception:
+    except Exception as exc:
+        # Loga em WARN — sem isso a falha vira invisível e o ranking fica
+        # enviesado pelo fallback pessimista (motor_ok=False, doc=DESCONHECIDO).
+        # Triagem 2026-04-16: 123/163 lotes caíram nesse path silenciosamente,
+        # virando fator_risco saturado em 1.65 sem motivo concreto.
+        _log.warning(
+            "extrair_laudo_visual falhou em %s (%s: %s) — caindo pra textual",
+            pdf_path.name, type(exc).__name__, exc,
+        )
         visao_falhou = True
 
     # Avarias: começam do visual (fonte primária) + enriquecem do textual
@@ -447,7 +458,13 @@ def extrair_laudo(
     else:
         doc = StatusDocumentacao.DESCONHECIDO
 
-    motor_ok = bool(txt.motor_original) and severidade != SeveridadeAvaria.ESTRUTURAL
+    # Motor OK: assume True quando ausência de info textual (ausência ≠ problema).
+    # Apenas False quando explicitamente identificado motor adulterado/inconsistente,
+    # OU quando severidade for ESTRUTURAL (motor afetado por design). Antes
+    # `bool(None)=False` injustamente penalizava 75% dos laudos com fator_risco
+    # +0.3 sem causa real (triagem 2026-04-16).
+    motor_textual = txt.motor_original if txt.motor_original is not None else True
+    motor_ok = motor_textual and severidade != SeveridadeAvaria.ESTRUTURAL
 
     # Confidence: alta quando visão respondeu; menor quando só textual serviu.
     confidence = float(visual.get("confidence", 0.7)) if visual is not None else (

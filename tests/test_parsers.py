@@ -336,6 +336,49 @@ def test_parse_detalhe_reprovado_estrutural_early_exit():
     assert flags.early_exit == "reprovado_estrutural"
 
 
+def test_parse_detalhe_itens_reprovados_case_insensitive():
+    """Variações fora de caixa alta também são capturadas (parser tolerante)."""
+    body = (
+        "STATUS DO LAUDO\nAprovado com ressalvas\n"
+        "Coluna B reprovada\n"
+        "Porta dianteira direita Reparada\n"
+        "Airbag substituído em 2020\n"
+        "Paralama com dano estrutural\n"
+        "LAUDO COMPLETO\n"
+    )
+    flags = parse_detalhe(body)
+    itens = flags.itens_reprovados
+    assert len(itens) == 4
+    assert any("coluna b reprovada" in i.lower() for i in itens)
+    assert any("reparada" in i.lower() for i in itens)
+    assert any("substituído" in i.lower() for i in itens)
+    assert any("dano estrutural" in i.lower() for i in itens)
+
+
+def test_parse_detalhe_itens_reprovados_ignora_linhas_muito_longas():
+    """Parágrafos longos contendo 'reprovado' no meio não são itens — só linhas compactas."""
+    body = (
+        "STATUS DO LAUDO\nAprovado\n"
+        "Coluna A reprovada\n"  # curta → captura
+        "Este parágrafo de 200+ caracteres descreve em detalhes a situação do veículo que foi reprovado em testes anteriores mas depois aprovado novamente após reparo completo e revisão.\n"  # longa → ignora
+    )
+    flags = parse_detalhe(body)
+    assert len(flags.itens_reprovados) == 1
+    assert "Coluna A reprovada" in flags.itens_reprovados[0]
+
+
+def test_parse_detalhe_itens_reprovados_ignora_linhas_vazias_e_curtas():
+    body = (
+        "STATUS DO LAUDO\nAprovado\n"
+        "\n\n\n"
+        "ok\n"                 # muito curta < 5 chars, ignora
+        "NÃO APROVADO\n"       # válida, 12 chars
+    )
+    flags = parse_detalhe(body)
+    assert len(flags.itens_reprovados) == 1
+    assert "NÃO APROVADO" in flags.itens_reprovados[0]
+
+
 def test_parse_detalhe_opcionais_e_ipva():
     flags = parse_detalhe(DETALHE_FIESTA_BODY)
     assert "AIR BAG DUPLO" in flags.opcionais

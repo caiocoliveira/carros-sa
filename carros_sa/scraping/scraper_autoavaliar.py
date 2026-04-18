@@ -400,40 +400,52 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
     Abre página de detalhe de um lote.
     Retorna (body_text, laudo_pdf_url).
 
-    Tenta extrair `laudo_pdf_url` em duas passadas: primeiro no DOM inicial, e
-    se falhar, clica em botão/link "Ver Laudo" pra renderizar o modal lazy e
-    tenta de novo. Sem ambiguidade — a 2ª passada é best-effort, se não achar
-    ainda retorna None (pipeline cai em `_laudo_sem_pdf` que agora aproveita
-    `flags.reprovado_estrutural` quando aplicável).
+    Tenta extrair `laudo_pdf_url` em múltiplas passadas:
+      1. DOM inicial imediato
+      2. Se falhou: clica "ver laudo" e aguarda 2s
+      3. Se falhou: espera mais 2s (lazy load lento)
+      4. Se falhou: clica de novo (às vezes o primeiro click só expande menu)
+
+    Triagem 2026-04-18 mostrou que 55% dos lotes ficavam com pdf_url=None
+    mesmo tendo PDF disponível. Essa versão tenta mais agressivo.
+
+    Se nada der, retorna None e pipeline cai em `_laudo_sem_pdf`.
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     from carros_sa.scraping.parsers import is_laudo_pdf_url
 
     await page.goto(url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(1500)
 
     body_text: str = await page.evaluate("() => document.body.innerText")
-    laudo_pdf_url: Optional[str] = await page.evaluate(_EXTRACT_PDF_URL_JS)
 
-    # Sanity check em Python — o JS já rejeita decoys, mas se algum vazar
-    # (p.ex. padrão novo que ainda não mapeamos) evita baixar PDF errado e
-    # deixa claro no log que não temos laudo válido.
-    if laudo_pdf_url and not is_laudo_pdf_url(laudo_pdf_url):
-        laudo_pdf_url = None
+    async def _extrair_valido() -> Optional[str]:
+        u = await page.evaluate(_EXTRACT_PDF_URL_JS)
+        return u if (u and is_laudo_pdf_url(u)) else None
 
-    # 2ª passada: se PDF não foi achado no DOM inicial, tenta revelar o modal
-    # do laudo (Auto Avaliar às vezes lazy-loada). Só abre o modal se valer a pena.
-    if not laudo_pdf_url:
+    # Passada 1: DOM inicial
+    laudo_pdf_url = await _extrair_valido()
+    if laudo_pdf_url:
+        return body_text, laudo_pdf_url
+
+    # Passadas 2-4: tenta revelar o modal. Até 2 cliques com waits crescentes.
+    for tentativa, espera_ms in enumerate([2000, 2500, 3500]):
         try:
             clicou = await page.evaluate(_ABRIR_MODAL_LAUDO_JS)
-            if clicou:
-                await page.wait_for_timeout(1500)
-                laudo_pdf_url = await page.evaluate(_EXTRACT_PDF_URL_JS)
-                if laudo_pdf_url and not is_laudo_pdf_url(laudo_pdf_url):
-                    laudo_pdf_url = None
+            await page.wait_for_timeout(espera_ms)
+            laudo_pdf_url = await _extrair_valido()
+            if laudo_pdf_url:
+                _log.info("laudo_pdf_url achado na passada %d", tentativa + 2)
+                return body_text, laudo_pdf_url
+            if not clicou and tentativa >= 1:
+                # Sem botão novo pra clicar e 2 tentativas já passaram — desiste.
+                break
         except Exception:
             pass
 
-    return body_text, laudo_pdf_url
+    return body_text, None
 
 
 # ---------------------------------------------------------------------------

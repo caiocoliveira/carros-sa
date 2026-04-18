@@ -163,7 +163,9 @@ def avaliar(
     if aplicar_popularidade:
         from carros_sa.tools.popularidade import ajustar_dias_giro, bucket_modelo
         bucket = bucket_modelo(marca, modelo, categoria, ano=ano)
-        dias_giro = ajustar_dias_giro(dias_giro, bucket)
+        # Passa faixa_idade pra correção granular — picape velha blockbuster
+        # não acelera tanto quanto picape nova blockbuster.
+        dias_giro = ajustar_dias_giro(dias_giro, bucket, faixa_idade=faixa)
 
     return SinalMercado(
         fipe=fipe_valor,

@@ -42,6 +42,8 @@ class BucketPopularidade(str, Enum):
     ILIQUIDO = "iliquido"        # fora E ≥10 anos     → × 1.6
 
 
+# Multiplicador base (quando faixa_idade é None ou NOVO — carro novo é o mais
+# alinhado com o sinal FENABRAVE de emplacamentos 0km).
 _MULTIPLICADORES: Dict[BucketPopularidade, float] = {
     BucketPopularidade.BLOCKBUSTER: 0.6,
     BucketPopularidade.POPULAR: 0.8,
@@ -50,10 +52,41 @@ _MULTIPLICADORES: Dict[BucketPopularidade, float] = {
     BucketPopularidade.ILIQUIDO: 1.6,
 }
 
+# Multiplicadores de correção por idade — aplicam em cima do base.
+# Carro NOVO blockbuster tem diferença maior de giro vs VELHO blockbuster.
+# Picape VELHA popular já é carro "cansado" e perde pouca velocidade extra.
+# Intuição:
+#   - NOVO: multiplicador full (modelos quentes giram realmente mais rápido)
+#   - MEDIO: multiplicador ligeiramente atenuado (popularidade menos potente)
+#   - VELHO: multiplicador atenuado (carro antigo é antigo, mesmo popular)
+_CORRECAO_IDADE: Dict[str, Dict[BucketPopularidade, float]] = {
+    "novo":  {BucketPopularidade.BLOCKBUSTER: 1.0, BucketPopularidade.POPULAR: 1.0,
+              BucketPopularidade.NORMAL: 1.0, BucketPopularidade.NICHO: 1.0,
+              BucketPopularidade.ILIQUIDO: 1.0},
+    "medio": {BucketPopularidade.BLOCKBUSTER: 1.05, BucketPopularidade.POPULAR: 1.0,
+              BucketPopularidade.NORMAL: 1.0, BucketPopularidade.NICHO: 1.05,
+              BucketPopularidade.ILIQUIDO: 1.1},
+    "velho": {BucketPopularidade.BLOCKBUSTER: 1.15, BucketPopularidade.POPULAR: 1.1,
+              BucketPopularidade.NORMAL: 1.0, BucketPopularidade.NICHO: 1.1,
+              BucketPopularidade.ILIQUIDO: 1.2},
+}
 
-def multiplicador(bucket: BucketPopularidade) -> float:
-    """Devolve fator pra ajustar `dias_giro_estimado` (ex.: 0.6 = vende 40% mais rápido)."""
-    return _MULTIPLICADORES[bucket]
+
+def multiplicador(bucket: BucketPopularidade, faixa_idade=None) -> float:
+    """Devolve fator pra ajustar `dias_giro_estimado`.
+
+    Sem `faixa_idade`: aplica só o base (comportamento legado).
+    Com `faixa_idade`: ajusta pelo modifier de idade — ex.: picape velha
+    blockbuster ainda é "cara cansada", então gira menos rápido que picape
+    nova blockbuster. Multiplicadores > 1 só atenuam, nunca invertem o
+    sinal (velho blockbuster ainda gira mais rápido que velho popular).
+    """
+    base = _MULTIPLICADORES[bucket]
+    if faixa_idade is None:
+        return base
+    faixa_str = faixa_idade.value if hasattr(faixa_idade, "value") else str(faixa_idade)
+    correcao = _CORRECAO_IDADE.get(faixa_str, {}).get(bucket, 1.0)
+    return base * correcao
 
 
 # =============================================================================
@@ -166,11 +199,12 @@ def bucket_modelo(
 def ajustar_dias_giro(
     dias_base: int,
     bucket: BucketPopularidade,
+    faixa_idade=None,
 ) -> int:
-    """Aplica o multiplicador do bucket nos dias_giro estimados.
+    """Aplica o multiplicador do bucket (opcionalmente corrigido por idade).
 
     Floor de 15 dias evita resultados absurdos quando combinado com calibrações
     já agressivas (ex.: blockbuster × 0.6 num modelo que já tem prior 25d = 15d).
     """
-    ajustado = int(round(dias_base * multiplicador(bucket)))
+    ajustado = int(round(dias_base * multiplicador(bucket, faixa_idade)))
     return max(ajustado, 15)

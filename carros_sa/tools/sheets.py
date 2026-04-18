@@ -44,6 +44,7 @@ HEADER = [
     "ROI se pagar o máximo (%)",
     "Dias até venda (est.)",
     "ROI anualizado (%)",
+    "Lucro esperado (R$/mês)",
     "Popularidade",
     "Fator Risco",
     "Severidade Laudo",
@@ -174,11 +175,17 @@ class SheetsExporter:
             viavel = av.preco_max > (lote.lance_atual or 0)
 
             from carros_sa.agents.calibracao_giro import (
-                _categoria_de_modelo, roi_anualizado,
+                _categoria_de_modelo, lucro_reais_por_mes, roi_anualizado,
             )
             from carros_sa.tools.popularidade import bucket_modelo
             roi_max = _calcular_roi_no_maximo(av)
             roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+            # Lucro esperado / mês — métrica intuitiva pro operador:
+            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
+            # score_roi × preco_alvo (lucro no caso médio do bid).
+            lucro_mes = lucro_reais_por_mes(
+                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
+            )
             cat_inferida = _categoria_de_modelo(lote.modelo)
             bucket = bucket_modelo(lote.marca, lote.modelo, cat_inferida, ano=lote.ano)
 
@@ -231,6 +238,7 @@ class SheetsExporter:
                 "roi_pct": roi_max,
                 "dias_giro": av.dias_giro_estimado,
                 "roi_anualizado": round(roi_anual, 1),
+                "lucro_mes": lucro_mes,
                 "popularidade": bucket.value,
                 "fator_risco": round(av.fator_risco, 3),
                 "severidade": laudo.severidade_geral if laudo else "—",
@@ -307,6 +315,7 @@ class SheetsExporter:
                 reforma_racional_cell = "Laudo não analisado — não dê lance sem conferir"
                 roi_pct_cell = "—"
                 roi_anual_cell = "—"
+                lucro_mes_cell = "—"
                 dias_giro_cell = "—"
                 preco_giro_fipe_cell = "—"
                 preco_giro_aa_cell = "—"
@@ -321,6 +330,7 @@ class SheetsExporter:
                 reforma_racional_cell = r["reforma_racional"] or "—"
                 roi_pct_cell = r["roi_pct"]
                 roi_anual_cell = r["roi_anualizado"]
+                lucro_mes_cell = r["lucro_mes"]
                 dias_giro_cell = r["dias_giro"] if r["dias_giro"] is not None else "—"
                 preco_giro_fipe_cell = r["preco_giro_fipe"]
                 preco_giro_aa_cell = r["preco_giro_aa"] if r["preco_giro_aa"] is not None else "—"
@@ -347,6 +357,7 @@ class SheetsExporter:
                 roi_pct_cell,
                 dias_giro_cell,
                 roi_anual_cell,
+                lucro_mes_cell,
                 r["popularidade"],
                 fator_risco_cell,
                 severidade_cell,
@@ -582,8 +593,20 @@ class SheetsExporter:
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "(1 + ROI)^(365/dias_giro) − 1, com floor de 30 dias. Usa 90d se dias_giro_estimado é NULL.",
+                "ROI × 365 / dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
                 "Normaliza ROI absoluto pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+            ],
+            [
+                "Lucro esperado (R$/mês)",
+                "Derivado",
+                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d)",
+                "Métrica intuitiva pro operador: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
+            ],
+            [
+                "Popularidade",
+                "Ranking FENABRAVE curado",
+                "blockbuster (top-5 categoria) / popular (top-15) / normal (top-30) / nicho (fora) / iliquido (fora + ≥10 anos). Ajustado por idade: velho blockbuster acelera menos que novo blockbuster.",
+                "Modelo popular gira mais rápido — multiplica dias_giro por 0.6 (blockbuster) a 1.6 (ilíquido). Dado relativo, não absoluto.",
             ],
             [
                 "Fator Risco",

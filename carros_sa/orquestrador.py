@@ -275,12 +275,22 @@ def _laudo_sem_pdf(flags=None) -> LaudoEstruturado:
 # Persistência
 # ---------------------------------------------------------------------------
 
-def _persistir_flags_no_lote(lote: Lote, flags, session: Session) -> None:
+def _persistir_flags_no_lote(
+    lote: Lote,
+    flags,
+    session: Session,
+    body_text: Optional[str] = None,
+) -> None:
     """Salva o resultado do parse_detalhe em `lote.raw_json["detalhe"]` e promove
     preço-referência Auto Avaliar + % FIPE para colunas first-class do Lote.
 
     Também alimenta o histórico `PrecoReferenciaAA` — útil pra lotes futuros
     do mesmo modelo que caiam em cidades sem esse dado embutido.
+
+    Quando `body_text` é passado, persiste uma amostra truncada
+    (`body_text_sample`, primeiros 8KB) pra debug offline do parser quando
+    campos ficarem vazios em massa. Sem isso, só é possível iterar no parser
+    raspando Auto Avaliar ao vivo de novo.
 
     Idempotente: reescrever sobrescreve; múltiplas coletas do mesmo lote
     criam múltiplas linhas de histórico, o que é esperado (série temporal).
@@ -290,6 +300,10 @@ def _persistir_flags_no_lote(lote: Lote, flags, session: Session) -> None:
 
     raw = dict(lote.raw_json or {})
     raw["detalhe"] = _flags_to_dict(flags)
+    if body_text:
+        # Trunca pra 8KB — suficiente pra diagnosticar parser sem inflar SQLite.
+        # Típico body_text de página Auto Avaliar: 20-50KB.
+        raw["body_text_sample"] = body_text[:8000]
     lote.raw_json = raw
 
     if flags.preco_referencia_aa is not None:
@@ -477,7 +491,7 @@ async def _pipeline_lote(
         # pra moto, falha de laudo, Webmotors timeout) dispara session.rollback()
         # e **apaga também o detalhe raspado**, forçando re-scrape desnecessário.
         # Comitando aqui, o detalhe fica salvo e o reprocessamento vira 1-request.
-        _persistir_flags_no_lote(lote, flags, session)
+        _persistir_flags_no_lote(lote, flags, session, body_text=body_text)
         session.commit()
 
         # 2. Early exit

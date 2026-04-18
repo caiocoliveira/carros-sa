@@ -102,6 +102,11 @@ CHECKS: Dict[str, Validator] = {
         if v is not None and v > 1000
         else None
     ),
+    "Lucro esperado (R$/mês)": lambda v, r: (
+        "Lucro esperado negativo — verificar score_roi ou preco_alvo"
+        if isinstance(v, (int, float)) and v < 0
+        else None
+    ),
     "Fator Risco": lambda v, r: (
         "Fator Risco fora de [0.5, 1.5] — bounds típicos do precificador"
         if v is not None and not (0.5 <= v <= 1.5)
@@ -166,6 +171,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "ROI se pagar o máximo (%)": lambda r: r["roi_pct"],
     "Dias até venda (est.)": lambda r: r["dias_giro"],
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
+    "Lucro esperado (R$/mês)": lambda r: r.get("lucro_mes", "—"),
     "Fator Risco": lambda r: r["fator_risco"],
     "Popularidade": lambda r: r.get("popularidade", "—"),
     "Severidade Laudo": lambda r: r["severidade"],

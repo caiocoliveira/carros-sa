@@ -89,7 +89,7 @@ def top(
     """
     from sqlmodel import select
 
-    from carros_sa.agents.calibracao_giro import roi_anualizado
+    from carros_sa.agents.calibracao_giro import lucro_reais_por_mes, roi_anualizado
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, Lote
 
@@ -154,11 +154,17 @@ def top(
     tbl.add_column("ROI%", justify="right")
     tbl.add_column("Dias", justify="right")
     tbl.add_column("ROI/ano%", justify="right")
+    tbl.add_column("R$/mês", justify="right")
     tbl.add_column("Pop.", justify="left")
     tbl.add_column("Risco", justify="right")
     for av, lote, roi_anual in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
+        # Lucro esperado no alvo (usar score_roi × capital_alvo daria o lucro
+        # no caso médio). Aproximação simples: score_roi × preco_alvo — é o
+        # lucro que a margem.base × fatores persegue no preço-alvo.
+        lucro_esperado = int(av.score_roi * av.preco_alvo)
+        r_mes = lucro_reais_por_mes(lucro_esperado, av.dias_giro_estimado)
         tbl.add_row(
             lote.id,
             f"{lote.marca} {lote.modelo[:30]}",
@@ -168,6 +174,7 @@ def top(
             f"{av.score_roi * 100:.1f}%",
             str(av.dias_giro_estimado) if av.dias_giro_estimado else "—",
             f"{roi_anual * 100:.1f}%",
+            f"R$ {r_mes:,}",
             bucket.value,
             f"{av.fator_risco:.2f}",
         )

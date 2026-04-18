@@ -196,6 +196,25 @@ def invalidar_cache() -> None:
     _cache.clear()
 
 
+def lucro_reais_por_mes(
+    lucro_absoluto_reais: int,
+    dias_giro: Optional[int],
+) -> int:
+    """Converte lucro esperado (R$) em R$/mês, respeitando o tempo de venda.
+
+    Útil como métrica intuitiva pro operador: "esse lote rende R$X/mês
+    enquanto tá no pátio". Permite comparar lotes com capitais e prazos
+    muito diferentes na mesma unidade.
+
+    Floor de 30 dias (mesma lógica do roi_anualizado) evita números absurdos.
+    """
+    if lucro_absoluto_reais <= 0:
+        return 0
+    dias = 90 if dias_giro is None else max(dias_giro, 30)
+    # (lucro / dias) * 30 = lucro mensal esperado
+    return int(round(lucro_absoluto_reais * 30.0 / dias))
+
+
 def roi_anualizado(score_roi: float, dias_giro: Optional[int]) -> float:
     """Anualiza o ROI absoluto pelo tempo esperado de venda.
 

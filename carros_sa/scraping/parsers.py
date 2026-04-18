@@ -356,8 +356,31 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
     prazo_transferencia = _PRAZO_RE.search(prazo_transf_raw or "")
     prazo_liberacao = _PRAZO_RE.search(prazo_lib_raw or "")
 
-    # 4. Itens reprovados (heurística: linhas com "REPROVADO" em caixa alta)
-    itens_reprovados = [ln for ln in lines if "REPROVADO" in ln and len(ln) < 80]
+    # 4. Itens reprovados — heurística mais tolerante.
+    # Antes: só "REPROVADO" em caixa alta + len<80, o que falhava em texto
+    # minúsculo ("Coluna B reprovada"), frases longas e variações comuns
+    # ("item reprovado", "não aprovado"). Triagem 2026-04-18 mostrou 100%
+    # dos lotes com itens_reprovados=[] — sinal de que o parser não pegava
+    # o formato real do Auto Avaliar. Agora case-insensitive + palavras
+    # adicionais, len<150 pra capturar frases explicativas.
+    _PALAVRAS_REPROVACAO = (
+        "reprovad",        # reprovado/reprovada/reprovados
+        "não aprovad",     # não aprovado/aprovada
+        "nao aprovad",     # sem acento
+        "não conforme",    # laudo técnico comum
+        "nao conforme",
+        "reparad",         # reparado/reparada — indica problema estrutural conhecido
+        "substituíd",      # substituído/substituída
+        "substituid",
+        "com dano",
+        "dano estrutur",
+        "irregularidad",
+    )
+    itens_reprovados = []
+    for ln in lines:
+        low = ln.lower()
+        if any(p in low for p in _PALAVRAS_REPROVACAO) and 5 <= len(ln) <= 150:
+            itens_reprovados.append(ln)
 
     # 5. Opcionais — após label "OPCIONAIS" até encontrar próximo header (linha em caixa alta longa)
     opcionais = _extrai_lista_apos_label(lines, "OPCIONAIS", ["ITENS AVALIADOS", "DOCUMENTAÇÃO"])

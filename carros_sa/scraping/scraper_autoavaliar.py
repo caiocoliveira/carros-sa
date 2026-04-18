@@ -125,15 +125,28 @@ _EXTRACT_PDF_URL_JS = """
 """
 
 # Abre o modal do laudo cautelar se existir — Auto Avaliar renderiza o PDF
-# via lazy load ao clicar em botão/link com texto "laudo".
+# via lazy load ao clicar em botão/link com texto "laudo". A heurística
+# anterior exigia "laudo" + ("completo"|"cautelar"|"ver"), o que cobria os
+# grupos tipo "saga" mas perdia rótulos observados em autus/trivel/kuruma/
+# autojapan — lá o botão vem como "LAUDO DO VEÍCULO" ou "Acessar laudo".
+# Diagnóstico 2026-04-18: 37/42 lotes ativos sem `laudo_pdf_url` nem
+# `status_laudo`, concentrados nesses grupos, indicando que a seção não era
+# sequer renderizada porque o click não acontecia. Afrouxamos pra qualquer
+# clicável curto contendo "laudo" e confiamos no `_EXTRACT_PDF_URL_JS` (pós-
+# click) pra rejeitar URLs que não sejam laudo real.
 _ABRIR_MODAL_LAUDO_JS = """
 () => {
-    const alvos = Array.from(document.querySelectorAll('a, button, [role="button"], div[class*="laudo"], span[class*="laudo"]'));
+    function norm(s) {
+        return (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').trim();
+    }
+    const alvos = Array.from(document.querySelectorAll('a, button, [role="button"]'));
     for (const el of alvos) {
-        const txt = (el.textContent || '').toLowerCase();
-        if (txt.includes('laudo') && (txt.includes('completo') || txt.includes('cautelar') || txt.includes('ver'))) {
-            try { el.click(); return true; } catch (e) {}
-        }
+        const txt = norm(el.textContent);
+        if (txt.length === 0 || txt.length > 50) continue;
+        if (!txt.includes('laudo')) continue;
+        // Rejeita rótulo do decoy institucional (Relatório de Transparência Salarial)
+        if (txt.includes('transparencia') || txt.includes('salarial')) continue;
+        try { el.click(); return true; } catch (e) {}
     }
     return false;
 }

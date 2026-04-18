@@ -11,9 +11,17 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="$REPO_DIR/.venv/bin/python3"
 SCRIPT="$REPO_DIR/scripts/triagem_diaria.py"
+RETRY_SCRIPT="$REPO_DIR/scripts/reprocessar_lotes_do_db.py"
 LOG="/tmp/carros_sa_triagem.log"
 CRON_MARK="carros-sa-triagem"
-CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1 # $CRON_MARK"
+# Pipeline: (1) triagem completa → (2) retry automático de laudos pendentes.
+# Motivo do retry: quando o scraper não acha o `laudo_pdf_url` no 1º passe
+# (modal que demora, rede instável, layout diferente do grupo), o orquestrador
+# cai em `_laudo_sem_pdf` com confidence=0.5. Sem esse 2º passe, o lote ia pra
+# planilha marcado como "LAUDO NÃO ANALISADO" e travava o usuário até a
+# próxima coleta (7h/13h). O retry é cheap — pula listagem e só visita a URL
+# dos lotes realmente pendentes.
+CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1 # $CRON_MARK"
 
 if [[ "${1:-}" == "--remove" ]]; then
     echo "Removendo entrada do cron..."
@@ -38,7 +46,7 @@ fi
 
 echo "✓ Cron configurado:"
 echo "  Horário: todo dia às 07:00 e 13:00"
-echo "  Comando: triagem_diaria.py --empresa carros_uberlandia"
+echo "  Comando: triagem_diaria.py + retry de laudos pendentes"
 echo "  Log:     $LOG"
 echo ""
 echo "Para verificar: crontab -l | grep carros-sa"

@@ -193,13 +193,15 @@ class TestSheetsExporterQuery:
         assert rows[3][idx_lote_id] == "L002"
         assert "Caro" in rows[3][idx_situacao]
 
-    def test_exportar_sem_laudo_nao_quebra(self):
-        """LEFT JOIN — lote sem laudo associado deve ser exportado com '—' nos campos do laudo."""
+    def test_exportar_sem_laudo_marca_nao_analisado(self):
+        """Lote sem LaudoCache é exportado mas sinaliza "LAUDO NÃO ANALISADO" e zera
+        campos numéricos derivados do laudo — operador não pode dar lance sem conferir
+        primeiro (feedback usuário 2026-04-18)."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))
             session.add(_avaliacao("L001"))
-            # sem LaudoCache
+            # sem LaudoCache → laudo não foi analisado
             session.commit()
 
         mock_ws = MagicMock()
@@ -214,14 +216,75 @@ class TestSheetsExporterQuery:
                 n = exporter.exportar("uberlandia_mg", session)
 
         assert n == 1
-        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
-        # rows[0]=banner, rows[1]=header, rows[2]=primeiro lote
+        rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
-        # Severidade e Motor OK devem ser "—"
-        idx_severidade = HEADER.index("Severidade Laudo")
-        idx_motor = HEADER.index("Motor OK")
-        assert data_row[idx_severidade] == "—"
-        assert data_row[idx_motor] == "—"
+        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
+        assert data_row[HEADER.index("Severidade Laudo")] == "não analisado"
+        assert data_row[HEADER.index("Motor OK")] == "—"
+        # Numéricos derivados de um laudo vazio viram traço: piso de R$ 1k em
+        # "Reforma Estimada" + ROI/preço-alvo calculados com reforma=piso seriam
+        # tudo chute, então a planilha esconde.
+        assert data_row[HEADER.index("Reforma Estimada (R$)")] == "—"
+        assert data_row[HEADER.index("Lance Máximo (R$)")] == "—"
+        assert data_row[HEADER.index("ROI se pagar o máximo (%)")] == "—"
+        assert data_row[HEADER.index("ROI anualizado (%)")] == "—"
+        assert "não dê lance" in data_row[HEADER.index("Racional Reforma")].lower()
+
+    def test_exportar_laudo_fallback_confidence_baixa_marca_nao_analisado(self):
+        """LaudoCache com confidence=0.5 é fallback `_laudo_sem_pdf` — trata igual a
+        laudo ausente. Limite 0.6 aceita só laudos realmente extraídos de PDF."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            laudo = _laudo("L001")
+            laudo.confidence = 0.5  # fallback
+            laudo.severidade_geral = "nenhuma"
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar("uberlandia_mg", session)
+
+        assert n == 1
+        rows = mock_ws.update.call_args_list[0][0][0]
+        data_row = rows[2]
+        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
+        assert data_row[HEADER.index("Reforma Estimada (R$)")] == "—"
+
+    def test_exportar_laudo_confidence_alta_mantem_valores(self):
+        """LaudoCache com confidence>=0.6 é laudo real — mantém campos numéricos."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))  # confidence 0.95 via default
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        data_row = rows[2]
+        assert "LAUDO NÃO ANALISADO" not in data_row[HEADER.index("Situação")]
+        assert data_row[HEADER.index("Severidade Laudo")] == "leve"
+        assert data_row[HEADER.index("Reforma Estimada (R$)")] == 3000
 
     def test_exportar_sem_avaliacoes_retorna_zero(self):
         """Empresa sem avaliações deve retornar 0 sem erros."""

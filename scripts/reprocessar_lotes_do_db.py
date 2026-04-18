@@ -43,9 +43,18 @@ def main(
         False, "--somente-ativos",
         help="Filtra só lotes com leilão ainda aberto (fim_em no futuro). Evita gastar tempo/LLM em lotes já encerrados.",
     ),
+    somente_laudo_pendente: bool = typer.Option(
+        False, "--somente-laudo-pendente",
+        help=(
+            "Filtra só lotes cujo LaudoCache está vazio OU veio de fallback "
+            "(confidence<0.6 = `_laudo_sem_pdf`). Ideal pra rodar após a triagem "
+            "diária e tentar destravar lotes em que o scraper não achou o PDF."
+        ),
+    ),
 ) -> None:
     """Reprocessa lotes já ingeridos sem re-scraping da listagem."""
-    asyncio.run(_run(empresa, max_lotes, headless, sem_sheets, somente_sem_avaliacao, somente_ativos))
+    asyncio.run(_run(empresa, max_lotes, headless, sem_sheets, somente_sem_avaliacao,
+                     somente_ativos, somente_laudo_pendente))
 
 
 async def _run(
@@ -55,6 +64,7 @@ async def _run(
     sem_sheets: bool,
     somente_sem_avaliacao: bool = False,
     somente_ativos: bool = False,
+    somente_laudo_pendente: bool = False,
 ) -> None:
     from playwright.async_api import async_playwright
 
@@ -62,7 +72,7 @@ async def _run(
 
     from carros_sa.agents.vision_clients import build_default_client
     from carros_sa.db import get_session, init_db
-    from carros_sa.models import AvaliacaoLote, Lote
+    from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
     from carros_sa.orquestrador import _pipeline_lote
     from carros_sa.scraping.scraper_autoavaliar import garantir_autenticado
     from carros_sa.tenancy import carregar_empresa
@@ -108,6 +118,20 @@ async def _run(
                 agora = datetime.now()
                 lotes = [l for l in lotes if l.fim_em is not None and l.fim_em > agora]
                 console.print(f"[cyan]Filtro ativo: só leilões abertos → {len(lotes)} candidatos[/cyan]")
+            if somente_laudo_pendente:
+                # Carrega laudos em uma query só e filtra em memória; evita N+1.
+                laudos = {
+                    lc.lote_id: lc.confidence
+                    for lc in session.exec(select(LaudoCache)).all()
+                }
+                lotes = [
+                    l for l in lotes
+                    if laudos.get(l.id) is None or (laudos.get(l.id) or 0) < 0.6
+                ]
+                console.print(
+                    f"[cyan]Filtro ativo: só laudo pendente (ausente ou confidence<0.6) "
+                    f"→ {len(lotes)} candidatos[/cyan]"
+                )
             if max_lotes:
                 lotes = lotes[:max_lotes]
             console.print(f"[cyan]Reprocessando {len(lotes)} lotes…[/cyan]\n")

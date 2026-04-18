@@ -4,14 +4,24 @@ Este projeto é uma PoC multi-agente, multi-empresa que ranqueia lotes de leilã
 
 ## Stack
 
-- Python **3.9** (quirk: usar `Optional[X]`, **não** `X | None`; usar `typing.List/Dict/Tuple`, **não** `list[...]` genérico em anotações avaliadas em runtime — Pydantic quebra)
+- Python **3.12** (instalado via `uv` em `~/.local/share/uv/python/`; o quirk antigo de evitar `X | None` e `list[...]` em runtime foi removido com o upgrade de 2026-04-18 — 3.12 suporta nativamente, mas o código existente ainda usa `Optional[X]` / `typing.List` em vários lugares; pode ir migrando à medida que tocar)
 - Pydantic v2 + SQLModel + FastAPI/Typer
 - SQLite (default `./carros_sa.db`)
 - VisionClient pluggable: Gemini Flash (default, grátis), Anthropic Haiku, Ollama local
 
 ## Setup
 
-Venv já criado em `.venv/`. Toda chamada precisa de `PYTHONPATH=.`:
+Venv já criado em `.venv/` (Python 3.12, gerenciado por `uv`). Pra recriar do zero:
+
+```bash
+uv venv --python 3.12 .venv
+VIRTUAL_ENV="$(pwd)/.venv" uv pip install -e ".[dev]"
+.venv/bin/playwright install chromium
+```
+
+Backup do venv antigo (3.9) em `.venv.py39.bak` — pode apagar quando confiar no novo.
+
+Toda chamada precisa de `PYTHONPATH=.`:
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m pytest tests/ -v

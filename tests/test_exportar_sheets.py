@@ -167,9 +167,11 @@ class TestSheetsExporterQuery:
             # L001: lance=20000, preco_max=30000 → viável (folga +10k)
             session.add(_lote("L001", lance_atual=20000))
             session.add(_avaliacao("L001", score_roi=0.1, preco_max=30000))
+            session.add(_laudo("L001"))
             # L002: lance=50000, preco_max=30000 → inviável (caro demais)
             session.add(_lote("L002", modelo="Compass", lance_atual=50000))
             session.add(_avaliacao("L002", score_roi=0.8, preco_max=30000))
+            session.add(_laudo("L002"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -318,6 +320,7 @@ class TestSheetsExporterQuery:
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=25000))  # lance < preco_max (30k) → viável
             session.add(_avaliacao("L001", preco_max=30000))
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -529,6 +532,7 @@ class TestSheetsExporterQuery:
             session.add(_lote("L001", lance_atual=20000))
             av = _avaliacao("L001", preco_giro=35000, preco_max=25000)
             session.add(av)
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_ws = MagicMock()

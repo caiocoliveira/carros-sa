@@ -230,7 +230,7 @@ def ingest(
 
     from carros_sa.db import get_session, init_db
     from carros_sa.models import Lote
-    from carros_sa.scraping.parsers import parse_card_lines
+    from carros_sa.scraping.parsers import extrair_loja_do_card, parse_card_lines
 
     init_db()
     data = json.loads(arquivo.read_text())
@@ -239,13 +239,19 @@ def ingest(
     falhas = 0
     for entry in lotes_raw:
         try:
-            parsed.append(parse_card_lines(entry["lines"], entry["loteId"], entry["href"]))
+            lote = parse_card_lines(entry["lines"], entry["loteId"], entry["href"])
+            parsed.append((lote, extrair_loja_do_card(entry["lines"])))
         except Exception:
             falhas += 1
 
     with get_session() as session:
-        for lote in parsed:
+        for lote, loja in parsed:
             existente = session.get(Lote, lote.lote_id)
+            raw = lote.model_dump(mode="json")
+            if loja:
+                raw["loja"] = loja
+            elif existente and isinstance(existente.raw_json, dict) and existente.raw_json.get("loja"):
+                raw["loja"] = existente.raw_json["loja"]
             row = Lote(
                 id=lote.lote_id,
                 leilao=lote.leilao,
@@ -258,7 +264,7 @@ def ingest(
                 fim_em=lote.fim_em,
                 origem_cidade=lote.origem_cidade,
                 origem_uf=lote.origem_uf,
-                raw_json=lote.model_dump(mode="json"),
+                raw_json=raw,
             )
             if existente:
                 for k, v in row.model_dump(exclude={"id"}).items():

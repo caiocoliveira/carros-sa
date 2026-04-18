@@ -98,6 +98,41 @@ def is_laudo_pdf_url(url: Optional[str]) -> bool:
 _BADGES_IGNORADOS = {"anúncio destaque", "showroom", "oportunidade", "destaque"}
 _COMBUSTIVEIS = {"FLEX", "GASOLINA", "DIESEL", "ETANOL", "ALCOOL", "ÁLCOOL", "HIBRIDO", "HÍBRIDO", "ELETRICO", "ELÉTRICO", "GNV"}
 
+_RATING_RE = re.compile(r"^\d+(?:[.,]\d+)?$")
+_CTAS_IGNORADOS = {"AVALIE AGORA", "DAR LANCE", "ARREMATADO", "VENDIDO", "ENCERRADO", "FINALIZADO"}
+
+
+def extrair_loja_do_card(lines: list) -> Optional[str]:
+    """Nome da loja + grupo que está vendendo o lote, a partir das linhas do card.
+
+    No DOM do Auto Avaliar as duas últimas âncoras antes do CTA são:
+        LOJA (filial/concessionária)
+        GRUPO (rede/chain)
+        [rating opcional, ex.: '4.2']
+        'AVALIE AGORA'
+
+    Retorna 'LOJA · GRUPO' quando existem ambos; só a loja quando grupo ausente;
+    None quando o card é atípico (ex.: sem timer, sem linha após CTA).
+    """
+    cleaned = [ln.strip() for ln in lines if ln.strip()]
+    timer_idx: Optional[int] = None
+    for i, ln in enumerate(cleaned):
+        if _TIMER_RE.match(ln) or _TIMER_DIAS_RE.match(ln):
+            timer_idx = i
+    if timer_idx is None:
+        return None
+    candidatos = []
+    for ln in cleaned[timer_idx + 1 :]:
+        up = ln.upper()
+        if up in _CTAS_IGNORADOS:
+            break
+        if _RATING_RE.match(ln):
+            continue
+        candidatos.append(ln)
+    if not candidatos:
+        return None
+    return " · ".join(candidatos[:2])
+
 
 def parse_card_lines(
     lines: list,

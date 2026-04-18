@@ -21,8 +21,9 @@ from typing import List, Optional
 
 from sqlmodel import Session, select
 
-from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
+from carros_sa.tenancy import carregar_empresa
 
 HEADER = [
     "Rank",
@@ -118,7 +119,7 @@ class SheetsExporter:
         return self._gc
 
     def exportar(self, empresa_id: str, session: Session) -> int:
-        """Lê SQLite, escreve aba <empresa_id> + aba Glossário na Sheet. Retorna n linhas exportadas."""
+        """Lê SQLite, escreve aba <empresa_id> + aba de cidades + aba Glossário. Retorna n linhas exportadas."""
         rows = self._query(empresa_id, session)
         # Filtro duro: lote encerrado (timer vencido OU badge ARREMATADO) é
         # ruído — operador não pode mais dar lance. Antes empurrávamos pro
@@ -132,6 +133,7 @@ class SheetsExporter:
             ),
         )
         self._write_sheet(empresa_id, rows_sorted)
+        self._write_cidades_frete_sheet(empresa_id, session)
         self._write_glossario_sheet()
         return len(rows_sorted)
 
@@ -322,6 +324,81 @@ class SheetsExporter:
             formats.append({"range": f"{letter}:{letter}", "format": cell_format})
         if formats:
             ws.batch_format(formats)
+
+    def _write_cidades_frete_sheet(self, empresa_id: str, session: Session) -> None:
+        """Aba 'cidades_<empresa_id>' com cidades do raio operacional + frete por categoria.
+
+        Mostra as cidades onde o scraper procura lotes (haversine ≤ raio_operacao_km
+        do pátio), com o frete por categoria de veículo e a contagem de lotes ativos
+        (fim_em > now()) já no DB pra cada cidade. Ajuda o operador a entender de
+        onde está vindo o inventário e qual o custo logístico real.
+        """
+        try:
+            empresa = carregar_empresa(empresa_id)
+        except FileNotFoundError:
+            # Sem YAML da empresa não há como derivar raio nem tabela de frete.
+            # Pula a aba silenciosamente (caminho atingido apenas em testes
+            # que mockam o gspread sem provisionar config).
+            return
+        cidades = empresa.cidades_de_busca()
+
+        # Conta lotes ativos por (origem_cidade, origem_uf) — case/accent-insensitive
+        # via `_normaliza` espelhando o helper de geo.py. Usado pra colar na linha
+        # da cidade certa mesmo se o Auto Avaliar gravar "São Gotardo" e o IBGE
+        # tiver "Sao Gotardo".
+        from carros_sa.tools.geo import _normaliza
+        agora = datetime.now()
+        lotes_ativos = session.exec(
+            select(Lote).where(Lote.fim_em > agora)
+        ).all()
+        contagem: dict = {}
+        for lote in lotes_ativos:
+            if not lote.origem_cidade or not lote.origem_uf:
+                continue
+            chave = (_normaliza(lote.origem_cidade), lote.origem_uf.strip().upper())
+            contagem[chave] = contagem.get(chave, 0) + 1
+
+        header = [
+            "Cidade", "UF", "Distância (km)",
+            "Frete Hatch (R$)", "Frete Sedan (R$)", "Frete SUV (R$)",
+            "Frete Picape (R$)", "Frete Utilitário (R$)", "Frete Outro (R$)",
+            "Lotes ativos no DB",
+        ]
+
+        body = []
+        for m in cidades:
+            d_km = int(round(m.distancia_do_ponto_km))
+            qtd = contagem.get((_normaliza(m.nome), m.uf), 0)
+            body.append([
+                m.nome, m.uf, d_km,
+                empresa.frete_para(d_km, CategoriaVeiculo.HATCH),
+                empresa.frete_para(d_km, CategoriaVeiculo.SEDAN),
+                empresa.frete_para(d_km, CategoriaVeiculo.SUV),
+                empresa.frete_para(d_km, CategoriaVeiculo.PICAPE),
+                empresa.frete_para(d_km, CategoriaVeiculo.UTILITARIO),
+                empresa.frete_para(d_km, CategoriaVeiculo.OUTRO),
+                qtd,
+            ])
+
+        ts = datetime.now().strftime("%d/%m/%Y %H:%M")
+        banner = [
+            f"Cidades no raio de {empresa.raio_operacao_km}km do pátio "
+            f"({empresa.patio.cidade}/{empresa.patio.uf}) — atualizado {ts}"
+        ] + [""] * (len(header) - 1)
+
+        sheet_rows = [banner, header] + body
+
+        gc = self._client()
+        sh = gc.open_by_key(self._spreadsheet_id)
+        aba_nome = f"cidades_{empresa_id}"
+        try:
+            ws = sh.worksheet(aba_nome)
+        except Exception:
+            ws = sh.add_worksheet(title=aba_nome, rows=max(len(sheet_rows) + 10, 100), cols=len(header))
+
+        ws.clear()
+        ws.update(sheet_rows, value_input_option="USER_ENTERED")
+        ws.freeze(rows=2)
 
     def _write_glossario_sheet(self) -> None:
         """Aba fixa 'Glossário' com origem, cálculo e racional de cada coluna da triagem.

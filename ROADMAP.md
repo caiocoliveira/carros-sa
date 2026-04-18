@@ -341,6 +341,16 @@ Já registrado:
 - **Cobertura:** 8 testes novos (202 total verde). Migração SQLite validada: campo aparece tanto em DB fresco quanto em DB existente sem perda de dados.
 - **Limitações:** coluna tem largura livre — se LLM retornar justificativa muito longa (>500 chars) vai ficar feia no Google Sheets. Prompt hoje pede "uma frase", mas não enforce. Mitigável com truncagem se virar problema.
 
+### S — Aba Cidades & Frete na planilha ✅
+- **Branch:** `claude/festive-tesla-6c18ae`
+- **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — novo `_write_cidades_frete_sheet(empresa_id, session)` engatado no `exportar()`. Aba `cidades_<empresa_id>` com 1 linha por município no raio operacional + frete por categoria + contagem de lotes ativos (fim_em > now) com origem naquela cidade.
+- **Motivação:** usuário pediu visibilidade direta de "de onde estamos olhando carros + custo logístico de cada cidade". Antes a info ficava espalhada (raio no YAML + tabela de frete em outro lugar + origem dos lotes só na coluna do listing).
+- **Como funciona:** Reusa `empresa.cidades_de_busca()` (já ordenado por distância haversine) e `empresa.frete_para(d, categoria)` para cada categoria do enum. Conta lotes ativos por (cidade, UF) com normalização case/accent-insensitive (espelha `_normaliza` do `geo.py`) pra colar mesmo quando AA grava "ARAGUARI" e o IBGE tem "Araguari". Pátio aparece com distância 0 e frete R$ 0 (comprador busca pessoalmente).
+- **Cobertura:** 4 testes em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) (`TestCidadesFreteSheet`) — aba criada com nome correto, pátio com 0/0, contagem com normalização, fallback silencioso quando YAML não existe (caminho atingido só nos testes pré-existentes que usam `empresa_id` mockado).
+- **Limitações conhecidas:**
+  - Lotes sem `origem_cidade`/`origem_uf` populados não entram na contagem (o scraper costuma popular, mas snapshots antigos podem ter NULL).
+  - `lru_cache(32)` em `carregar_empresa` significa que mudanças no YAML em runtime do mesmo processo só refletem após reload — não impacta operação batch (script encerra entre runs).
+
 ---
 
 ## Marcos (do plano arquitetural original)

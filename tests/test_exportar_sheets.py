@@ -782,3 +782,129 @@ class TestReformaRacional:
         rows = mock_ws.update.call_args_list[0][0][0]
         idx_racional = HEADER.index("Racional Reforma")
         assert rows[2][idx_racional] == "—"
+
+
+class TestCidadesFreteSheet:
+    """Aba de cidades do raio operacional + frete por categoria por cidade."""
+
+    def _separa_chamadas(self, mock_sh):
+        """Devolve (mock_ws_empresa, mock_ws_cidades, mock_ws_glossario) na ordem em que foram criados."""
+        # `worksheet(...)` levanta porque a aba ainda não existe → cai no add_worksheet,
+        # que retorna a sequência de mocks dada.
+        criados = [MagicMock(), MagicMock(), MagicMock()]
+        mock_sh.worksheet.side_effect = Exception("não existe")
+        mock_sh.add_worksheet.side_effect = criados
+        return criados
+
+    def test_aba_cidades_existe_para_empresa_real(self):
+        """Empresa real (`carros_uberlandia`) → aba `cidades_carros_uberlandia` é escrita."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", empresa_id="carros_uberlandia"))
+            session.commit()
+
+        mock_sh = MagicMock()
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        ws_empresa, ws_cidades, ws_glossario = self._separa_chamadas(mock_sh)
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("carros_uberlandia", session)
+
+        # Ordem das chamadas a add_worksheet: empresa, cidades, glossário
+        titulos = [c.kwargs["title"] for c in mock_sh.add_worksheet.call_args_list]
+        assert titulos == [
+            "carros_uberlandia",
+            "cidades_carros_uberlandia",
+            "Glossário",
+        ]
+        # Aba de cidades teve update chamado
+        assert ws_cidades.update.called
+
+    def test_aba_cidades_inclui_patio_com_distancia_zero_e_frete_zero(self):
+        """Pátio (Uberlândia) deve aparecer na lista, distância 0, frete 0."""
+        engine = _engine_mem()
+        mock_sh = MagicMock()
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        _, ws_cidades, _ = self._separa_chamadas(mock_sh)
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("carros_uberlandia", session)
+
+        rows = ws_cidades.update.call_args_list[0][0][0]
+        # rows[0] = banner, rows[1] = header, rows[2] = primeira cidade (pátio)
+        header = rows[1]
+        idx_dist = header.index("Distância (km)")
+        idx_hatch = header.index("Frete Hatch (R$)")
+        idx_outro = header.index("Frete Outro (R$)")
+        primeira = rows[2]
+        assert primeira[0] == "Uberlândia"
+        assert primeira[1] == "MG"
+        assert primeira[idx_dist] == 0
+        assert primeira[idx_hatch] == 0
+        assert primeira[idx_outro] == 0
+
+    def test_aba_cidades_conta_lotes_ativos_por_origem(self):
+        """Lotes ativos com origem em uma cidade do raio aparecem contados naquela linha."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # Dois lotes ativos em Araguari (raio de Uberlândia)
+            l1 = _lote("L001")
+            l1.origem_cidade = "Araguari"
+            l1.origem_uf = "MG"
+            l2 = _lote("L002", modelo="Gol")
+            l2.origem_cidade = "ARAGUARI"  # case diferente — normalização precisa colar
+            l2.origem_uf = "mg"
+            # Um lote em Uberlândia
+            l3 = _lote("L003", modelo="Onix")
+            l3.origem_cidade = "Uberlândia"
+            l3.origem_uf = "MG"
+            session.add(l1)
+            session.add(l2)
+            session.add(l3)
+            session.commit()
+
+        mock_sh = MagicMock()
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        _, ws_cidades, _ = self._separa_chamadas(mock_sh)
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("carros_uberlandia", session)
+
+        rows = ws_cidades.update.call_args_list[0][0][0]
+        header = rows[1]
+        idx_qtd = header.index("Lotes ativos no DB")
+        # Mapeia cidade → contagem
+        contagem = {(r[0], r[1]): r[idx_qtd] for r in rows[2:]}
+        assert contagem[("Uberlândia", "MG")] == 1
+        assert contagem[("Araguari", "MG")] == 2
+
+    def test_empresa_inexistente_skipa_aba_cidades_silenciosamente(self):
+        """Sem YAML da empresa, aba é pulada — fluxo principal não quebra."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                # `uberlandia_mg` não tem YAML — exportar deve completar sem erro
+                n = exporter.exportar("uberlandia_mg", session)
+        assert n == 1

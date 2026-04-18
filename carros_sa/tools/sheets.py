@@ -129,7 +129,10 @@ class SheetsExporter:
         rows_sorted = sorted(
             rows_ativos,
             key=lambda r: (
-                0 if r["viavel"] else 1,        # viáveis antes dos inviáveis
+                0 if r["laudo_analisado"] else 2,   # lotes com laudo real primeiro;
+                                                    # não-analisados só no final pra
+                                                    # o operador conferir depois
+                0 if r["viavel"] else 1,            # viáveis antes dos inviáveis
                 -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
             ),
         )
@@ -202,6 +205,14 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
+            # Laudo só conta como "analisado" se veio de um PDF real — fallback
+            # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
+            # confidence <= 0.55. Sem essa distinção o usuário via reforma de
+            # R$ 1.000 (piso) em 63/68 lotes e ia achando que o carro "tava ok"
+            # quando na verdade ninguém leu o laudo. Regra do usuário: não dar
+            # fallback de valor, avisar explicitamente que não foi analisado.
+            laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
+
             loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
             rows.append({
                 "lote_id": av.lote_id,
@@ -233,6 +244,7 @@ class SheetsExporter:
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "scraped_at": scraped_at_str,
+                "laudo_analisado": laudo_analisado,
             })
         return rows
 
@@ -257,7 +269,13 @@ class SheetsExporter:
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):
-            situacao = "✓ Viável" if r["viavel"] else "✗ Caro demais"
+            nao_analisado = not r["laudo_analisado"]
+            if nao_analisado:
+                situacao = "⚠ LAUDO NÃO ANALISADO"
+            elif r["viavel"]:
+                situacao = "✓ Viável"
+            else:
+                situacao = "✗ Caro demais"
             # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
             # em vez da URL crua longa. Sheets interpreta com USER_ENTERED.
             if r["url"]:
@@ -274,6 +292,42 @@ class SheetsExporter:
                 laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
             else:
                 laudo_cell = "—"
+
+            # Quando o laudo não foi analisado de verdade (sem PDF ou extração
+            # falhou), NÃO exibimos preço-alvo, ROI nem reforma — seriam chutes
+            # baseados em laudo vazio e induziriam o operador a dar lance no
+            # escuro. Mantemos identificação do lote + link pra ele resolver
+            # manualmente. O retry automático (scripts/retry_laudos_pendentes.py)
+            # tenta preencher esses campos na próxima passada.
+            if nao_analisado:
+                severidade_cell = "não analisado"
+                motor_cell = "—"
+                preco_max_cell = "—"
+                reforma_cell = "—"
+                reforma_racional_cell = "Laudo não analisado — não dê lance sem conferir"
+                roi_pct_cell = "—"
+                roi_anual_cell = "—"
+                dias_giro_cell = "—"
+                preco_giro_fipe_cell = "—"
+                preco_giro_aa_cell = "—"
+                fator_risco_cell = "—"
+                frete_cell = "—"
+                justificativa_cell = "Bloqueado: laudo não foi lido na última coleta"
+            else:
+                severidade_cell = r["severidade"]
+                motor_cell = r["motor_ok"]
+                preco_max_cell = r["preco_max"]
+                reforma_cell = r["reforma_estimada"]
+                reforma_racional_cell = r["reforma_racional"] or "—"
+                roi_pct_cell = r["roi_pct"]
+                roi_anual_cell = r["roi_anualizado"]
+                dias_giro_cell = r["dias_giro"] if r["dias_giro"] is not None else "—"
+                preco_giro_fipe_cell = r["preco_giro_fipe"]
+                preco_giro_aa_cell = r["preco_giro_aa"] if r["preco_giro_aa"] is not None else "—"
+                fator_risco_cell = r["fator_risco"]
+                frete_cell = r["frete"]
+                justificativa_cell = r["justificativa"]
+
             sheet_rows.append([
                 rank,
                 situacao,
@@ -285,22 +339,22 @@ class SheetsExporter:
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
-                r["preco_max"],
+                preco_max_cell,
                 r["fipe"] if r["fipe"] is not None else "—",
-                r["preco_giro_fipe"],
-                r["preco_giro_aa"] if r["preco_giro_aa"] is not None else "—",
+                preco_giro_fipe_cell,
+                preco_giro_aa_cell,
                 f"{r['fipe_pct_lance_minimo']}%" if r["fipe_pct_lance_minimo"] is not None else "—",
-                r["roi_pct"],
-                r["dias_giro"] if r["dias_giro"] is not None else "—",
-                r["roi_anualizado"],
+                roi_pct_cell,
+                dias_giro_cell,
+                roi_anual_cell,
                 r["popularidade"],
-                r["fator_risco"],
-                r["severidade"],
-                r["motor_ok"],
-                r["reforma_estimada"],
-                r["reforma_racional"] or "—",
-                r["frete"],
-                r["justificativa"],
+                fator_risco_cell,
+                severidade_cell,
+                motor_cell,
+                reforma_cell,
+                reforma_racional_cell,
+                frete_cell,
+                justificativa_cell,
                 url_cell,
                 laudo_cell,
                 r["scraped_at"],

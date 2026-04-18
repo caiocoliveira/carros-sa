@@ -1,7 +1,7 @@
 # Carros SA — atalhos pra comandos comuns
 # Uso: `make <target>` (ex: `make test`)
 
-.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit
+.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit limpar-decoys
 
 PY := PYTHONPATH=. .venv/bin/python
 
@@ -19,6 +19,7 @@ help:
 	@echo "  make top [EMPRESA=<id>] [N=10]     # ranking offline das melhores avaliações"
 	@echo "  make empresas                      # lista empresas configuradas"
 	@echo "  make setup-cron                    # ativa cron diário (7h e 13h)"
+	@echo "  make limpar-decoys                 # remove URLs-decoy de laudo do DB + força retry"
 	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
 	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
 
@@ -51,6 +52,9 @@ empresas:
 
 setup-cron:
 	bash scripts/setup_cron.sh
+
+limpar-decoys:
+	$(PY) scripts/limpar_decoys_laudo.py
 
 sheets:
 ifndef EMPRESA

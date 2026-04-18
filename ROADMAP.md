@@ -223,6 +223,18 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Gemini 2.5 Flash teve overload (`ServerError`) durante o reprocessamento — 5/9 lotes caíram em fallback textual (confidence 0.5). Rodar de novo quando API normalizar, ou garantir `ANTHROPIC_API_KEY` ativa pra cascatear pro Haiku.
   - Allowlist cobre os hosts observados até hoje. Se Auto Avaliar mudar pra CDN novo (ex.: Cloudflare próprio), `pareceLaudo()` rejeita silenciosamente e cai no fallback do modal — monitorar taxa de `pdf_ok=False` na triagem pra detectar.
 
+### R.1 — Auto-fix de decoys persistidos + teste obrigatório ✅
+- **Arquivos:**
+  - [`scripts/limpar_decoys_laudo.py`](scripts/limpar_decoys_laudo.py) — varre o DB, usa `is_laudo_pdf_url()` como fonte de verdade, zera `raw_json.detalhe.laudo_pdf_url` e derruba o `LaudoCache` correspondente pra forçar re-extração. Importável como `limpar_decoys(session, dry_run=True)` pra uso em teste.
+  - [`tests/test_decoy_laudo_guard.py`](tests/test_decoy_laudo_guard.py) — 10 testes: funcionais (limpa decoy, preserva URL válida, idempotente, dry-run, lote sem detalhe, URL não mapeada) + guard de DB real (se `carros_sa.db` existe, `make test` falha caso sobre QUALQUER decoy). Skippa gracefully sem DB.
+  - [`Makefile`](Makefile) — novo alvo `make limpar-decoys`.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — cron diário agora é `triagem → limpar_decoys → retry-laudo-pendente`. Auto-heal em cada ciclo (7h/13h).
+- **Motivação:** R fechou a porta de entrada do decoy via `is_laudo_pdf_url()` no scraper, mas 75 lotes legados continuavam com URL envenenada persistida em `raw_json.detalhe.laudo_pdf_url` — e cada retry diário caía no decoy, baixava PDF errado, `_pdf_eh_laudo_valido` rejeitava, e o lote ficava travado em `confidence=0.5` ("LAUDO NÃO ANALISADO" no export). Triagem 2026-04-18: 215/342 lotes com `confidence<0.6`, dos quais 71 por essa causa exata.
+- **Validação:** rodado no DB de produção → 75 decoys limpos, 75 `LaudoCache` derrubados. `--dry-run` seguinte retornou 0. Suite: **308/308 verde**.
+- **Limitações conhecidas:**
+  - Guard do DB real faz `dry_run` mas não auto-corrige durante o `pytest` — exige intervenção (`make limpar-decoys`). Intencional: teste não deve mutar estado de produção silenciosamente.
+  - Se um novo padrão de decoy aparecer no Auto Avaliar e o `is_laudo_pdf_url()` aceitar incorretamente, ambos scraper E limpeza deixam passar. Defesa secundária fica com `_pdf_eh_laudo_valido()` no orquestrador (inspeciona o PDF baixado).
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

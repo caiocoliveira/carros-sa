@@ -203,6 +203,30 @@ def test_estatisticas_sem_fetch_levanta_not_implemented():
         estatisticas("Ford", "Fiesta", 2013)
 
 
+def test_estatisticas_expoe_km_mediana(anuncios_reais):
+    """Fiesta 2013 real (11 anúncios) — km mediana deve ser plausível (50k-200k)."""
+    est = estatisticas("Ford", "Fiesta", 2013, anuncios=anuncios_reais)
+    assert est.km_mediana > 0
+    assert 50_000 < est.km_mediana < 250_000
+
+
+def test_estatisticas_km_mediana_zero_quando_sem_amostra():
+    est = estatisticas("Ford", "Fiesta", 2099, anuncios=[])
+    assert est.km_mediana == 0
+
+
+def test_estatisticas_km_mediana_ignora_km_zerada():
+    """Anúncios com km=0 (dado faltando) não poluem a mediana."""
+    anuncios = [
+        AnuncioWM("1", "Ford", "Fiesta", "1.6", 2013, 2014, 0, "SP", "SP", 30_000),
+        AnuncioWM("2", "Ford", "Fiesta", "1.6", 2013, 2014, 100_000, "SP", "SP", 32_000),
+        AnuncioWM("3", "Ford", "Fiesta", "1.6", 2013, 2014, 120_000, "RJ", "RJ", 28_000),
+    ]
+    est = estatisticas("Ford", "Fiesta", 2013, anuncios=anuncios)
+    # mediana([100k, 120k]) = 110k; o zero é descartado
+    assert est.km_mediana == 110_000
+
+
 # =============================================================================
 # _percentil
 # =============================================================================

@@ -192,6 +192,22 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Amostra fixa de 20 linhas mais recentes — problemas em percentuais raros podem passar.
   - Invariantes duplicam o Glossário em linguagem imperativa; manutenção exige editar os dois (teste de paridade protege contra colunas novas sem check, mas não contra divergência semântica).
 
+### S — Ajuste da âncora de venda por km do lote ✅
+- **Branch:** `claude/distracted-greider-e970bd`
+- **Arquivos:**
+  - [`carros_sa/ajuste_km.py`](carros_sa/ajuste_km.py) — NOVO. `fator_km(km_lote, km_mediana_mercado) → float ∈ [0.75, 1.15]`; sensibilidade 30% do delta relativo, no-op quando qualquer entrada é ausente/zero.
+  - [`carros_sa/tools/webmotors.py`](carros_sa/tools/webmotors.py) — `EstatisticasWM.km_mediana` novo; `estatisticas()` calcula `median([a.km for a in relevantes if a.km > 0])`.
+  - [`carros_sa/models.py`](carros_sa/models.py) — `SinalMercado.webmotors_km_mediana: Optional[int] = None` (mudança de contrato retrocompatível, default None preserva fixtures existentes).
+  - [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py) — `avaliar()` aceita `webmotors_km_mediana` opcional que é propagado para `SinalMercado`.
+  - [`carros_sa/precificador.py`](carros_sa/precificador.py) — aplica `f_km` sobre `webmotors_mediana` e `auto_avaliar_ref` antes de deduzir reforma/frete/taxas; justificativa inclui `f_km=X.XX (km=..., km_mercado=...)` quando o ajuste é aplicado.
+- **Motivação:** `webmotors_mediana` reflete um carro "típico" com km típica do modelo/ano. Lote com km muito acima da mediana de mercado → sistema superestimava o preço de venda → preço-alvo inflado → risco de lance ruim. Sem esse ajuste, `LoteRaw.km` era capturado mas inerte no precificador.
+- **Como funciona:** delta relativo `(km_mediana_mercado - km_lote) / km_mediana_mercado` × sensibilidade 0.30, clamp em `[0.75, 1.15]`. Lote com km 50% acima da mediana → f_km ≈ 0.85 → 15% de desconto na âncora. Bounds evitam resultados absurdos em outliers (ex.: lote 5k km num mercado mediana 150k).
+- **Cobertura:** 14 testes novos — 9 em [`tests/test_ajuste_km.py`](tests/test_ajuste_km.py) (neutro, cap superior/inferior, desconto/bônus moderado, dados faltantes), 3 em [`tests/test_webmotors.py`](tests/test_webmotors.py) (`km_mediana` real da fixture Fiesta, zeros ignorados), 2 em [`tests/test_precificador.py`](tests/test_precificador.py) (km alta reduz preço-alvo, km baixa eleva). Suíte completa **297 passando**.
+- **Limitações conhecidas:**
+  - O orquestrador/pipeline real ainda NÃO popula `webmotors_km_mediana` — `avaliar_mercado` é chamado com `similares_precos` (Auto Avaliar) e não recebe anúncios Webmotors. O campo fica `None` em produção → `f_km=1.0` (no-op) até o workstream que integrar Webmotors ao pipeline ligar `estatisticas(...).km_mediana` como parâmetro. Infra e testes prontos; falta o wire-up.
+  - Sensibilidade 0.30 e bounds [0.75, 1.15] são calibração de primeira passada. Com dados reais do pipeline vale revisitar (idealmente regredir contra Arrematado).
+  - Quando `webmotors_km_mediana` tem amostra rala (<3 anúncios), a mediana é ruidosa e pode enviesar o ajuste. Guard-rail atual é só o clamp; revisitar se aparecerem falsos positivos.
+
 ### R — Fix do decoy Relatório de Transparência + coluna Laudo na planilha ✅
 - **Branch:** `claude/musing-jemison-ba0f06`
 - **Arquivos:**

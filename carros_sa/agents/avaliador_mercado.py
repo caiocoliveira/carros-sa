@@ -88,6 +88,7 @@ def avaliar(
     session: Optional[Session] = None,
     empresa_id: Optional[str] = None,
     aplicar_popularidade: bool = True,
+    webmotors_km_mediana: Optional[int] = None,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
@@ -148,4 +149,5 @@ def avaliar(
         webmotors_p25=p25,
         n_anuncios_competidores=n,
         dias_giro_estimado=dias_giro,
+        webmotors_km_mediana=webmotors_km_mediana,
     )

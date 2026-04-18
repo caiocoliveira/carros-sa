@@ -94,8 +94,9 @@ def test_avaliador_fiesta_com_similares_reais(fipe_responses, in_memory_session)
     # p25 (n=6): índice 0.25*5=1.25 entre 25k-ish
     assert 23200 <= sinal.webmotors_p25 <= 29500
     assert sinal.n_anuncios_competidores == 6
-    # n>=6 → ajuste de liquidez: hatch baseline 25 - 5 = 20
-    assert sinal.dias_giro_estimado == 20
+    # Fiesta 2013 (idade 13) → hatch VELHO → prior 100d
+    # n>=6 → ajuste de liquidez: -5 = 95
+    assert sinal.dias_giro_estimado == 95
 
     # 4 chamadas HTTP "esperadas": marcas, modelos, anos, valor
     assert len(fake.calls) == 4
@@ -153,5 +154,6 @@ def test_fallback_sem_similares(fipe_responses, in_memory_session):
     assert sinal.webmotors_mediana == round(30876 * 0.97)
     assert sinal.webmotors_p25 == round(30876 * 0.88)
     assert sinal.n_anuncios_competidores == 0
-    # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → baseline hatch 25
-    assert sinal.dias_giro_estimado == 25
+    # Fiesta 2013 → hatch VELHO → prior 100d.
+    # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → prior puro.
+    assert sinal.dias_giro_estimado == 100

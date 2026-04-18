@@ -16,8 +16,10 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from carros_sa.agents.calibracao_giro import (
+    FaixaIdade,
     _categoria_de_modelo,
     calibrar_dias_giro,
+    faixa_de_idade,
     invalidar_cache,
     roi_anualizado,
 )
@@ -214,3 +216,95 @@ def test_roi_anualizado_dias_none_usa_fallback_90():
 
 def test_roi_anualizado_score_zero_e_zero():
     assert roi_anualizado(0.0, 30) == 0.0
+
+
+# =============================================================================
+# FaixaIdade — classificação + cascata de fallback
+# =============================================================================
+
+def test_faixa_de_idade_thresholds():
+    # Ano referência 2026
+    assert faixa_de_idade(2026, 2026) == FaixaIdade.NOVO     # idade 0
+    assert faixa_de_idade(2023, 2026) == FaixaIdade.NOVO     # idade 3 (borda)
+    assert faixa_de_idade(2022, 2026) == FaixaIdade.MEDIO    # idade 4 (borda)
+    assert faixa_de_idade(2019, 2026) == FaixaIdade.MEDIO    # idade 7 (borda)
+    assert faixa_de_idade(2018, 2026) == FaixaIdade.VELHO    # idade 8 (borda)
+    assert faixa_de_idade(2010, 2026) == FaixaIdade.VELHO    # idade 16
+    # Veículo do futuro não quebra
+    assert faixa_de_idade(2030, 2026) == FaixaIdade.NOVO
+
+
+def test_faixa_idade_aplica_sub_bucket_quando_tem_dados(session_isolada):
+    """Quando faixa NOVO tem ≥3 amostras, calibração usa APENAS elas (não todas)."""
+    session_isolada.add(Empresa(id="emp1", nome="x", config_yaml_path="x"))
+    # 3 hatches NOVOS (2024, 3 anos idade=2) com 20 dias
+    for i, modelo in enumerate(["Polo 1.0", "HB20 1.0", "Mobi 1.0"]):
+        lote_id = f"novo{i}"
+        _criar_lote(session_isolada, lote_id, "VW", modelo, 2024, 50000)
+        _criar_arrematado(session_isolada, "emp1", lote_id, 50000,
+                          datetime(2026, 1, 1), datetime(2026, 1, 21))  # 20d
+    # 3 hatches VELHOS (2012, idade 14) com 200 dias
+    for i, modelo in enumerate(["Gol 1.0", "Ka 1.0", "Palio 1.0"]):
+        lote_id = f"velho{i}"
+        _criar_lote(session_isolada, lote_id, "VW", modelo, 2012, 20000)
+        _criar_arrematado(session_isolada, "emp1", lote_id, 20000,
+                          datetime(2025, 6, 1), datetime(2025, 12, 18))  # 200d
+    session_isolada.commit()
+    invalidar_cache()
+
+    # Calibração NOVO: só usa os 3 novos → média 20
+    d_novo = calibrar_dias_giro("emp1", CategoriaVeiculo.HATCH, session_isolada,
+                                 fallback=99, faixa_idade=FaixaIdade.NOVO, ano_referencia=2026)
+    assert d_novo == 20
+
+    # Calibração VELHO: só usa os 3 velhos → média 200
+    d_velho = calibrar_dias_giro("emp1", CategoriaVeiculo.HATCH, session_isolada,
+                                  fallback=99, faixa_idade=FaixaIdade.VELHO, ano_referencia=2026)
+    assert d_velho == 200
+
+    # Sem faixa (comportamento legado): média de todos = (20*3 + 200*3)/6 = 110
+    d_agg = calibrar_dias_giro("emp1", CategoriaVeiculo.HATCH, session_isolada, fallback=99)
+    assert d_agg == 110
+
+
+def test_faixa_insuficiente_cai_pro_agregado(session_isolada):
+    """Se faixa NOVO só tem 1 amostra (< 3), cai pro agregado categórico."""
+    session_isolada.add(Empresa(id="emp1", nome="x", config_yaml_path="x"))
+    # 1 NOVO (idade 1) com 10d — não bate mínimo de 3
+    _criar_lote(session_isolada, "n0", "VW", "Polo 1.0", 2025, 50000)
+    _criar_arrematado(session_isolada, "emp1", "n0", 50000,
+                      datetime(2026, 1, 1), datetime(2026, 1, 11))  # 10d
+    # 3 MEDIOS (idade 5) com 100d
+    for i in range(3):
+        lote_id = f"m{i}"
+        _criar_lote(session_isolada, lote_id, "VW", "Gol 1.0", 2021, 30000)
+        _criar_arrematado(session_isolada, "emp1", lote_id, 30000,
+                          datetime(2025, 10, 1), datetime(2026, 1, 9))  # 100d
+    session_isolada.commit()
+    invalidar_cache()
+
+    # Faixa NOVO tem 1 amostra → cai pro agregado
+    # Agregado: 4 amostras (1 NOVO + 3 MEDIOS). Valor exato depende de
+    # arredondamento de datas; usamos faixa pra ser robusto.
+    d = calibrar_dias_giro("emp1", CategoriaVeiculo.HATCH, session_isolada,
+                           fallback=99, faixa_idade=FaixaIdade.NOVO, ano_referencia=2026)
+    assert 70 <= d <= 85          # agregado bate nessa faixa
+    assert d != 99                # não caiu no fallback
+
+
+def test_agregado_insuficiente_cai_pro_fallback(session_isolada):
+    """Se nem a faixa nem o agregado tem ≥3, cai pro prior hardcoded."""
+    session_isolada.add(Empresa(id="emp1", nome="x", config_yaml_path="x"))
+    # Só 2 hatch VELHO, zero NOVO/MEDIO
+    for i in range(2):
+        lote_id = f"v{i}"
+        _criar_lote(session_isolada, lote_id, "VW", "Gol 1.0", 2014, 20000)
+        _criar_arrematado(session_isolada, "emp1", lote_id, 20000,
+                          datetime(2025, 6, 1), datetime(2025, 10, 9))
+    session_isolada.commit()
+    invalidar_cache()
+
+    # Pede NOVO: faixa tem 0 → agregado tem 2 → insuficiente → fallback
+    d = calibrar_dias_giro("emp1", CategoriaVeiculo.HATCH, session_isolada,
+                           fallback=42, faixa_idade=FaixaIdade.NOVO, ano_referencia=2026)
+    assert d == 42

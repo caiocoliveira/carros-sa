@@ -549,14 +549,14 @@ class TestSheetsExporterFimEmObrigatorio:
 
 class TestSheetsExporterEncerrados:
     """Lotes com leilão encerrado (timer passou ou badge ARREMATADO no detalhe)
-    devem ir pro FIM da planilha e ter situação '⚠ Encerrado' — evita o usuário
-    perder tempo clicando em anúncio já vendido.
+    são FILTRADOS completamente da planilha — operador só quer ver o que ainda
+    dá pra arrematar. Antes a gente empurrava pro fim da lista, mas isso só
+    polui: lote encerrado é ruído, não ação possível.
     """
 
-    def test_lote_com_timer_vencido_marca_encerrado(self):
+    def test_lote_com_timer_vencido_nao_aparece(self):
         engine = _engine_mem()
         with Session(engine) as session:
-            # L001: leilão já acabou 2 dias atrás → encerrado
             expirado = _lote("L001", lance_atual=20000)
             expirado.fim_em = datetime.now() - timedelta(days=2)
             session.add(expirado)
@@ -572,20 +572,20 @@ class TestSheetsExporterEncerrados:
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
             with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
+                n = exporter.exportar("uberlandia_mg", session)
 
+        assert n == 0
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_situacao = HEADER.index("Situação")
-        # rows[0]=banner, rows[1]=header, rows[2]=lote encerrado
-        assert "Encerrado" in rows[2][idx_situacao]
+        # Só banner (linha 1) + header (linha 2). Nenhuma linha de dados.
+        assert len(rows) == 2
 
-    def test_lote_com_badge_arrematado_no_raw_json_marca_encerrado(self):
-        """Mesmo com timer ainda vivo, se o detalhe raspado viu 'ARREMATADO' → encerrado."""
+    def test_lote_com_badge_arrematado_no_raw_json_nao_aparece(self):
+        """Mesmo com timer ainda vivo, badge ARREMATADO no detalhe filtra o lote."""
         engine = _engine_mem()
         with Session(engine) as session:
             lote = _lote("L001", lance_atual=20000)
-            lote.fim_em = datetime.now() + timedelta(days=5)  # timer futuro
-            lote.raw_json = {"detalhe": {"encerrado": True}}   # mas scraper viu arrematado
+            lote.fim_em = datetime.now() + timedelta(days=5)
+            lote.raw_json = {"detalhe": {"encerrado": True}}
             session.add(lote)
             session.add(_avaliacao("L001", preco_max=30000))
             session.commit()
@@ -599,14 +599,12 @@ class TestSheetsExporterEncerrados:
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
             with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
+                n = exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args_list[0][0][0]
-        idx_situacao = HEADER.index("Situação")
-        assert "Encerrado" in rows[2][idx_situacao]
+        assert n == 0
 
-    def test_encerrados_vao_pro_fim_da_lista(self):
-        """Ordenação: ativos viáveis → ativos caros → encerrados (sempre último)."""
+    def test_encerrados_filtrados_ativos_exportados(self):
+        """Mix de ativos e encerrados: só os ativos entram na planilha."""
         engine = _engine_mem()
         with Session(engine) as session:
             # L001: ativo viável
@@ -615,13 +613,13 @@ class TestSheetsExporterEncerrados:
             session.add(l1)
             session.add(_avaliacao("L001", preco_max=30000))
 
-            # L002: ativo caro (lance > max)
+            # L002: ativo caro (lance > max) — ainda entra, o operador decide
             l2 = _lote("L002", modelo="Gol", lance_atual=50000)
             l2.fim_em = datetime.now() + timedelta(days=3)
             session.add(l2)
             session.add(_avaliacao("L002", preco_max=30000))
 
-            # L003: encerrado — mesmo sendo "viável no papel", não interessa
+            # L003: encerrado — NÃO entra
             l3 = _lote("L003", modelo="Compass", lance_atual=20000)
             l3.fim_em = datetime.now() - timedelta(days=1)
             session.add(l3)
@@ -637,14 +635,14 @@ class TestSheetsExporterEncerrados:
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
             with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
+                n = exporter.exportar("uberlandia_mg", session)
 
+        assert n == 2
         rows = mock_ws.update.call_args_list[0][0][0]
         idx_lote_id = HEADER.index("Lote ID")
-        # rows[0]=banner, rows[1]=header, rows[2..4]=dados
-        assert rows[2][idx_lote_id] == "L001"   # viável primeiro
-        assert rows[3][idx_lote_id] == "L002"   # caro depois
-        assert rows[4][idx_lote_id] == "L003"   # encerrado por último
+        lote_ids = [rows[i][idx_lote_id] for i in range(2, len(rows))]
+        assert "L003" not in lote_ids
+        assert set(lote_ids) == {"L001", "L002"}
 
 
 class TestSheetsExporterTimestamp:

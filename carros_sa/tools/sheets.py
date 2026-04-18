@@ -120,12 +120,13 @@ class SheetsExporter:
     def exportar(self, empresa_id: str, session: Session) -> int:
         """Lê SQLite, escreve aba <empresa_id> + aba Glossário na Sheet. Retorna n linhas exportadas."""
         rows = self._query(empresa_id, session)
-        # Ordenação: encerrados vão pro final (não importa mais), dentro dos ativos
-        # viáveis vêm antes dos inviáveis, e a folga de lance desempata.
+        # Filtro duro: lote encerrado (timer vencido OU badge ARREMATADO) é
+        # ruído — operador não pode mais dar lance. Antes empurrávamos pro
+        # final; agora removemos completamente.
+        rows_ativos = [r for r in rows if not r["encerrado"]]
         rows_sorted = sorted(
-            rows,
+            rows_ativos,
             key=lambda r: (
-                1 if r["encerrado"] else 0,     # encerrados depois de tudo
                 0 if r["viavel"] else 1,        # viáveis antes dos inviáveis
                 -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
             ),
@@ -250,12 +251,7 @@ class SheetsExporter:
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):
-            if r["encerrado"]:
-                situacao = "⚠ Encerrado"
-            elif r["viavel"]:
-                situacao = "✓ Viável"
-            else:
-                situacao = "✗ Caro demais"
+            situacao = "✓ Viável" if r["viavel"] else "✗ Caro demais"
             # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
             # em vez da URL crua longa. Sheets interpreta com USER_ENTERED.
             if r["url"]:
@@ -353,8 +349,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "⚠ Encerrado se o leilão acabou (badge ARREMATADO no anúncio OU Fim do Leilão já passou); senão ✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais",
-                "Filtro de sanidade: lotes encerrados vão pro final da lista; dentro dos ativos, se o mínimo já passou do nosso teto não há lance a fazer",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são FILTRADOS antes do export — não aparecem na aba.",
+                "Planilha só mostra lotes onde ainda dá pra dar lance. Dentro dos ativos, se o mínimo já passou do teto não há lance a fazer.",
             ],
             [
                 "Lote ID",

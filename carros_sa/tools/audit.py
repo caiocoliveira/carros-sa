@@ -48,10 +48,16 @@ CHECKS: Dict[str, Validator] = {
     "Lote ID": lambda v, r: "Lote ID vazio" if not v else None,
     "Modelo": lambda v, r: (
         "Modelo string vazia" if not v or not str(v).strip()
-        else "Modelo sem marca e sem nome (só ano) — scraper falhou em capturar campos"
+        else "Modelo sem marca e sem nome — scraper falhou em capturar campos"
         if not r.get("marca") or not r.get("modelo_raw")
         else None
     ),
+    "Ano": lambda v, r: (
+        "Ano fora de [1980, ano_atual+1] — provavelmente erro de parsing do card"
+        if v is None or not isinstance(v, int) or v < 1980 or v > datetime.now().year + 1
+        else None
+    ),
+    "Cidade": lambda v, r: None,  # "—" é legítimo (lote sem origem_cidade declarada)
     "Fim do Leilão": lambda v, r: None,  # pode ser "—" para lotes showroom
     "KM": lambda v, r: (
         "KM absurdo (>800k ou <0)" if v is not None and (v > 800_000 or v < 0) else None
@@ -69,7 +75,6 @@ CHECKS: Dict[str, Validator] = {
         if v == 0 and r.get("preco_giro_fipe")
         else None
     ),
-    "Webmotors Mediana (R$)": lambda v, r: None,  # None é legítimo (scraper offline)
     "Preço Giro FIPE (R$)": lambda v, r: (
         "Preço Giro FIPE não-positivo" if v is not None and v <= 0 else None
     ),
@@ -136,8 +141,8 @@ CHECKS: Dict[str, Validator] = {
 
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
-# Chaves do dict interno: lote_id, modelo, fim_em, km, lance_atual, preco_max,
-# fipe, webmotors_mediana, preco_giro_fipe, preco_giro_aa, fipe_pct_lance_minimo,
+# Chaves do dict interno: lote_id, modelo, ano, cidade, fim_em, km, lance_atual,
+# preco_max, fipe, preco_giro_fipe, preco_giro_aa, fipe_pct_lance_minimo,
 # roi_pct, dias_giro, roi_anualizado, fator_risco, severidade, motor_ok,
 # reforma_estimada, frete, justificativa, url, scraped_at, rank, situacao,
 # encerrado, viavel, preco_giro.
@@ -146,12 +151,13 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Situação": lambda r: r["situacao"],
     "Lote ID": lambda r: r["lote_id"],
     "Modelo": lambda r: r["modelo"],
+    "Ano": lambda r: r["ano"],
+    "Cidade": lambda r: r["cidade"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
     "FIPE (R$)": lambda r: r["fipe"],
-    "Webmotors Mediana (R$)": lambda r: r["webmotors_mediana"],
     "Preço Giro FIPE (R$)": lambda r: r["preco_giro_fipe"],
     "Preço Giro Auto Avaliar (R$)": lambda r: r["preco_giro_aa"],
     "FIPE % (lance min)": lambda r: r["fipe_pct_lance_minimo"],
@@ -227,7 +233,9 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
 
         rows.append({
             "lote_id": av.lote_id,
-            "modelo": f"{lote.marca} {lote.modelo} {lote.ano}".strip(),
+            "modelo": f"{lote.marca} {lote.modelo}".strip(),
+            "ano": lote.ano,
+            "cidade": lote.origem_cidade or "—",
             "marca": lote.marca,
             "modelo_raw": lote.modelo,
             "fim_em": fim_em_str,
@@ -235,7 +243,6 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "lance_atual": lote.lance_atual or 0,
             "preco_max": av.preco_max,
             "fipe": av.fipe,
-            "webmotors_mediana": av.webmotors_mediana,
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,

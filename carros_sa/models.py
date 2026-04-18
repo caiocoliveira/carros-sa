@@ -101,6 +101,10 @@ class SinalMercado(BaseModel):
     # pra esse modelo/ano. Quando presente, Precificador usa como âncora alternativa
     # e escolhe o menor entre preco_giro_fipe e preco_giro_aa.
     auto_avaliar_ref: Optional[int] = None
+    # Km mediana dos anúncios Webmotors do (marca, modelo, ano). None quando
+    # Webmotors não está ligado no pipeline ou não há amostra. Precificador usa
+    # pra calibrar a âncora de venda à km do lote (ver ajuste_km.py).
+    webmotors_km_mediana: Optional[int] = None
 
     @field_validator("fipe", "webmotors_mediana", "webmotors_p25")
     @classmethod
@@ -114,6 +118,13 @@ class SinalMercado(BaseModel):
     def _aa_positivo(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and v <= 0:
             raise ValueError("auto_avaliar_ref deve ser positivo se informado")
+        return v
+
+    @field_validator("webmotors_km_mediana")
+    @classmethod
+    def _km_positivo(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
+            raise ValueError("webmotors_km_mediana deve ser positivo se informado")
         return v
 
 

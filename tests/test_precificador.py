@@ -525,3 +525,75 @@ def test_reforma_racional_sem_itens_e_sem_llm_fica_none(
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, reforma, frete, empresa)
 
     assert av.reforma_racional is None
+
+
+# =============================================================================
+# Ajuste por km do lote vs km mediana do mercado (ajuste_km.py)
+# =============================================================================
+
+def test_ajuste_km_lote_com_km_alta_reduz_preco_alvo(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma
+):
+    """Mesmo Gol, mesmo mercado, mas km do lote >> km mediana: preço-alvo cai.
+
+    Sem webmotors_km_mediana → f_km=1.0, preco_giro cheio.
+    Com webmotors_km_mediana=50k e lote.km=150k → f_km ≈ 0.70 → clamp 0.75 →
+    preco_giro cai de 25k pra ~18.7k → preço-alvo várias milhares menor.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    # Baseline: sem webmotors_km_mediana → f_km=1.0
+    mercado_sem_km = SinalMercado(
+        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        n_anuncios_competidores=80, dias_giro_estimado=25,
+    )
+    lote_km_alta = gol_2015_lote.model_copy(update={"km": 150_000})
+    av_baseline = precificar(
+        lote_km_alta, gol_2015_laudo, mercado_sem_km, gol_2015_reforma, frete, empresa,
+    )
+
+    # Com km mediana de mercado (50k) muito abaixo da km do lote (150k) → f_km clamp 0.75
+    mercado_com_km = mercado_sem_km.model_copy(update={"webmotors_km_mediana": 50_000})
+    av_km_alta = precificar(
+        lote_km_alta, gol_2015_laudo, mercado_com_km, gol_2015_reforma, frete, empresa,
+    )
+
+    # preco_giro aplicado com f_km=0.75 → 25000 * 0.75 = 18_750
+    assert av_km_alta.preco_giro == 18_750
+    # preço-alvo cai proporcionalmente (sem sair negativo)
+    assert av_km_alta.preco_alvo < av_baseline.preco_alvo
+    # justificativa exibe f_km quando aplicado
+    assert "f_km=0.75" in av_km_alta.justificativa
+    assert "km=150000" in av_km_alta.justificativa
+    # Baseline não deve mencionar f_km (foi no-op 1.0)
+    assert "f_km=" not in av_baseline.justificativa
+
+
+def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma
+):
+    """Lote com km abaixo da mediana → f_km > 1 → preço-alvo sobe."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    mercado_sem_km = SinalMercado(
+        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        n_anuncios_competidores=80, dias_giro_estimado=25,
+    )
+    # km=40k, mediana=80k → delta=+0.5 → fator=1.15 (cap)
+    lote_km_baixa = gol_2015_lote.model_copy(update={"km": 40_000})
+    mercado_com_km = mercado_sem_km.model_copy(update={"webmotors_km_mediana": 80_000})
+
+    av_sem_ajuste = precificar(
+        lote_km_baixa, gol_2015_laudo, mercado_sem_km, gol_2015_reforma, frete, empresa,
+    )
+    av_com_ajuste = precificar(
+        lote_km_baixa, gol_2015_laudo, mercado_com_km, gol_2015_reforma, frete, empresa,
+    )
+
+    # preco_giro: 25000 * 1.15 = 28_750
+    assert av_com_ajuste.preco_giro == 28_750
+    # preço-alvo sobe com f_km > 1
+    assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
+    assert "f_km=1.15" in av_com_ajuste.justificativa

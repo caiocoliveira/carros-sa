@@ -55,6 +55,10 @@ class EstatisticasWM:
     p25: int
     mediana: int
     n_anuncios: int
+    # km mediana dos anúncios do (marca, modelo, ano). 0 quando não há amostra.
+    # Usado pelo precificador pra ajustar a âncora de venda quando a km do lote
+    # destoa da km típica do mercado (ver carros_sa/ajuste_km.py).
+    km_mediana: int = 0
 
 
 # =============================================================================
@@ -199,11 +203,14 @@ def estatisticas(
     ]
     precos = sorted(a.preco for a in relevantes)
     if not precos:
-        return EstatisticasWM(p25=0, mediana=0, n_anuncios=0)
+        return EstatisticasWM(p25=0, mediana=0, n_anuncios=0, km_mediana=0)
+    kms = [a.km for a in relevantes if a.km > 0]
+    km_med = int(median(kms)) if kms else 0
     return EstatisticasWM(
         p25=_percentil(precos, 25),
         mediana=int(median(precos)),
         n_anuncios=len(precos),
+        km_mediana=km_med,
     )
 
 

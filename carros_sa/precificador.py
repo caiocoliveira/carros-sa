@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from carros_sa.ajuste_km import fator_km
 from carros_sa.models import (
     Avaliacao,
     CustoLogistico,
@@ -105,10 +106,15 @@ def precificar(
     #    revenda (usuário confirmou que vende próximo da FIPE; mediana fallback=97%).
     #    Quando Webmotors (workstream B) chegar, webmotors_mediana terá dado real.
     #    Auto Avaliar ref: preço de referência da própria plataforma quando disponível.
-    preco_giro_fipe = int(mercado.webmotors_mediana)
+    #    fator_km calibra a âncora pela km do lote vs km mediana do mercado:
+    #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
+    f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
+    preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
     preco_giro_aa: Optional[int] = None
     if mercado.auto_avaliar_ref is not None:
-        preco_giro_aa = min(mercado.auto_avaliar_ref, mercado.webmotors_mediana)
+        preco_giro_aa = int(round(
+            min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km
+        ))
     # Consolidado = o mais conservador entre os dois (mais baixo preço de giro
     # => preço-alvo de lance também mais baixo => decisão mais cautelosa).
     preco_giro = min(preco_giro_fipe, preco_giro_aa) if preco_giro_aa is not None else preco_giro_fipe
@@ -169,9 +175,16 @@ def precificar(
         taxa_desc = f"R${taxa_leilao_fixa} fixo"
     else:
         taxa_desc = f"{taxa_leilao_pct:.0%} do lance max"
+    # f_km só aparece na justificativa quando houve ajuste de fato (dados disponíveis).
+    km_txt = ""
+    if f_km != 1.0:
+        km_txt = (
+            f" f_km={f_km:.2f} (km={lote.km}, "
+            f"km_mercado={mercado.webmotors_km_mediana})"
+        )
     justificativa = (
         f"preco_giro=R${preco_giro} (fipe={preco_giro_fipe}"
-        f"{f', aa={preco_giro_aa}' if preco_giro_aa is not None else ''}) "
+        f"{f', aa={preco_giro_aa}' if preco_giro_aa is not None else ''}){km_txt} "
         f"(FIPE={mercado.fipe}{aa_txt}, WM_p25={mercado.webmotors_p25}) "
         f"reforma=R${reforma.custo_total} frete=R${frete_incluso} "
         f"taxas≈R${taxas_leilao_max} ({taxa_desc}) op=R${custo_op} "

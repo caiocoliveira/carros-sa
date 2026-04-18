@@ -32,6 +32,7 @@ HEADER = [
     "Modelo",
     "Ano",
     "Cidade",
+    "Loja",
     "Fim do Leilão",
     "KM",
     "Lance Atual (R$)",
@@ -201,11 +202,13 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
+            loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo}",
                 "ano": lote.ano,
                 "cidade": lote.origem_cidade or "—",
+                "loja": loja_raw or "—",
                 "fim_em": fim_em_str,
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
@@ -278,6 +281,7 @@ class SheetsExporter:
                 r["modelo"],
                 r["ano"],
                 r["cidade"],
+                r["loja"],
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
@@ -454,6 +458,12 @@ class SheetsExporter:
                 "Auto Avaliar (detalhe)",
                 "Campo origem_cidade do lote (onde o carro está pra retirada); '—' se não informado",
                 "Input de frete e logística — cidades distantes do pátio aumentam custo de trazer o carro",
+            ],
+            [
+                "Loja",
+                "Auto Avaliar (listagem)",
+                "Nome da loja e do grupo anunciante extraídos das últimas linhas do card (ex.: 'SN VW UDI MATRIZ · GRUPO SAGA SEMINOVOS'); '—' se o card não trouxe ou é coleta antiga",
+                "Identifica quem está vendendo — ajuda a reconhecer rede recorrente, mapear preferências de loja e filtrar vendedores problemáticos",
             ],
             [
                 "Fim do Leilão",

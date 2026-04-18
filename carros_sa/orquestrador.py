@@ -44,7 +44,7 @@ from carros_sa.models import (
     LaudoEstruturado,
 )
 from carros_sa.precificador import precificar
-from carros_sa.scraping.parsers import parse_card_lines, parse_detalhe
+from carros_sa.scraping.parsers import extrair_loja_do_card, parse_card_lines, parse_detalhe
 from carros_sa.scraping.scraper_autoavaliar import (
     baixar_pdf,
     coletar_detalhe,
@@ -308,9 +308,21 @@ def _persistir_flags_no_lote(lote: Lote, flags, session: Session) -> None:
     session.add(lote)
 
 
-def _upsert_lote(lote_raw: LoteRaw, session: Session) -> Lote:
-    """Persiste ou atualiza Lote no SQLite. Retorna o objeto persistido."""
+def _upsert_lote(
+    lote_raw: LoteRaw, session: Session, *, loja: Optional[str] = None
+) -> Lote:
+    """Persiste ou atualiza Lote no SQLite. Retorna o objeto persistido.
+
+    `loja` é mergeado em `raw_json["loja"]` quando informado — não faz parte do
+    contrato LoteRaw, fica como campo adicional pra sobreviver em reprocessos.
+    """
     existente = session.get(Lote, lote_raw.lote_id)
+    raw_json = lote_raw.model_dump(mode="json")
+    if loja:
+        raw_json["loja"] = loja
+    elif existente and isinstance(existente.raw_json, dict) and existente.raw_json.get("loja"):
+        # Preserva loja de coleta anterior quando a atual não trouxe o dado.
+        raw_json["loja"] = existente.raw_json["loja"]
     row = Lote(
         id=lote_raw.lote_id,
         leilao=lote_raw.leilao,
@@ -323,7 +335,7 @@ def _upsert_lote(lote_raw: LoteRaw, session: Session) -> Lote:
         fim_em=lote_raw.fim_em,
         origem_cidade=lote_raw.origem_cidade,
         origem_uf=lote_raw.origem_uf,
-        raw_json=lote_raw.model_dump(mode="json"),
+        raw_json=raw_json,
         scraped_at=datetime.utcnow(),
     )
     if existente:
@@ -662,8 +674,9 @@ async def orquestrar(
     for card in cards:
         try:
             lote_raw = parse_card_lines(card["lines"], card["loteId"], card["href"])
+            loja = extrair_loja_do_card(card["lines"])
             existente = session.get(Lote, lote_raw.lote_id)
-            _upsert_lote(lote_raw, session)
+            _upsert_lote(lote_raw, session, loja=loja)
             if not existente:
                 lotes_ids_novos.append(lote_raw.lote_id)
         except Exception:

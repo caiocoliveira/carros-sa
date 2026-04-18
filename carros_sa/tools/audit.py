@@ -58,6 +58,7 @@ CHECKS: Dict[str, Validator] = {
         else None
     ),
     "Cidade": lambda v, r: None,  # "—" é legítimo (lote sem origem_cidade declarada)
+    "Loja": lambda v, r: None,    # "—" é legítimo (coleta antiga sem o campo em raw_json)
     "Fim do Leilão": lambda v, r: None,  # pode ser "—" para lotes showroom
     "KM": lambda v, r: (
         "KM absurdo (>800k ou <0)" if v is not None and (v > 800_000 or v < 0) else None
@@ -141,7 +142,7 @@ CHECKS: Dict[str, Validator] = {
 
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
-# Chaves do dict interno: lote_id, modelo, ano, cidade, fim_em, km, lance_atual,
+# Chaves do dict interno: lote_id, modelo, ano, cidade, loja, fim_em, km, lance_atual,
 # preco_max, fipe, preco_giro_fipe, preco_giro_aa, fipe_pct_lance_minimo,
 # roi_pct, dias_giro, roi_anualizado, fator_risco, severidade, motor_ok,
 # reforma_estimada, frete, justificativa, url, scraped_at, rank, situacao,
@@ -153,6 +154,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Modelo": lambda r: r["modelo"],
     "Ano": lambda r: r["ano"],
     "Cidade": lambda r: r["cidade"],
+    "Loja": lambda r: r["loja"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
@@ -231,11 +233,13 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             except Exception:
                 scraped_at_str = str(lote.scraped_at)
 
+        loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
         rows.append({
             "lote_id": av.lote_id,
             "modelo": f"{lote.marca} {lote.modelo}".strip(),
             "ano": lote.ano,
             "cidade": lote.origem_cidade or "—",
+            "loja": loja_raw or "—",
             "marca": lote.marca,
             "modelo_raw": lote.modelo,
             "fim_em": fim_em_str,

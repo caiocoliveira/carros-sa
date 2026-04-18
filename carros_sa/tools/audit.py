@@ -25,7 +25,7 @@ from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
-SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais", "⚠ Encerrado"}
+SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 SEVERIDADES_VALIDAS = {"nenhuma", "leve", "média", "media", "grave", "estrutural", "—", None}
 MOTOR_VALIDOS = {"Sim", "NÃO", "—", True, False, None}
 POPULARIDADE_VALIDA = {"blockbuster", "popular", "normal", "nicho", "iliquido", "—", None}
@@ -36,8 +36,6 @@ Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
 
 
 def _situacao(row: Dict[str, Any]) -> str:
-    if row["encerrado"]:
-        return "⚠ Encerrado"
     return "✓ Viável" if row["viavel"] else "✗ Caro demais"
 
 
@@ -171,9 +169,9 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
 def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
     """Últimas N avaliações com JOIN Lote + LEFT JOIN LaudoCache, ordenadas e ranqueadas.
 
-    Espelha `SheetsExporter._query` de forma simplificada — o critério de ordenação
-    é o mesmo (encerrados últimos, viáveis primeiro, maior folga depois) pra que
-    o Rank auditado seja o mesmo Rank que apareceria na planilha.
+    Espelha `SheetsExporter._query` — encerrados são filtrados, ativos viáveis
+    vêm primeiro, desempate por folga de lance. Rank auditado coincide com o
+    que o operador vê na planilha.
     """
     avaliacoes = session.exec(
         select(AvaliacaoLote).order_by(AvaliacaoLote.criado_em.desc()).limit(sample_size)
@@ -253,10 +251,10 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "encerrado": encerrado,
         })
 
-    # Ordenação espelha SheetsExporter.exportar — pra o Rank auditado coincidir
-    # com o que o operador veria.
+    # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
+    # primeiro, desempate por folga de lance.
+    rows = [r for r in rows if not r["encerrado"]]
     rows.sort(key=lambda r: (
-        1 if r["encerrado"] else 0,
         0 if r["viavel"] else 1,
         -(r["preco_max"] - r["lance_atual"]),
     ))

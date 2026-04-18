@@ -119,10 +119,17 @@ async def _run(
                 lotes = [l for l in lotes if l.fim_em is not None and l.fim_em > agora]
                 console.print(f"[cyan]Filtro ativo: só leilões abertos → {len(lotes)} candidatos[/cyan]")
             if somente_laudo_pendente:
-                # Carrega laudos em uma query só e filtra em memória; evita N+1.
+                # Carrega só (lote_id, confidence) — IMPORTANTE: tupla, não entity.
+                # Se selecionarmos LaudoCache inteiro, os objetos vão pra identity
+                # map; depois `session.commit()` no meio de `_pipeline_lote` expira
+                # eles, e `session.get(LaudoCache, lote_id)` no `_upsert_laudo_cache`
+                # retorna None pra rows expirados → tenta INSERT → UNIQUE viola.
+                # (sintoma observado 2026-04-18 após processar ~105/139 lotes).
                 laudos = {
-                    lc.lote_id: lc.confidence
-                    for lc in session.exec(select(LaudoCache)).all()
+                    row[0]: row[1]
+                    for row in session.exec(
+                        select(LaudoCache.lote_id, LaudoCache.confidence)
+                    ).all()
                 }
                 lotes = [
                     l for l in lotes

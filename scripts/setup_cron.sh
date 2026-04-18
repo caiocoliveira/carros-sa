@@ -41,8 +41,10 @@ if [[ ! -f "$REPO_DIR/.env" ]]; then
     echo "Aviso: .env não encontrado. Copie .env.example e preencha antes de rodar."
 fi
 
-# Adiciona ao cron (idempotente — remove entrada anterior antes)
-(crontab -l 2>/dev/null | grep -v "$CRON_MARK"; echo "$CRON_LINE") | crontab -
+# Adiciona ao cron (idempotente — remove entrada anterior antes).
+# `grep -v` retorna 1 quando crontab está vazio ou não tem a marca; com
+# `set -e` + pipefail isso matava o script. `|| true` neutraliza.
+(crontab -l 2>/dev/null | grep -v "$CRON_MARK" || true; echo "$CRON_LINE") | crontab -
 
 echo "✓ Cron configurado:"
 echo "  Horário: todo dia às 07:00 e 13:00"

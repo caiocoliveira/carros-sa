@@ -161,12 +161,21 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Arquivos:**
   - [`carros_sa/scraping/scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) — `_coletar_listagem_cidade` agora itera `?p=1..N` em vez de scroll infinito. Lê `max(data-page)` do DOM de paginação (`<a class="button" data-page="N">`) e limita a `_MAX_PAGINAS=20` como guard-rail.
   - [`tests/test_scraper_paginacao.py`](tests/test_scraper_paginacao.py) — 5 testes com `FakePage` stub (1 página, N páginas, dedup cross-page, filtro de horizonte pós-agregação, limite de runaway).
-- **Diagnóstico (via Chrome MCP na triagem ao vivo):** Uberlândia/MG mostra 148 lotes no contador mas o scraper só pegava ~48 (página 1). Causa: site usa paginação real com param `p` (não scroll infinito). Além disso, todos os 148 lotes encerram no MESMO dia — Auto Avaliar roda ciclo diário, então "horizonte 7 dias" é uma abstração que na prática é sempre ~20h máx.
-- **Impacto:** triagem passa a cobrir ~3x mais inventário por run. O feeling do usuário de "leilões muito em cima" vinha da planilha magra, não do horizonte curto — a distribuição real de `fim_em` no DB (0 lotes além de 24h, 54/63 já encerrados) confirmou que o problema era coleta incompleta.
+- **Diagnóstico (via Chrome MCP na triagem ao vivo):** Uberlândia/MG mostra 148-169 lotes no contador mas o scraper só pegava ~48 (página 1). Causa: site usa paginação real com param `p` (não scroll infinito).
+- **Impacto:** triagem passa a cobrir ~3x mais inventário por run. O feeling do usuário de "leilões muito em cima" vinha de duas causas combinadas: (1) planilha magra pela página 1 só, e (2) bug no parser de timer que dropava lotes multi-dia (ver workstream P).
 - **Limitações conhecidas:**
   - Com 4 páginas × 1 request = 4 requests extra por cidade (vs 1 antes). Raio de 61 cidades × 4 = 244 requests/run. Se Auto Avaliar apertar rate-limit, talvez precise reduzir raio ou adicionar backoff.
   - A lógica de descoberta de `total_paginas` depende do seletor `a.button[data-page]`. Se o site mudar o DOM de paginação, cai no fallback de 1 página (regressão silenciosa pro comportamento antigo — conservador, não quebra o pipeline).
-  - "Horizonte 7 dias" virou parâmetro morto na prática até a plataforma mudar o ciclo. Mantido no código pela genericidade do contrato.
+
+### P — Parser aceita timer multi-dia "N dia, HH:MM:SS" ✅
+- **Branch:** `claude/vigorous-lichterman-f70777`
+- **Arquivos:**
+  - [`carros_sa/scraping/parsers.py`](carros_sa/scraping/parsers.py) — `_TIMER_RE` agora aceita prefixo opcional `N dia[s][,]`; novo `_TIMER_DIAS_RE` extrai dias+h+m+s; `_timer_para_fim_em` tenta multi-dia primeiro, cai no HH:MM:SS puro.
+  - [`tests/test_parsers.py`](tests/test_parsers.py) — 4 testes novos: "1 dia", "2 dias" (plural), sem vírgula (robustez), gold do card real da Saveiro SHOWROOM visto em print (2026-04-17).
+- **Diagnóstico:** Usuário mostrou print da página 4 de Uberlândia com card "1 dia, 18:52:23". O parser tinha regex `^\d{1,3}:\d{2}:\d{2}` que só casava HH:MM:SS — com "1 dia, ..." na frente, virava `fim_em=None` silenciosamente. Isso explica os 49/112 lotes do DB sem `fim_em` que eu tinha atribuído erroneamente a "ciclo diário" — eram lotes de 2+ dias sumindo.
+- **Autocorreção:** memória persistente atualizada — **NÃO presumir ciclo diário no Auto Avaliar**. Lotes multi-dia existem; o que falhou antes foi inspeção superficial (só página 1 de `order=hdt`) + JS do Chrome MCP usando o mesmo regex bugado do Python.
+- **Limitações conhecidas:**
+  - O regex aceita até `\d+` dias sem teto. Guard-rail implícito vem do filtro `fim_em > limite` em `_coletar_listagem_cidade` com `horizonte_dias=7` — lotes >7d já ficam de fora do pipeline.
 
 ### Q — Auditoria automática de colunas (SessionEnd hook) ✅
 - **Branch:** `claude/generic-hopping-wadler`

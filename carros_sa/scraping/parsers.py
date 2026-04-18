@@ -20,7 +20,12 @@ from carros_sa.models import CategoriaVeiculo, LoteRaw
 _PRECO_RE = re.compile(r"^\d{1,3}(?:\.\d{3})*,\d{2}$")
 _ANO_RE = re.compile(r"^(\d{4})/(\d{4})$")
 _KM_RE = re.compile(r"^\d{1,3}(?:\.\d{3})*$")
-_TIMER_RE = re.compile(r"^\d{1,3}:\d{2}:\d{2}(?::\d{2})?$")
+_TIMER_RE = re.compile(
+    r"^(?:\d+\s*dias?[,\s]+\s*)?\d{1,3}:\d{2}:\d{2}(?::\d{2})?$"
+)
+_TIMER_DIAS_RE = re.compile(
+    r"^(\d+)\s*dias?[,\s]+\s*(\d{1,3}):(\d{2}):(\d{2})(?::\d{2})?$"
+)
 _PCT_RE = re.compile(r"^(\d{1,3})%$")
 _CIDADE_UF_RE = re.compile(r"^([^/]+)/([A-Z]{2})$", re.IGNORECASE)
 
@@ -32,19 +37,30 @@ def _parse_br_int(s: str) -> int:
 
 
 def _timer_para_fim_em(agora: datetime, timer: str) -> Optional[datetime]:
-    """Timer HH:MM:SS[:cs] → datetime relativo a agora.
+    """Timer do card → datetime absoluto.
 
-    O site mostra o tempo restante como HH:MM:SS e, em alguns cards, acrescenta
-    centésimos de segundo (ex.: '01:46:45:17'). Centésimos são descartados.
-    Implementação anterior tratava como DD:HH:MM[:SS] e gerava datetimes dias
-    ou semanas no futuro — ver gold em data/detalhes/21867780.json.
+    Dois formatos no DOM (ambos confirmados ao vivo):
+    - `HH:MM:SS[:cs]` — lote encerrando em <24h (centésimos opcionais, descartados)
+    - `N dia[s][,] HH:MM:SS[:cs]` — lote encerrando em ≥24h (ex.: "1 dia, 18:52:23")
+
+    Sem o formato multi-dia, lotes de 2+ dias viravam `fim_em=None` e sumiam
+    da planilha (49/112 lotes do DB em 2026-04-17).
     """
+    m_dias = _TIMER_DIAS_RE.match(timer)
+    if m_dias:
+        dias, h, mm, s = m_dias.groups()
+        try:
+            delta = timedelta(days=int(dias), hours=int(h), minutes=int(mm), seconds=int(s))
+            return agora + delta
+        except ValueError:
+            return None
+
     parts = timer.split(":")
     if len(parts) not in (3, 4):
         return None
-    h, m, s = parts[0], parts[1], parts[2]
+    h, mm, s = parts[0], parts[1], parts[2]
     try:
-        delta = timedelta(hours=int(h), minutes=int(m), seconds=int(s))
+        delta = timedelta(hours=int(h), minutes=int(mm), seconds=int(s))
         return agora + delta
     except ValueError:
         return None

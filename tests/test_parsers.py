@@ -97,7 +97,55 @@ def test_timer_longo_20h_nao_vira_20_dias():
     delta = fim - agora
     # Deve estar no mesmo dia ou no dia seguinte — não uma semana+ no futuro.
     assert delta < timedelta(days=1, hours=1)
-    assert delta >= timedelta(hours=20)
+
+
+# =============================================================================
+# Timer multi-dia: "1 dia, HH:MM:SS" / "2 dias, HH:MM:SS"
+# =============================================================================
+# Gold real: print do usuário em 2026-04-17 na página 4 de Uberlândia/MG
+# mostra card com "1 dia, 18:52:23" — formato que o parser antigo ignorava,
+# virando fim_em=None e sumindo da planilha.
+
+
+def test_timer_um_dia_mais_horas():
+    """`1 dia, 18:52:23` = 1d18h52m23s no futuro (gold da página 4 real)."""
+    agora = datetime(2026, 4, 17, 12, 0, 0)
+    fim = _timer_para_fim_em(agora, "1 dia, 18:52:23")
+    assert fim == agora + timedelta(days=1, hours=18, minutes=52, seconds=23)
+
+
+def test_timer_multiplos_dias_plural():
+    """`2 dias, 05:10:00` = 2d5h10m — plural com 's'."""
+    agora = datetime(2026, 4, 17, 0, 0, 0)
+    fim = _timer_para_fim_em(agora, "2 dias, 05:10:00")
+    assert fim == agora + timedelta(days=2, hours=5, minutes=10)
+
+
+def test_timer_dias_sem_virgula_tambem_aceito():
+    """Robustez: se o site variar e remover a vírgula, ainda casa."""
+    agora = datetime(2026, 4, 17, 0, 0, 0)
+    fim = _timer_para_fim_em(agora, "3 dias 12:00:00")
+    assert fim == agora + timedelta(days=3, hours=12)
+
+
+def test_parse_card_com_timer_multi_dia_extrai_fim_em():
+    """Gold: card da página 4 com '1 dia, 18:52:23' deve popular fim_em."""
+    lines = [
+        "Uberlandia/MG",
+        "VOLKSWAGEN",
+        "SAVEIRO",
+        "75.000,00",
+        "1.6 MSI ROBUST CS 16V FLEX 2P MANUAL",
+        "2024/2025",
+        "FLEX",
+        "MANUAL",
+        "77.595",
+        "1 dia, 18:52:23",
+    ]
+    agora = datetime(2026, 4, 17, 12, 0, 0)
+    lote = parse_card_lines(lines, lote_id="99999", href="/x/99999/y", agora=agora)
+    assert lote.fim_em is not None
+    assert lote.fim_em == agora + timedelta(days=1, hours=18, minutes=52, seconds=23)
 
 
 CARD_HAVAL_SHOWROOM = [

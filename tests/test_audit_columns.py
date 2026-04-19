@@ -147,47 +147,18 @@ class TestAuditHappyPath:
 
 class TestAuditDeteccao:
     def test_roi_absurdo_reportado(self):
-        """ROI > 500% sugere erro de cálculo — fora do racional econômico."""
+        """ROI anualizado > 1000% sugere erro de cálculo — fora do racional econômico."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=1000))
-            # preco_giro enorme vs preco_max minúsculo → ROI explode
+            # preco_giro enorme vs preco_max minúsculo → ROI no máximo explode,
+            # anualizado com dias_giro=30 vira ~5 dígitos.
             session.add(_avaliacao("L001", preco_max=1000, preco_giro=100_000,
-                                   reforma_estimada=0, frete_incluso=0))
+                                   reforma_estimada=0, frete_incluso=0,
+                                   dias_giro_estimado=30))
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"
-
-    def test_dias_giro_zero_reportado(self):
-        """dias_giro_estimado deve ser >=1; 0 ou negativo indica bug no calibrador."""
-        engine = _engine_mem()
-        with Session(engine) as session:
-            session.add(_lote("L001"))
-            session.add(_avaliacao("L001", dias_giro_estimado=0))
-            session.commit()
-        violacoes = audit(engine)
-        assert any("Dias até venda" in v for v in violacoes), f"Violacoes: {violacoes}"
-
-    def test_severidade_fora_do_dominio_reportada(self):
-        """Severidade do laudo só aceita nenhuma/leve/média/grave/estrutural."""
-        engine = _engine_mem()
-        with Session(engine) as session:
-            session.add(_lote("L001"))
-            session.add(_avaliacao("L001"))
-            session.add(_laudo("L001", severidade="catastrófica"))
-            session.commit()
-        violacoes = audit(engine)
-        assert any("Severidade" in v for v in violacoes), f"Violacoes: {violacoes}"
-
-    def test_fator_risco_fora_dos_bounds_reportado(self):
-        """Fator risco típico do precificador fica em [0.5, 1.5]."""
-        engine = _engine_mem()
-        with Session(engine) as session:
-            session.add(_lote("L001"))
-            session.add(_avaliacao("L001", fator_risco=3.0))
-            session.commit()
-        violacoes = audit(engine)
-        assert any("Fator Risco" in v for v in violacoes), f"Violacoes: {violacoes}"
 
     def test_reforma_negativa_reportada(self):
         engine = _engine_mem()
@@ -229,26 +200,26 @@ class TestAuditAgregacao:
             for i in range(3):
                 lid = f"L00{i+1}"
                 session.add(_lote(lid))
-                # 3 lotes com fator_risco absurdo
-                session.add(_avaliacao(lid, fator_risco=3.0))
+                # 3 lotes com reforma_estimada negativa
+                session.add(_avaliacao(lid, reforma_estimada=-100))
             session.commit()
         violacoes = audit(engine)
-        risco = [v for v in violacoes if "Fator Risco" in v]
-        assert len(risco) == 1, f"Esperava uma única linha agregada, obtive: {risco}"
-        assert "3" in risco[0], f"Linha deveria reportar contagem de 3 linhas: {risco[0]}"
+        reforma = [v for v in violacoes if "Reforma" in v]
+        assert len(reforma) == 1, f"Esperava uma única linha agregada, obtive: {reforma}"
+        assert "3" in reforma[0], f"Linha deveria reportar contagem de 3 linhas: {reforma[0]}"
 
     def test_problemas_em_colunas_diferentes_reportados_separados(self):
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", km=5_000_000))  # KM absurdo
-            session.add(_avaliacao("L001", fator_risco=3.0))  # Fator risco fora dos bounds
+            session.add(_avaliacao("L001", reforma_estimada=-50))  # Reforma negativa
 
-            session.add(_lote("L002"))  # lote normal
-            session.add(_avaliacao("L002"))  # avaliação normal
-            session.add(_laudo("L002", severidade="desconhecida"))  # severidade ruim
+            lote2 = _lote("L002", ano=1900)  # Ano fora da faixa
+            session.add(lote2)
+            session.add(_avaliacao("L002"))
             session.commit()
         violacoes = audit(engine)
         texto = "\n".join(violacoes)
         assert "KM" in texto
-        assert "Fator Risco" in texto
-        assert "Severidade" in texto
+        assert "Reforma" in texto
+        assert "Ano" in texto

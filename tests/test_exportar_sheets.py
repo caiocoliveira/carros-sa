@@ -187,12 +187,12 @@ class TestSheetsExporterQuery:
 
         rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         # row[0] = banner, row[1] = header, row[2] = rank 1, row[3] = rank 2
-        idx_lote_id = HEADER.index("Lote ID")
+        idx_modelo = HEADER.index("Modelo")
         idx_situacao = HEADER.index("Situação")
-        # Rank 1 deve ser L001 (viável), rank 2 deve ser L002 (inviável)
-        assert rows[2][idx_lote_id] == "L001"
+        # Rank 1 deve ser L001 (Fiesta, viável), rank 2 deve ser L002 (Compass, inviável)
+        assert "Fiesta" in rows[2][idx_modelo]
         assert "Viável" in rows[2][idx_situacao]
-        assert rows[3][idx_lote_id] == "L002"
+        assert "Compass" in rows[3][idx_modelo]
         assert "Caro" in rows[3][idx_situacao]
 
     def test_exportar_sem_laudo_marca_nao_analisado(self):
@@ -221,16 +221,13 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
         assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
-        assert data_row[HEADER.index("Severidade Laudo")] == "não analisado"
-        assert data_row[HEADER.index("Motor OK")] == "—"
         # Numéricos derivados de um laudo vazio viram traço: piso de R$ 1k em
-        # "Reforma Estimada" + ROI/preço-alvo calculados com reforma=piso seriam
+        # "Reforma" + ROI/preço-alvo calculados com reforma=piso seriam
         # tudo chute, então a planilha esconde.
-        assert data_row[HEADER.index("Reforma Estimada (R$)")] == "—"
+        assert data_row[HEADER.index("Reforma (R$)")] == "—"
         assert data_row[HEADER.index("Lance Máximo (R$)")] == "—"
-        assert data_row[HEADER.index("ROI se pagar o máximo (%)")] == "—"
         assert data_row[HEADER.index("ROI anualizado (%)")] == "—"
-        assert "não dê lance" in data_row[HEADER.index("Racional Reforma")].lower()
+        assert data_row[HEADER.index("Lucro/mês (R$)")] == "—"
 
     def test_exportar_laudo_fallback_confidence_baixa_marca_nao_analisado(self):
         """LaudoCache com confidence=0.5 é fallback `_laudo_sem_pdf` — trata igual a
@@ -260,7 +257,7 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
         assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
-        assert data_row[HEADER.index("Reforma Estimada (R$)")] == "—"
+        assert data_row[HEADER.index("Reforma (R$)")] == "—"
 
     def test_exportar_laudo_confidence_alta_mantem_valores(self):
         """LaudoCache com confidence>=0.6 é laudo real — mantém campos numéricos."""
@@ -285,8 +282,7 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
         assert "LAUDO NÃO ANALISADO" not in data_row[HEADER.index("Situação")]
-        assert data_row[HEADER.index("Severidade Laudo")] == "leve"
-        assert data_row[HEADER.index("Reforma Estimada (R$)")] == 3000
+        assert data_row[HEADER.index("Reforma (R$)")] == 3000
 
     def test_exportar_sem_avaliacoes_retorna_zero(self):
         """Empresa sem avaliações deve retornar 0 sem erros."""
@@ -340,7 +336,7 @@ class TestSheetsExporterQuery:
         assert "Viável" in rows[2][idx_situacao]
 
     def test_exportar_url_como_hyperlink_clicavel(self):
-        """A coluna URL deve virar =HYPERLINK(url, "Abrir anúncio") pra célula ficar curta e clicável."""
+        """A coluna Anúncio deve virar =HYPERLINK(url, "Abrir anúncio") pra célula ficar curta e clicável."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))  # url = https://autoavaliar.com.br/lote/L001
@@ -359,7 +355,7 @@ class TestSheetsExporterQuery:
                 exporter.exportar("uberlandia_mg", session)
 
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_url = HEADER.index("URL")
+        idx_url = HEADER.index("Anúncio")
         url_cell = rows[2][idx_url]
         assert url_cell.startswith("=HYPERLINK(")
         assert "https://autoavaliar.com.br/lote/L001" in url_cell
@@ -392,7 +388,7 @@ class TestSheetsExporterQuery:
                 exporter.exportar("uberlandia_mg", session)
 
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_laudo = HEADER.index("Laudo (PDF)")
+        idx_laudo = HEADER.index("Laudo")
         cell = rows[2][idx_laudo]
         assert cell.startswith("=HYPERLINK(")
         assert "doc-b2b/laudos/L001/laudo.pdf" in cell
@@ -427,7 +423,7 @@ class TestSheetsExporterQuery:
                 exporter.exportar("uberlandia_mg", session)
 
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_laudo = HEADER.index("Laudo (PDF)")
+        idx_laudo = HEADER.index("Laudo")
         assert rows[2][idx_laudo] == "—"
 
     def test_exportar_laudo_url_ausente_vira_placeholder(self):
@@ -450,7 +446,7 @@ class TestSheetsExporterQuery:
                 exporter.exportar("uberlandia_mg", session)
 
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_laudo = HEADER.index("Laudo (PDF)")
+        idx_laudo = HEADER.index("Laudo")
         assert rows[2][idx_laudo] == "—"
 
     def test_exportar_url_vazia_nao_gera_hyperlink(self):
@@ -475,10 +471,10 @@ class TestSheetsExporterQuery:
                 exporter.exportar("uberlandia_mg", session)
 
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_url = HEADER.index("URL")
+        idx_url = HEADER.index("Anúncio")
         assert rows[2][idx_url] == "—"
 
-    def test_reaplica_formato_numerico_em_reforma_e_frete(self):
+    def test_reaplica_formato_numerico_em_reforma_e_lance_maximo(self):
         """ws.clear() preserva formato de célula; exporter DEVE reaplicar NUMBER
         nas colunas R$ senão inteiros herdam formato DATE antigo e viram datas."""
         engine = _engine_mem()
@@ -505,17 +501,17 @@ class TestSheetsExporterQuery:
         # Mapeia range→pattern pra consulta fácil
         ranges = {f["range"]: f["format"]["numberFormat"]["pattern"] for f in formatos}
 
-        # Reforma e Frete (o bug reportado) viram NUMBER, não DATE
-        reforma_letter = _col_letter(HEADER.index("Reforma Estimada (R$)"))
-        frete_letter = _col_letter(HEADER.index("Frete (R$)"))
+        # Reforma e Lance Máximo viram NUMBER, não DATE
+        reforma_letter = _col_letter(HEADER.index("Reforma (R$)"))
+        max_letter = _col_letter(HEADER.index("Lance Máximo (R$)"))
         assert ranges[f"{reforma_letter}:{reforma_letter}"] == "#,##0"
-        assert ranges[f"{frete_letter}:{frete_letter}"] == "#,##0"
+        assert ranges[f"{max_letter}:{max_letter}"] == "#,##0"
 
     def test_col_letter_converte_indices(self):
         """Índice 0-based → letra de coluna (A, B, ..., Z, AA)."""
         assert _col_letter(0) == "A"
-        assert _col_letter(17) == "R"   # Reforma Estimada
-        assert _col_letter(18) == "S"   # Frete
+        assert _col_letter(17) == "R"
+        assert _col_letter(18) == "S"
         assert _col_letter(25) == "Z"
         assert _col_letter(26) == "AA"
 
@@ -526,7 +522,7 @@ class TestSheetsExporterQuery:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
     def test_exportar_roi_baseado_no_lance_maximo(self):
-        """ROI deve ser calculado sobre o lance máximo, não sobre lance_atual."""
+        """ROI anualizado deve ser calculado sobre o lance máximo, não sobre lance_atual."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=20000))
@@ -547,10 +543,12 @@ class TestSheetsExporterQuery:
                 exporter.exportar("uberlandia_mg", session)
 
         rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
-        idx_roi = HEADER.index("ROI se pagar o máximo (%)")
+        idx_roi = HEADER.index("ROI anualizado (%)")
         roi_val = rows[2][idx_roi]
-        # ROI ≈ 10-12% (baseado no lance máximo, não no lance atual de 20k)
-        assert 5 < roi_val < 20
+        # ROI no máximo ≈ 11%; sem dias_giro preenchido, fallback = 90d
+        # ROI anualizado ≈ 11 × 365/90 ≈ 44%. Faixa larga pra acomodar pequenas
+        # variações do preco_alvo/fator_risco.
+        assert 20 < roi_val < 80
 
 
 class TestSheetsExporterFimEmObrigatorio:
@@ -587,8 +585,9 @@ class TestSheetsExporterFimEmObrigatorio:
         rows = mock_ws.update.call_args_list[0][0][0]
         # rows[0]=banner, rows[1]=header, rows[2]=L001 (único dado)
         assert len(rows) == 3
-        idx_lote_id = HEADER.index("Lote ID")
-        assert rows[2][idx_lote_id] == "L001"
+        idx_modelo = HEADER.index("Modelo")
+        # Sem Lote ID na planilha, confirmamos via Modelo — só L001 (Fiesta) sobreviveu
+        assert "Fiesta" in rows[2][idx_modelo]
 
     def test_sem_fim_em_e_sem_avaliacoes_retorna_zero_limpo(self):
         """Todos os lotes sem fim_em → export vazio (só banner+header), sem crash."""
@@ -706,10 +705,12 @@ class TestSheetsExporterEncerrados:
 
         assert n == 2
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_lote_id = HEADER.index("Lote ID")
-        lote_ids = [rows[i][idx_lote_id] for i in range(2, len(rows))]
-        assert "L003" not in lote_ids
-        assert set(lote_ids) == {"L001", "L002"}
+        idx_modelo = HEADER.index("Modelo")
+        modelos_exportados = {rows[i][idx_modelo] for i in range(2, len(rows))}
+        # L003 = Compass — encerrado, não entra; L001 = Fiesta e L002 = Gol sobrevivem
+        assert not any("Compass" in m for m in modelos_exportados)
+        assert any("Fiesta" in m for m in modelos_exportados)
+        assert any("Gol" in m for m in modelos_exportados)
 
 
 class TestSheetsExporterTimestamp:
@@ -743,32 +744,6 @@ class TestSheetsExporterTimestamp:
         hoje = datetime.now().strftime("%d/%m/%Y")
         assert hoje in banner
 
-    def test_coluna_coletado_em_reflete_scraped_at_do_lote(self):
-        """Coluna 'Coletado em' deve mostrar o scraped_at do LOTE, não o timestamp do export."""
-        engine = _engine_mem()
-        scraped_at_fixo = datetime(2026, 4, 14, 22, 0)
-        with Session(engine) as session:
-            lote = _lote("L001")
-            lote.scraped_at = scraped_at_fixo
-            session.add(lote)
-            session.add(_avaliacao("L001"))
-            session.commit()
-
-        mock_ws = MagicMock()
-        mock_sh = MagicMock()
-        mock_sh.worksheet.return_value = mock_ws
-        mock_gc = MagicMock()
-        mock_gc.open_by_key.return_value = mock_sh
-
-        with patch("gspread.service_account", return_value=mock_gc):
-            exporter = _exporter()
-            with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
-
-        rows = mock_ws.update.call_args_list[0][0][0]
-        idx_coletado = HEADER.index("Coletado em")
-        assert rows[2][idx_coletado] == "14/04/2026 22:00"
-
     def test_freeze_inclui_banner_e_header(self):
         """Congelamento deve cobrir banner (linha 1) + header (linha 2)."""
         engine = _engine_mem()
@@ -790,65 +765,6 @@ class TestSheetsExporterTimestamp:
 
         # O primeiro freeze é da aba de dados (o segundo é o Glossário)
         mock_ws.freeze.assert_any_call(rows=2)
-
-
-class TestReformaRacional:
-    """Racional do valor da reforma aparece na planilha como coluna dedicada."""
-
-    def test_header_inclui_coluna_racional_reforma(self):
-        assert "Racional Reforma" in HEADER
-
-    def test_exporta_racional_reforma_da_avaliacao(self):
-        engine = _engine_mem()
-        racional = "Coluna B esq. solda+pintura R$3800 · Alinhamento chassi R$2800"
-        with Session(engine) as session:
-            session.add(_lote("L001"))
-            av = _avaliacao("L001", score_roi=0.3)
-            av.reforma_racional = racional
-            session.add(av)
-            session.add(_laudo("L001"))
-            session.commit()
-
-        mock_ws = MagicMock()
-        mock_sh = MagicMock()
-        mock_sh.worksheet.return_value = mock_ws
-        mock_gc = MagicMock()
-        mock_gc.open_by_key.return_value = mock_sh
-
-        with patch("gspread.service_account", return_value=mock_gc):
-            exporter = _exporter()
-            with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
-
-        rows = mock_ws.update.call_args_list[0][0][0]
-        idx_racional = HEADER.index("Racional Reforma")
-        # row[2] é a primeira linha de dados (rank 1)
-        assert rows[2][idx_racional] == racional
-
-    def test_racional_ausente_mostra_travessao(self):
-        """Avaliações antigas sem racional_reforma populado exibem '—' sem quebrar."""
-        engine = _engine_mem()
-        with Session(engine) as session:
-            session.add(_lote("L001"))
-            av = _avaliacao("L001")  # reforma_racional fica None
-            session.add(av)
-            session.add(_laudo("L001"))
-            session.commit()
-
-        mock_ws = MagicMock()
-        mock_sh = MagicMock()
-        mock_sh.worksheet.return_value = mock_ws
-        mock_gc = MagicMock()
-        mock_gc.open_by_key.return_value = mock_sh
-
-        with patch("gspread.service_account", return_value=mock_gc):
-            exporter = _exporter()
-            with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
-
-        rows = mock_ws.update.call_args_list[0][0][0]
-        idx_racional = HEADER.index("Racional Reforma")
-        assert rows[2][idx_racional] == "—"
 
 
 class TestCidadesFreteSheet:

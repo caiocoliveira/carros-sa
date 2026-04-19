@@ -223,6 +223,22 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Gemini 2.5 Flash teve overload (`ServerError`) durante o reprocessamento — 5/9 lotes caíram em fallback textual (confidence 0.5). Rodar de novo quando API normalizar, ou garantir `ANTHROPIC_API_KEY` ativa pra cascatear pro Haiku.
   - Allowlist cobre os hosts observados até hoje. Se Auto Avaliar mudar pra CDN novo (ex.: Cloudflare próprio), `pareceLaudo()` rejeita silenciosamente e cai no fallback do modal — monitorar taxa de `pdf_ok=False` na triagem pra detectar.
 
+### R.2 — Motivo estruturado de laudo faltante + audit script ✅
+- **Branch:** `claude/great-turing-1RbHY`
+- **Arquivos:**
+  - [`carros_sa/scraping/parsers.py`](carros_sa/scraping/parsers.py) — `DetalheFlags.laudo_missing_reason` + constantes `MISSING_URL_NAO_CAPTURADA`/`MISSING_SEM_LAUDO`/`MISSING_BODY_VAZIO` + `detectar_motivo_laudo_ausente()`. `parse_detalhe` popula o campo automaticamente quando `laudo_pdf_url` vem nulo.
+  - [`carros_sa/scraping/scraper_detalhe.py`](carros_sa/scraping/scraper_detalhe.py) — `_flags_to_dict` serializa o motivo + try/except no downloader marca `"download_falhou"` (+ `laudo_download_erro`) em `raw_json.detalhe` antes de propagar o erro.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — coluna "Laudo (PDF)" agora renderiza rótulos estruturados (`⚠ URL não capturada — re-scrape`, `⚠ Detalhe não coletado — re-scrape`, `⚠ Download falhou — retry`, `Laudo inexistente`) em vez de `—` ambíguo. Glossário atualizado.
+  - [`scripts/audit_laudos_faltantes.py`](scripts/audit_laudos_faltantes.py) — NOVO. Lista lotes ATIVOS sem PDF, agrupa por motivo, imprime hint de resolução, exit 1 quando há gap recuperável (pra servir de gate em cron). `make audit-laudos` exposto no Makefile.
+  - [`tests/test_laudo_missing_reason.py`](tests/test_laudo_missing_reason.py) — 16 testes cobrindo detector, parse_detalhe, persistência em raw_json (sucesso / download_falhou / url_nula) e rótulos do sheet.
+- **Diagnóstico (2026-04-19):** triagem de Uberlândia tinha 2 dos 10 lotes (Gol 21862502, Cruze 21865772) com `laudo_pdf_url=null` silencioso. Causa-raiz: coletor one-off via Chrome MCP não abriu o modal `LAUDO DO VEÍCULO` (lazy load). Antes disso, a planilha exibia apenas `—` na coluna Laudo — indistinguível de "anúncio sem laudo" → gap ficava invisível por semanas. O scraper ao vivo (`coletar_detalhe`) já tinha retry com click no modal (3 passadas), mas o caminho offline (`processar_detalhes.py` → cache JSON antigo) não, e nenhum lugar alertava que o gap era bug nosso.
+- **Como funciona:** 4 motivos taxonômicos, 3 "recuperáveis" (operador roda `make triagem` e o scraper ao vivo refaz com modal) + 1 legítimo (`sem_laudo` = anunciante declarou). `make audit-laudos` exit 1 quando há recuperável — pode virar gate pré-export. Gol/Cruze de hoje classificam como `url_nao_capturada` corretamente após re-processamento.
+- **Cobertura:** 16 testes novos — 333/333 passando na suíte completa.
+- **Limitações conhecidas:**
+  - Classificação depende de `body_text` coletado. Se o scraper nem chegou a pegar o innerText, motivo = `body_vazio`. Ambos resolvem com `make triagem`.
+  - `detectar_motivo_laudo_ausente()` tem allowlist positiva de rótulos ("LAUDO DO VEÍCULO", "Acessar laudo", etc). Se o Auto Avaliar mudar copy pra rótulo inédito, cai no path "None" (não classifica) e o lote some da auditoria. Monitorável via checagem periódica.
+  - Script não consegue re-scrape sozinho — exige `make triagem` com credenciais. Isso é proposital pra manter o script determinístico e livre de dependência de browser/rede.
+
 ### R.1 — Auto-fix de decoys persistidos + teste obrigatório ✅
 - **Arquivos:**
   - [`scripts/limpar_decoys_laudo.py`](scripts/limpar_decoys_laudo.py) — varre o DB, usa `is_laudo_pdf_url()` como fonte de verdade, zera `raw_json.detalhe.laudo_pdf_url` e derruba o `LaudoCache` correspondente pra forçar re-extração. Importável como `limpar_decoys(session, dry_run=True)` pra uso em teste.

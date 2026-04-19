@@ -244,6 +244,14 @@ def parse_card_lines(
 class DetalheFlags:
     """Sinais extraídos do HTML da página de detalhe, antes de gastar LLM."""
 
+    # Motivos taxonômicos para `laudo_pdf_url` ausente. Exposto pra planilha e
+    # pro audit script conseguirem distinguir "bug nosso" de "laudo realmente
+    # inexistente" — antes eram indistinguíveis ("—") e lotes com URL não
+    # capturada passavam despercebidos.
+    MISSING_URL_NAO_CAPTURADA = "url_nao_capturada"     # body menciona "LAUDO DO VEÍCULO" mas scraper não extraiu URL → bug, precisa re-scrape
+    MISSING_SEM_LAUDO = "sem_laudo"                      # anunciante declarou SEM LAUDO explicitamente
+    MISSING_BODY_VAZIO = "body_vazio"                    # detalhe não coletado (sem innerText) — re-scrape
+
     def __init__(
         self,
         *,
@@ -257,6 +265,7 @@ class DetalheFlags:
         ipva_pago: Optional[bool] = None,
         observacoes_anunciante: str = "",
         laudo_pdf_url: Optional[str] = None,
+        laudo_missing_reason: Optional[str] = None,
         similares_precos: list = None,
         preco_referencia_aa: Optional[int] = None,
         fipe_pct_lance_minimo: Optional[int] = None,
@@ -272,6 +281,7 @@ class DetalheFlags:
         self.ipva_pago = ipva_pago
         self.observacoes_anunciante = observacoes_anunciante
         self.laudo_pdf_url = laudo_pdf_url
+        self.laudo_missing_reason = laudo_missing_reason
         self.similares_precos = similares_precos or []
         self.preco_referencia_aa = preco_referencia_aa
         self.fipe_pct_lance_minimo = fipe_pct_lance_minimo
@@ -311,6 +321,42 @@ _RE_ENCERRADO = re.compile(
 _RE_LEILAO_ENCERRADO = re.compile(
     r"(?i)leil[aã]o\s+(encerrad[oa]|finalizad[oa]|vendid[oa])"
 )
+
+
+# Rótulos que indicam a presença do botão/link do laudo na página de detalhe.
+# Quando algum deles aparece no innerText mas `laudo_pdf_url` vem nulo, sabemos
+# que o scraper teve chance de clicar mas falhou (modal lazy não abriu, seletor
+# CSS mudou, click não disparou). Isso é bug nosso — NÃO é "laudo inexistente".
+_RE_LAUDO_DISPONIVEL = re.compile(
+    r"(?i)(laudo\s+do\s+ve[ií]culo|acessar\s+laudo|ver\s+laudo|laudo\s+cautelar|laudo\s+completo)"
+)
+
+# Rótulos em que o próprio Auto Avaliar declara que o lote NÃO tem laudo.
+# São casos legítimos — download impossível, mas precisam aparecer na planilha
+# com rótulo claro (não "—" ambíguo).
+_RE_SEM_LAUDO_DECLARADO = re.compile(
+    r"(?i)(sem\s+laudo|n[aã]o\s+possui\s+laudo|laudo\s+n[aã]o\s+dispon[ií]vel|lote\s+sem\s+laudo)"
+)
+
+
+def detectar_motivo_laudo_ausente(body_text: str) -> Optional[str]:
+    """Classifica POR QUE `laudo_pdf_url` veio nulo pra um body_text não vazio.
+
+    Chamado só quando já sabemos que `laudo_pdf_url is None`. Retorna:
+      - DetalheFlags.MISSING_BODY_VAZIO → innerText do detalhe vazio/não coletado
+      - DetalheFlags.MISSING_SEM_LAUDO → anunciante declarou SEM LAUDO no DOM
+      - DetalheFlags.MISSING_URL_NAO_CAPTURADA → botão "LAUDO DO VEÍCULO" existe, mas scraper
+        não extraiu a URL (modal lazy não abriu etc — bug nosso, precisa re-scrape)
+      - None → body_text não tem sinal de laudo e não tem declaração explícita (raro;
+        provavelmente página parcialmente renderizada)
+    """
+    if not body_text or len(body_text.strip()) < 50:
+        return DetalheFlags.MISSING_BODY_VAZIO
+    if _RE_SEM_LAUDO_DECLARADO.search(body_text):
+        return DetalheFlags.MISSING_SEM_LAUDO
+    if _RE_LAUDO_DISPONIVEL.search(body_text):
+        return DetalheFlags.MISSING_URL_NAO_CAPTURADA
+    return None
 
 
 def _detectar_encerrado(body_text: str) -> bool:
@@ -408,6 +454,12 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
     # 10. Leilão encerrado / lote arrematado (badge visível na página)
     encerrado = _detectar_encerrado(body_text)
 
+    # 11. Motivo da ausência de laudo_pdf_url — só classifica quando URL veio nula
+    #     pra dar rastreabilidade ("bug nosso" vs "laudo realmente não existe").
+    laudo_missing_reason = (
+        detectar_motivo_laudo_ausente(body_text) if not laudo_pdf_url else None
+    )
+
     return DetalheFlags(
         specs=specs,
         status_laudo=status_laudo,
@@ -419,6 +471,7 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
         ipva_pago=ipva_pago,
         observacoes_anunciante=observacoes,
         laudo_pdf_url=laudo_pdf_url,
+        laudo_missing_reason=laudo_missing_reason,
         similares_precos=similares_precos,
         preco_referencia_aa=precos_aa.preco_referencia_aa,
         fipe_pct_lance_minimo=precos_aa.fipe_pct_lance_minimo,

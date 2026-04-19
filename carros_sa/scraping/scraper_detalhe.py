@@ -61,6 +61,7 @@ def _flags_to_dict(flags: DetalheFlags) -> dict:
         "ipva_pago": flags.ipva_pago,
         "observacoes_anunciante": flags.observacoes_anunciante,
         "laudo_pdf_url": flags.laudo_pdf_url,
+        "laudo_missing_reason": flags.laudo_missing_reason,
         "similares_precos": flags.similares_precos,
         "preco_referencia_aa": flags.preco_referencia_aa,
         "fipe_pct_lance_minimo": flags.fipe_pct_lance_minimo,
@@ -120,9 +121,24 @@ def processar_detalhe(
     if flags.early_exit is None and laudo_pdf_url:
         pdf_path = pdf_dir / f"{lote_id}.pdf"
         dl = downloader or _default_pdf_downloader
-        dl(laudo_pdf_url, pdf_path)
-        pdf_baixado = True
-        raw["detalhe"]["pdf_path_local"] = str(pdf_path)
+        try:
+            dl(laudo_pdf_url, pdf_path)
+            pdf_baixado = True
+            raw["detalhe"]["pdf_path_local"] = str(pdf_path)
+            # URL existia + download bateu — garantia de que nada sobrou de
+            # execução anterior que tenha marcado missing_reason.
+            raw["detalhe"]["laudo_missing_reason"] = None
+        except Exception as exc:
+            # Download falhou (rate-limit, rede, URL expirada). Registra motivo
+            # estruturado pra planilha/audit conseguirem distinguir de "URL não
+            # foi capturada" e de "lote não tem laudo". Propaga mesmo assim pra
+            # caller decidir se aborta o batch — manter compat com testes.
+            raw["detalhe"]["laudo_missing_reason"] = "download_falhou"
+            raw["detalhe"]["laudo_download_erro"] = f"{type(exc).__name__}: {exc}"[:200]
+            lote.raw_json = raw
+            session.add(lote)
+            session.commit()
+            raise
         lote.raw_json = raw  # reatribui pra SQLAlchemy detectar mudança
 
     session.add(lote)

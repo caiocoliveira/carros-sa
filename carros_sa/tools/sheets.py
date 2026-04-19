@@ -82,6 +82,26 @@ COLUMN_FORMATS = {
 }
 
 
+_LAUDO_MISSING_LABELS = {
+    "url_nao_capturada": "⚠ URL não capturada — re-scrape",
+    "body_vazio": "⚠ Detalhe não coletado — re-scrape",
+    "download_falhou": "⚠ Download falhou — retry",
+    "sem_laudo": "Laudo inexistente",
+}
+
+
+def _rotulo_laudo_ausente(motivo: Optional[str]) -> str:
+    """Mapeia `laudo_missing_reason` pro texto exibido na coluna Laudo.
+
+    Rótulos com ⚠ sinalizam gap recuperável (re-scrape resolve). Sem ⚠ indica
+    ausência legítima. '—' vira fallback pra valores desconhecidos/legados, pra
+    não quebrar planilhas antigas sem o campo.
+    """
+    if not motivo:
+        return "—"
+    return _LAUDO_MISSING_LABELS.get(motivo, f"⚠ {motivo}")
+
+
 def _col_letter(idx_0based: int) -> str:
     """Converte índice 0-based em letra de coluna estilo Sheets (A, B, ..., Z, AA, AB, ...)."""
     letters = ""
@@ -212,6 +232,13 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
+            # Motivo estruturado pra quando a URL veio vazia — permite que a
+            # planilha distinga "bug nosso" (url_nao_capturada / body_vazio /
+            # download_falhou → dá pra re-scrape) de "laudo realmente inexistente"
+            # (sem_laudo declarado pelo anunciante). Sem esse sinal a coluna
+            # Laudo caía em "—" indistinguível e os gaps ficavam invisíveis.
+            laudo_missing_reason = detalhe_raw.get("laudo_missing_reason")
+
             # Laudo só conta como "analisado" se veio de um PDF real — fallback
             # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
             # confidence <= 0.55. Sem essa distinção o usuário via reforma de
@@ -249,6 +276,7 @@ class SheetsExporter:
                 "justificativa": av.justificativa,
                 "url": lote.url,
                 "laudo_url": laudo_url,
+                "laudo_missing_reason": laudo_missing_reason,
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "scraped_at": scraped_at_str,
@@ -292,14 +320,15 @@ class SheetsExporter:
             else:
                 url_cell = "—"
             # Link pro PDF do laudo. Se URL passou pelo filtro de decoy
-            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, "—".
-            # Motivação: usuário quer conferir o laudo antes de dar lance
-            # sem precisar clicar no anúncio, abrir o modal e esperar carregar.
+            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, rótulo
+            # estruturado pelo motivo (ex.: "⚠ URL não capturada — re-scrape",
+            # "Laudo inexistente") pra operador distinguir bug nosso de ausência
+            # real. Antes caía em "—" indistinguível e gaps ficavam invisíveis.
             if r["laudo_url"]:
                 laudo_escaped = r["laudo_url"].replace('"', '""')
                 laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
             else:
-                laudo_cell = "—"
+                laudo_cell = _rotulo_laudo_ausente(r.get("laudo_missing_reason"))
 
             # Quando o laudo não foi analisado de verdade (sem PDF ou extração
             # falhou), NÃO exibimos preço-alvo, ROI nem reforma — seriam chutes
@@ -659,8 +688,8 @@ class SheetsExporter:
             [
                 "Laudo (PDF)",
                 "Scraper detalhe",
-                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. Extraído do DOM do anúncio (storage.googleapis.com/doc-b2b ou cdn-aav.autoavaliar.com.br). URLs que não são laudo real (Relatório de Transparência Salarial, páginas de listagem) são filtradas e a célula fica '—'.",
-                "Olhar o laudo sem precisar abrir o anúncio — ajuda a bater olho em avarias antes de dar lance. '—' significa que o laudo não foi achado (pode existir lote com selo 'SEM LAUDO' ou modal que o scraper não conseguiu abrir).",
+                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. Quando URL não foi capturada, célula exibe motivo estruturado: '⚠ URL não capturada — re-scrape' (botão 'LAUDO DO VEÍCULO' apareceu mas scraper não extraiu URL), '⚠ Detalhe não coletado — re-scrape' (innerText vazio), '⚠ Download falhou — retry' (rate-limit/erro de rede) ou 'Laudo inexistente' (anunciante declarou SEM LAUDO).",
+                "Olhar o laudo sem precisar abrir o anúncio. Rótulos com ⚠ sinalizam gap recuperável (rodar triagem de novo resolve); sem ⚠ é ausência real. `scripts/audit_laudos_faltantes.py` lista todos os gaps ativos pra priorizar re-scrape.",
             ],
             [
                 "Coletado em",

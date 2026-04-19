@@ -108,6 +108,22 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - **NÃO** alterar `carros_sa/models.py` sem discutir — quebra outras sessões em paralelo.
 - **NÃO** rodar chamadas de LLM dentro de testes — usar fixture salva em `tests/fixtures/`.
 
+## Lições aprendidas (auditoria 2026-04-19)
+
+Regras derivadas de bugs reais encontrados revisando o pipeline de preço. Antes de dar "pronto" num PR que toca valor financeiro, rode esses checks.
+
+1. **Docstring mente — simule com números.** A docstring do `precificador.py` dizia `preco_giro_fipe = min(FIPE * 0.95, webmotors_p25)`, mas o código usava `webmotors_mediana * f_km` sem cap. Diferença silenciosa de ~20% no preço de giro. **Sempre simule com valores plausíveis** (ex.: FIPE=28k, mediana=31k, f_km=1.15 → giro=35.6k > FIPE = impossível de revender) antes de confiar na fórmula documentada.
+
+2. **Wire-ups ficam inertes depois de merges paralelos.** `auto_avaliar_ref` era extraído pelo parser, persistido em `Lote.preco_referencia_aa` e… nunca chegava no `avaliar()`. Um dos dois freios de preço estava inerte há semanas. **Sempre que um campo novo atravessa 2+ arquivos (parser → modelo → agente → precificador), leia a cadeia inteira** e confirme que ele não morre no meio do caminho. Um teste de propagação end-to-end por campo de negócio previne isso.
+
+3. **Cap teórico ≠ cap enforcado.** "Não faz sentido comprar pra revender acima da FIPE" é óbvio humanamente, mas `precificador.py` não tinha cap. Qualquer invariante econômica tem que virar `assert` no `audit.py` E um teste numérico. Se não vira código executável, não existe.
+
+4. **Colunas da planilha são a interface do usuário — toda coluna calculada merece linha no Glossário.** Quando mudar a fórmula de uma coluna exibida, edite `_ensure_glossario_sheet` na mesma commit. Usuário olha o glossário pra entender o que o número significa.
+
+5. **Teste environmental ≠ teste do seu PR.** `tests/test_exportar_sheets.py` falha neste sandbox por `_cffi_backend` ausente (gspread não importa) — não tem relação com código. Antes de ficar ansioso com "28 falhas", confirme com `git stash && pytest` que já era vermelho na base.
+
+6. **Fixture gold test é o atalho pra confiança.** `tests/fixtures/fipe_fiesta_2013.json` + `FakeFipeClient` deixam o teste do precificador rodar offline com shape real. Qualquer nova integração externa (FIPE, AutoAvaliar, Gemini) precisa de uma fixture equivalente antes de virar dependência de produção.
+
 ## Dado real de referência
 
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.

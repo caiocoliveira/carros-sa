@@ -69,7 +69,16 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
-        else None
+        else (
+            # Invariante econômica crítica: comprar acima da FIPE pra revender
+            # perto da FIPE inverte a margem. Tolera +2% por arredondamento /
+            # calibração do cap (usamos FIPE cheia, e frete/taxas/reforma
+            # podem cair em cenários edge onde o teto passa por pouco).
+            "Lance Máximo > FIPE — precificador permitiu pagar acima do teto de revenda"
+            if r.get("fipe") and isinstance(v, (int, float))
+            and v > r["fipe"] * 1.02
+            else None
+        )
     ),
     "FIPE (R$)": lambda v, r: (
         "FIPE zerado mas preco_giro existe — AvaliadorMercado falhou em popular FIPE?"
@@ -77,10 +86,27 @@ CHECKS: Dict[str, Validator] = {
         else None
     ),
     "Preço Giro FIPE (R$)": lambda v, r: (
-        "Preço Giro FIPE não-positivo" if v is not None and v <= 0 else None
+        "Preço Giro FIPE não-positivo"
+        if v is not None and isinstance(v, (int, float)) and v <= 0
+        else (
+            # Deve ser capado em FIPE (ver precificador.py). Tolera +2% por
+            # arredondamento. Se violar, provavelmente avaliações antigas
+            # (pré-fix de 2026-04-19) estão misturadas na amostra.
+            "Preço Giro FIPE > FIPE — deveria ser capado pelo teto de revenda"
+            if r.get("fipe") and isinstance(v, (int, float))
+            and v > r["fipe"] * 1.02
+            else None
+        )
     ),
     "Preço Giro Auto Avaliar (R$)": lambda v, r: (
-        "Preço Giro AA não-positivo" if v is not None and v <= 0 else None
+        "Preço Giro AA não-positivo"
+        if v is not None and isinstance(v, (int, float)) and v <= 0
+        else (
+            "Preço Giro AA > FIPE — AA é atacado, deveria ficar abaixo de FIPE"
+            if r.get("fipe") and isinstance(v, (int, float))
+            and v > r["fipe"] * 1.02
+            else None
+        )
     ),
     "FIPE % (lance min)": lambda v, r: None,  # string formatada do DOM
     "ROI se pagar o máximo (%)": lambda v, r: (

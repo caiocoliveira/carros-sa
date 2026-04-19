@@ -275,6 +275,35 @@ def _laudo_sem_pdf(flags=None) -> LaudoEstruturado:
 # Persistência
 # ---------------------------------------------------------------------------
 
+def _ultima_ref_aa(
+    session: Session, marca: str, modelo: str, ano: int,
+) -> Optional[int]:
+    """Última 'ULTIMA AVALIAÇÃO' vista pra (marca, modelo, ano) em lotes anteriores.
+
+    Usado como fallback quando o lote atual não trouxe `preco_referencia_aa` no
+    DOM (ex.: variação do anúncio sem a tag). Amortiza a escassez — se o mesmo
+    modelo/ano já apareceu em leilão anterior, reaproveita a ref. Retorna None
+    quando não há histórico ou session é None.
+    """
+    if session is None:
+        return None
+    try:
+        from carros_sa.models import PrecoReferenciaAA
+    except Exception:
+        return None
+    stmt = (
+        select(PrecoReferenciaAA)
+        .where(
+            PrecoReferenciaAA.marca == marca,
+            PrecoReferenciaAA.modelo == modelo,
+            PrecoReferenciaAA.ano == ano,
+        )
+        .order_by(PrecoReferenciaAA.coletado_em.desc())
+    )
+    hit = session.exec(stmt).first()
+    return hit.preco if hit else None
+
+
 def _persistir_flags_no_lote(
     lote: Lote,
     flags,
@@ -571,6 +600,12 @@ async def _pipeline_lote(
             from carros_sa.agents.calibracao_giro import _categoria_de_modelo
             categoria = _categoria_de_modelo(lote.modelo)
 
+        # Preço-referência Auto Avaliar: primeiro do próprio anúncio (scraper atual);
+        # fallback no histórico cross-lote (tabela PrecoReferenciaAA) — último preço
+        # visto pra (marca, modelo, ano) em qualquer lote anterior.
+        aa_ref = flags.preco_referencia_aa or _ultima_ref_aa(
+            session, lote.marca, lote.modelo, lote.ano
+        )
         try:
             mercado = avaliar_mercado(
                 marca=lote.marca,
@@ -581,6 +616,7 @@ async def _pipeline_lote(
                 categoria=categoria,
                 session=session,
                 empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
+                auto_avaliar_ref=aa_ref,
             )
         except LookupError as exc:
             # FIPE Parallelum não tem catálogo de motos (Dafra, Triumph, Harley…)

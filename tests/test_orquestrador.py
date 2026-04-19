@@ -36,6 +36,7 @@ from carros_sa.orquestrador import (
     _pdf_persistente_path,
     _persistir_flags_no_lote,
     _pipeline_lote,
+    _ultima_ref_aa,
     _upsert_avaliacao,
     _upsert_lote,
 )
@@ -398,6 +399,45 @@ class TestPersistirFlagsNoLote:
             atual = session.get(Lote, "L556")
             assert atual.preco_referencia_aa is None
             assert session.exec(select(PrecoReferenciaAA)).all() == []
+
+
+# ---------------------------------------------------------------------------
+# Testes de _ultima_ref_aa (cross-lote fallback — workstream revisão 2026-04-19)
+# ---------------------------------------------------------------------------
+
+class TestUltimaRefAA:
+    def test_retorna_none_quando_sem_historico(self):
+        engine = _engine()
+        with Session(engine) as session:
+            assert _ultima_ref_aa(session, "VW", "Gol", 2015) is None
+
+    def test_retorna_preco_mais_recente_do_mesmo_modelo_ano(self):
+        """Lote B sem ref AA no DOM herda a última ref de lote A do mesmo modelo/ano."""
+        engine = _engine()
+        with Session(engine) as session:
+            # Lote antigo com ref AA
+            session.add(PrecoReferenciaAA(
+                marca="VW", modelo="Gol", ano=2015, preco=18_000,
+                origem_lote_id="AA-OLD",
+                coletado_em=datetime(2026, 4, 10),
+            ))
+            # Lote mais novo (ganha) com preço diferente
+            session.add(PrecoReferenciaAA(
+                marca="VW", modelo="Gol", ano=2015, preco=20_500,
+                origem_lote_id="AA-NEW",
+                coletado_em=datetime(2026, 4, 18),
+            ))
+            # Preço de outro modelo/ano — não deve vazar
+            session.add(PrecoReferenciaAA(
+                marca="VW", modelo="Gol", ano=2018, preco=35_000,
+                origem_lote_id="AA-OUTRO",
+            ))
+            session.commit()
+
+            assert _ultima_ref_aa(session, "VW", "Gol", 2015) == 20_500
+            assert _ultima_ref_aa(session, "VW", "Gol", 2018) == 35_000
+            # Não-hit volta None
+            assert _ultima_ref_aa(session, "VW", "Golf", 2015) is None
 
 
 # ---------------------------------------------------------------------------

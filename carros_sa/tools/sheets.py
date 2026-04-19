@@ -563,14 +563,14 @@ class SheetsExporter:
             [
                 "Preço Giro FIPE (R$)",
                 "Precificador",
-                "min(FIPE × 0.95, Webmotors p25). Corta 5% da FIPE pra aproximar de atacado e limita pelo p25 (25% mais baratos) do Webmotors.",
-                "Preço de venda conservador ancorado em FIPE — linha de base se não tiver dado Auto Avaliar",
+                "min(Webmotors mediana × f_km, FIPE). f_km é bônus/desconto por km do lote vs mediana do mercado (cap 0.75–1.15). Capado em FIPE cheia — vender no varejo acima da FIPE é irrealista, então FIPE vira teto duro de revenda.",
+                "Preço de venda conservador ancorado em FIPE — linha de base se não tiver dado Auto Avaliar. NUNCA fica acima da FIPE (invariante de sanidade auditada automaticamente).",
             ],
             [
                 "Preço Giro Auto Avaliar (R$)",
                 "Precificador",
-                "min(Auto Avaliar ref, Webmotors p25). 'Auto Avaliar ref' vem da 'ULTIMA AVALIAÇÃO' do anúncio (tabela do próprio marketplace de atacado).",
-                "Preço atacado real — geralmente mais baixo que FIPE. Quando presente, ganha peso no preco_giro final (menor entre os dois)",
+                "min(min(Auto Avaliar ref, Webmotors mediana) × f_km, FIPE). 'Auto Avaliar ref' vem da 'ULTIMA AVALIAÇÃO' do anúncio (tabela do próprio marketplace de atacado). Mesmo cap de FIPE vale aqui.",
+                "Preço atacado real — geralmente mais baixo que FIPE. Quando presente, ganha peso no preco_giro final (menor entre os dois). Fallback: última ref vista pro mesmo modelo/ano em lote anterior.",
             ],
             [
                 "FIPE % (lance min)",

@@ -138,6 +138,23 @@ def test_cache_persistente_evita_segunda_chamada(fipe_responses, in_memory_sessi
     assert rows[0].valor == 30876
 
 
+def test_auto_avaliar_ref_propaga_pro_sinal_mercado(fipe_responses, in_memory_session):
+    """Wire-up: `auto_avaliar_ref` recebido por avaliar() chega no SinalMercado.
+
+    Antes do fix de 2026-04-19 o parâmetro não existia — o preço-referência
+    AutoAvaliar extraído pelo parser ficava preso em Lote.preco_referencia_aa e
+    NUNCA chegava no precificador. Resultado: coluna 'Preço Giro Auto Avaliar'
+    eternamente '—', um dos dois freios de preço inerte na prática.
+    """
+    fake = FakeFipeClient(fipe_responses)
+    sinal = avaliar(
+        marca="FORD", modelo="FIESTA 1.6 SE HATCH", ano=2013,
+        similares_precos=[28000, 30000], categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake, auto_avaliar_ref=22_500,
+    )
+    assert sinal.auto_avaliar_ref == 22_500
+
+
 def test_fallback_sem_similares(fipe_responses, in_memory_session):
     fake = FakeFipeClient(fipe_responses)
     sinal = avaliar(

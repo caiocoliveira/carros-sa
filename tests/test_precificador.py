@@ -326,6 +326,57 @@ def test_com_auto_avaliar_mais_alto_consolidado_fica_no_fipe(
     assert av.preco_giro_aa == 25_000
 
 
+def test_preco_giro_capado_pela_fipe_quando_mediana_alta(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma
+):
+    """Proteção: 'similares' inflados no AutoAvaliar (ex.: versões erradas) NÃO
+    devem empurrar preco_giro acima da FIPE. FIPE é teto de revenda realista.
+
+    Sem o cap, Lance Máximo acabava > FIPE — comprar em leilão pagando mais
+    caro do que a referência nacional de varejo = queda de margem garantida.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    # Similares cospem mediana bem acima da FIPE (cenário observado em lotes
+    # de modelos raros onde o AA agrupa versões e anos distintos).
+    mercado_inflado = SinalMercado(
+        fipe=28_000, webmotors_mediana=35_000, webmotors_p25=32_000,
+        n_anuncios_competidores=5, dias_giro_estimado=30,
+    )
+    av = precificar(
+        gol_2015_lote, gol_2015_laudo, mercado_inflado, gol_2015_reforma, frete, empresa,
+    )
+    # preco_giro capado em FIPE — não sobe pra 35k
+    assert av.preco_giro == 28_000
+    assert av.preco_giro_fipe == 28_000
+    # Lance Máximo NUNCA pode ultrapassar FIPE (invariante de sanidade)
+    assert av.preco_max <= 28_000
+
+
+def test_preco_giro_aa_tambem_capado_pela_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma
+):
+    """Mesmo cap deve valer pra ramo AA quando a ref AA casualmente vem alta."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    # auto_avaliar_ref < mediana (comum), mas mediana × f_km > FIPE (edge case)
+    mercado = SinalMercado(
+        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        n_anuncios_competidores=10, dias_giro_estimado=30,
+        webmotors_km_mediana=80_000, auto_avaliar_ref=30_000,  # AA ref alto
+    )
+    lote_km_baixa = gol_2015_lote.model_copy(update={"km": 40_000})  # f_km = 1.15
+    av = precificar(
+        lote_km_baixa, gol_2015_laudo, mercado, gol_2015_reforma, frete, empresa,
+    )
+    # Ambas âncoras capadas em FIPE
+    assert av.preco_giro_fipe <= 28_000
+    assert av.preco_giro_aa is not None and av.preco_giro_aa <= 28_000
+    assert av.preco_max <= 28_000
+
+
 def test_auto_avaliar_ref_zero_rejeitado_pela_validacao():
     """SinalMercado garante que auto_avaliar_ref se presente é positivo."""
     with pytest.raises(Exception):
@@ -573,12 +624,15 @@ def test_ajuste_km_lote_com_km_alta_reduz_preco_alvo(
 def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
     gol_2015_lote, gol_2015_laudo, gol_2015_reforma
 ):
-    """Lote com km abaixo da mediana → f_km > 1 → preço-alvo sobe."""
+    """Lote com km abaixo da mediana → f_km > 1 → preço-alvo sobe, capado em FIPE."""
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
 
+    # FIPE propositalmente ALTA (40k) pra não saturar o cap e permitir observar o bônus.
+    # Se FIPE=28k (teto real na fixture), mediana×1.15 = 28.75k > FIPE → capado em FIPE.
+    # Esse branch (cap) tem teste dedicado em test_preco_giro_capado_pela_fipe_quando_mediana_alta.
     mercado_sem_km = SinalMercado(
-        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        fipe=40_000, webmotors_mediana=25_000, webmotors_p25=24_000,
         n_anuncios_competidores=80, dias_giro_estimado=25,
     )
     # km=40k, mediana=80k → delta=+0.5 → fator=1.15 (cap)
@@ -592,7 +646,7 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
         lote_km_baixa, gol_2015_laudo, mercado_com_km, gol_2015_reforma, frete, empresa,
     )
 
-    # preco_giro: 25000 * 1.15 = 28_750
+    # preco_giro: 25000 * 1.15 = 28_750 (abaixo do teto FIPE=40k, então aplica integral)
     assert av_com_ajuste.preco_giro == 28_750
     # preço-alvo sobe com f_km > 1
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo

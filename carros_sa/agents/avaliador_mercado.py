@@ -107,12 +107,18 @@ def avaliar(
     empresa_id: Optional[str] = None,
     aplicar_popularidade: bool = True,
     webmotors_km_mediana: Optional[int] = None,
+    auto_avaliar_ref: Optional[int] = None,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
     `similares_precos` é a lista de preços que a página de detalhe de Auto
     Avaliar mostra na seção 'Talvez se interesse por'. Quando vazio, caímos
     na heurística FIPE × 0.9 (mediana) / 0.78 (p25).
+
+    `auto_avaliar_ref` é o preço-referência ("ULTIMA AVALIAÇÃO") extraído
+    do próprio anúncio pelo scraper (workstream K). Quando presente, o
+    precificador o usa como segunda âncora (min com FIPE) — mais conservador
+    que FIPE-only pra lotes com ULTIMA AVALIAÇÃO abaixo da FIPE.
 
     Quando `empresa_id` e `session` são passados, `dias_giro_estimado` é
     calibrado a partir do histórico real (Arrematado da empresa) — fallback
@@ -174,4 +180,5 @@ def avaliar(
         n_anuncios_competidores=n,
         dias_giro_estimado=dias_giro,
         webmotors_km_mediana=webmotors_km_mediana,
+        auto_avaliar_ref=auto_avaliar_ref,
     )

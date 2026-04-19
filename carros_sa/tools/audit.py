@@ -26,9 +26,6 @@ from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
-SEVERIDADES_VALIDAS = {"nenhuma", "leve", "média", "media", "grave", "estrutural", "—", None}
-MOTOR_VALIDOS = {"Sim", "NÃO", "—", True, False, None}
-POPULARIDADE_VALIDA = {"blockbuster", "popular", "normal", "nicho", "iliquido", "—", None}
 
 
 # Validator retorna None se ok; string com motivo se suspeito.
@@ -45,7 +42,6 @@ CHECKS: Dict[str, Validator] = {
         None if v in SITUACOES_VALIDAS
         else f"Situação '{v}' fora do domínio {SITUACOES_VALIDAS}"
     ),
-    "Lote ID": lambda v, r: "Lote ID vazio" if not v else None,
     "Modelo": lambda v, r: (
         "Modelo string vazia" if not v or not str(v).strip()
         else "Modelo sem marca e sem nome — scraper falhou em capturar campos"
@@ -58,7 +54,6 @@ CHECKS: Dict[str, Validator] = {
         else None
     ),
     "Cidade": lambda v, r: None,  # "—" é legítimo (lote sem origem_cidade declarada)
-    "Loja": lambda v, r: None,    # "—" é legítimo (coleta antiga sem o campo em raw_json)
     "Fim do Leilão": lambda v, r: None,  # pode ser "—" para lotes showroom
     "KM": lambda v, r: (
         "KM absurdo (>800k ou <0)" if v is not None and (v > 800_000 or v < 0) else None
@@ -71,117 +66,40 @@ CHECKS: Dict[str, Validator] = {
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
         else None
     ),
-    "FIPE (R$)": lambda v, r: (
-        "FIPE zerado mas preco_giro existe — AvaliadorMercado falhou em popular FIPE?"
-        if v == 0 and r.get("preco_giro_fipe")
-        else None
-    ),
-    "Preço Giro FIPE (R$)": lambda v, r: (
-        "Preço Giro FIPE não-positivo" if v is not None and v <= 0 else None
-    ),
-    "Preço Giro Auto Avaliar (R$)": lambda v, r: (
-        "Preço Giro AA não-positivo" if v is not None and v <= 0 else None
-    ),
-    "FIPE % (lance min)": lambda v, r: None,  # string formatada do DOM
-    "ROI se pagar o máximo (%)": lambda v, r: (
-        "ROI >500% improvável — revisar preco_giro vs capital_total"
-        if v is not None and v > 500
-        else (
-            "ROI <-80% num lote 'Viável' é contraditório (se prejuízo é tão grande, status deveria ser 'Caro demais')"
-            if v is not None and v < -80 and r["situacao"] == "✓ Viável"
-            else None
-        )
-    ),
-    "Dias até venda (est.)": lambda v, r: (
-        "Dias até venda deve ser >=1; valor <=0 indica bug no CalibracaoGiro"
-        if v is not None and v <= 0
-        else None
-    ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"
         if v is not None and v > 1000
         else None
     ),
-    "Lucro esperado (R$/mês)": lambda v, r: (
-        "Lucro esperado negativo — verificar score_roi ou preco_alvo"
+    "Lucro/mês (R$)": lambda v, r: (
+        "Lucro/mês negativo — verificar score_roi ou preco_alvo"
         if isinstance(v, (int, float)) and v < 0
         else None
     ),
-    "Fator Risco": lambda v, r: (
-        "Fator Risco fora de [0.5, 1.5] — bounds típicos do precificador"
-        if v is not None and not (0.5 <= v <= 1.5)
-        else None
+    "Reforma (R$)": lambda v, r: (
+        "Reforma negativa" if v is not None and v < 0 else None
     ),
-    "Popularidade": lambda v, r: (
-        None if v in POPULARIDADE_VALIDA
-        else f"Popularidade '{v}' fora do enum BucketPopularidade"
-    ),
-    "Severidade Laudo": lambda v, r: (
-        None if v in SEVERIDADES_VALIDAS
-        else f"Severidade '{v}' fora do domínio do ExtratorLaudo"
-    ),
-    "Motor OK": lambda v, r: (
-        None if v in MOTOR_VALIDOS else f"Motor OK '{v}' inesperado (esperado Sim/NÃO/—)"
-    ),
-    "Reforma Estimada (R$)": lambda v, r: (
-        "Reforma estimada negativa" if v is not None and v < 0 else None
-    ),
-    "Frete (R$)": lambda v, r: (
-        "Frete negativo" if v is not None and v < 0 else None
-    ),
-    "Justificativa": lambda v, r: (
-        "Justificativa string vazia — precificador deveria sempre escrever o racional"
-        if not v else None
-    ),
-    # Opcional por design: só é preenchido quando o estimador LLM rodou (e o
-    # LLM devolveu campo 'justificativa'). Pode ser "—" ou string livre.
-    "Racional Reforma": lambda v, r: None,
-    "URL": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
-    "Laudo (PDF)": lambda v, r: None,  # "—" (sem URL de laudo ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
-    "Coletado em": lambda v, r: (
-        "Coletado em vazio — Lote.scraped_at não foi populado"
-        if not v or v == "—"
-        else None
-    ),
+    "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
+    "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
 }
 
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
-# Chaves do dict interno: lote_id, modelo, ano, cidade, loja, fim_em, km, lance_atual,
-# preco_max, fipe, preco_giro_fipe, preco_giro_aa, fipe_pct_lance_minimo,
-# roi_pct, dias_giro, roi_anualizado, fator_risco, severidade, motor_ok,
-# reforma_estimada, frete, justificativa, url, scraped_at, rank, situacao,
-# encerrado, viavel, preco_giro.
 COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
-    "Lote ID": lambda r: r["lote_id"],
     "Modelo": lambda r: r["modelo"],
     "Ano": lambda r: r["ano"],
     "Cidade": lambda r: r["cidade"],
-    "Loja": lambda r: r["loja"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
-    "FIPE (R$)": lambda r: r["fipe"],
-    "Preço Giro FIPE (R$)": lambda r: r["preco_giro_fipe"],
-    "Preço Giro Auto Avaliar (R$)": lambda r: r["preco_giro_aa"],
-    "FIPE % (lance min)": lambda r: r["fipe_pct_lance_minimo"],
-    "ROI se pagar o máximo (%)": lambda r: r["roi_pct"],
-    "Dias até venda (est.)": lambda r: r["dias_giro"],
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
-    "Lucro esperado (R$/mês)": lambda r: r.get("lucro_mes", "—"),
-    "Fator Risco": lambda r: r["fator_risco"],
-    "Popularidade": lambda r: r.get("popularidade", "—"),
-    "Severidade Laudo": lambda r: r["severidade"],
-    "Motor OK": lambda r: r["motor_ok"],
-    "Reforma Estimada (R$)": lambda r: r["reforma_estimada"],
-    "Frete (R$)": lambda r: r["frete"],
-    "Justificativa": lambda r: r["justificativa"],
-    "URL": lambda r: r["url"],
-    "Laudo (PDF)": lambda r: r.get("laudo_url") or "—",
-    "Coletado em": lambda r: r["scraped_at"],
+    "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
+    "Reforma (R$)": lambda r: r["reforma_estimada"],
+    "Anúncio": lambda r: r["url"],
+    "Laudo": lambda r: r.get("laudo_url") or "—",
 }
 
 

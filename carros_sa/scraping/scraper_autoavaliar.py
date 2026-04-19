@@ -185,8 +185,13 @@ def _carregar_cookies(path: Optional[Path] = None) -> Optional[list[dict]]:
 
 async def login(page, email: str, password: str) -> None:
     """Faz login no Auto Avaliar. Salva cookies. Levanta RuntimeError se falhar."""
-    await page.goto(LOGIN_URL, wait_until="networkidle")
-    await page.wait_for_timeout(1000)
+    # `networkidle` timeoutava consistentemente 2026-04-19 após upgrade pra
+    # Playwright 1.58: Auto Avaliar mantém WebSocket/long-polling ativo na tela
+    # de login e a página nunca atinge idle. `domcontentloaded` é suficiente —
+    # só precisamos do DOM renderizado pra preencher campos. `sessao_valida`
+    # (logo abaixo) já usava esse approach sem problema.
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=15000)
+    await page.wait_for_timeout(1500)
 
     # Tenta selectors — Auto Avaliar usa name/id como hash, então priorizamos placeholder
     for email_sel in [

@@ -466,13 +466,21 @@ async def _pipeline_lote(
 
     modelo_str = f"{lote.marca} {lote.modelo} {lote.ano}"
 
-    # Verifica se já foi avaliado nesta empresa
+    # Short-circuit: só pula o pipeline se ESTÁ realmente completo — avaliação
+    # existente E laudo com confiança ≥ 0.6. Antes, bastava ter AvaliacaoLote,
+    # o que tornava o flag `--somente-laudo-pendente` do script de retry
+    # inofensivo: ele escolhia lotes com conf<0.6, mas aqui o pipeline saía
+    # sem re-raspar detalhe nem re-extrair laudo. Resultado: 104 lotes ativos
+    # com AvaliacaoLote stale + LaudoCache placeholder (conf=0.5, detalhe
+    # ausente) nunca reprocessavam.
     ja_avaliado = session.exec(
         select(AvaliacaoLote)
         .where(AvaliacaoLote.empresa_id == empresa.empresa_id)
         .where(AvaliacaoLote.lote_id == lote.id)
     ).first()
-    if ja_avaliado:
+    laudo_atual = session.get(LaudoCache, lote.id)
+    laudo_ok = laudo_atual is not None and (laudo_atual.confidence or 0) >= 0.6
+    if ja_avaliado and laudo_ok:
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=ja_avaliado.preco_alvo,
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))

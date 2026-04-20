@@ -73,16 +73,38 @@ def _col_letter(idx_0based: int) -> str:
 
 
 def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
-    """ROI garantido se ganhar o lote exatamente pelo lance máximo.
+    """ROI se ganhar o lote exatamente pelo lance máximo (piso da margem).
 
     = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    onde capital_total = preco_max + reforma + frete + taxas + custo_op
+
+    NOTA: este valor tende a ~margem_minima_absoluta (≈11% pra 10%) por
+    construção do `preco_max`. Mantido apenas pra auditoria/debug. A coluna
+    'ROI anualizado' na planilha usa `av.score_roi` (ROI no alvo, calibrado
+    por risco/liquidez) — que é quem diferencia lotes no ranking.
     """
     if av.preco_max <= 0:
         return 0.0
     capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
     lucro = av.preco_giro - capital
     return round(lucro / max(capital, 1) * 100, 1)
+
+
+def _retorno_absoluto_no_alvo(av: AvaliacaoLote) -> int:
+    """Lucro esperado em R$ se ganharmos pelo preço-alvo (retorno_alvo).
+
+    Reconstrói `retorno_alvo = score_roi × capital_alvo` usando só campos
+    persistidos. Identidade algébrica:
+        preco_giro = capital_alvo + retorno_alvo = capital_alvo × (1 + score_roi)
+        → retorno_alvo = preco_giro × score_roi / (1 + score_roi)
+
+    Vantagem sobre `score_roi × preco_alvo`: preco_alvo é menor que capital_alvo
+    (capital inclui reforma+frete+taxas+custo_op), então multiplicar ROI por
+    preco_alvo subestima o lucro absoluto em ~15-40%. Esta fórmula é exata.
+    """
+    if av.score_roi <= 0:
+        return 0
+    return int(round(av.preco_giro * av.score_roi / (1 + av.score_roi)))
 
 
 class SheetsExporter:
@@ -156,14 +178,16 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
-            roi_max = _calcular_roi_no_maximo(av)
-            roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
-            # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
-            # score_roi × preco_alvo (lucro no caso médio do bid).
-            lucro_mes = lucro_reais_por_mes(
-                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
-            )
+            # ROI anualizado usa `score_roi` (ROI no alvo, calibrado por
+            # risco/liquidez) — NÃO o ROI no máximo, que por construção cai
+            # na margem mínima (~11%) e não diferencia lotes.
+            roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
+            # Lucro esperado / mês — retorno_alvo absoluto (exato via identidade
+            # algébrica sobre preco_giro e score_roi) convertido em R$/mês.
+            # Antes usava `score_roi × preco_alvo`, que subestimava em 15-40%
+            # (preco_alvo < capital_alvo).
+            lucro_abs = _retorno_absoluto_no_alvo(av)
+            lucro_mes = lucro_reais_por_mes(lucro_abs, av.dias_giro_estimado)
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
             # Dupla checagem pra cobrir os dois vetores (snapshot velho + detecção
@@ -462,14 +486,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
+                "retorno_alvo (preco_giro × score_roi ÷ (1+score_roi)) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). retorno_alvo é o lucro absoluto esperado quando compramos pelo preço-alvo.",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+                "score_roi × 365 / dias_giro (floor 30d; fallback 90d). score_roi = retorno_alvo ÷ capital_alvo — ROI calibrado por fator de risco (laudo) e fator de liquidez (mercado), NÃO o ROI no teto (que por construção cai na margem mínima ~11% e não diferencia lotes).",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Valores realistas: 30–200% a.a.",
             ],
             [
                 "Reforma (R$)",

@@ -25,7 +25,7 @@ from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
-SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
+SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais", "⚠ LAUDO NÃO ANALISADO"}
 
 
 # Validator retorna None se ok; string com motivo se suspeito.
@@ -33,6 +33,11 @@ Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
 
 
 def _situacao(row: Dict[str, Any]) -> str:
+    # Espelha SheetsExporter._write_sheet: lote sem laudo extraído de PDF real
+    # (confidence < 0.6) entra como "⚠ LAUDO NÃO ANALISADO" — o operador não
+    # deve dar lance no escuro. Fora isso, divide por viabilidade.
+    if not row.get("laudo_analisado", False):
+        return "⚠ LAUDO NÃO ANALISADO"
     return "✓ Viável" if row["viavel"] else "✗ Caro demais"
 
 
@@ -64,6 +69,13 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
+        # Lance Máximo > FIPE × 1.05: capital bruto (teto + reforma + frete + taxas +
+        # custo_op) supera FIPE — a janela de revenda do Auto Avaliar geralmente fica
+        # ≤ FIPE × 0.95, então comprar acima disso quase garante prejuízo. Só faz
+        # sentido se webmotors_mediana estiver muito acima da FIPE e giro tiver
+        # ancorado nela; mesmo assim é sinal pra conferir manualmente.
+        else f"Lance Máximo {v} > FIPE × 1.05 ({int(r['fipe'] * 1.05)}) — teto acima da âncora de revenda"
+        if r.get("fipe") and v is not None and v > r["fipe"] * 1.05
         else None
     ),
     "ROI anualizado (%)": lambda v, r: (
@@ -82,6 +94,28 @@ CHECKS: Dict[str, Validator] = {
     "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
     "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
 }
+
+
+# Invariantes internas — cruzam campos que NÃO aparecem na planilha (preco_giro_fipe,
+# preco_giro_aa etc). Mantidas fora de CHECKS pra não quebrar a paridade HEADER↔CHECKS.
+# Cada entrada: (label, validator). Validator recebe o row completo e retorna motivo ou None.
+INVARIANTES_INTERNAS: List[Tuple[str, Callable[[Dict[str, Any]], Optional[str]]]] = [
+    (
+        "preco_giro_fipe (interno)",
+        lambda r: (
+            f"preco_giro_fipe {r['preco_giro_fipe']} > FIPE × 1.20 ({int(r['fipe'] * 1.20)}) "
+            "— giro muito acima da FIPE sugere webmotors_mediana fora do racional (outlier?)"
+            if r.get("fipe") and r.get("preco_giro_fipe")
+            and r["preco_giro_fipe"] > r["fipe"] * 1.20
+            else
+            f"preco_giro_fipe {r['preco_giro_fipe']} < FIPE × 0.60 ({int(r['fipe'] * 0.60)}) "
+            "— giro muito abaixo da FIPE sugere mercado travado ou erro de parsing"
+            if r.get("fipe") and r.get("preco_giro_fipe")
+            and r["preco_giro_fipe"] < r["fipe"] * 0.60
+            else None
+        ),
+    ),
+]
 
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
@@ -129,8 +163,11 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
+        # Espelha SheetsExporter._query: ROI anualizado usa `score_roi` (calibrado
+        # por risco/liquidez), não o `_calcular_roi_no_maximo` (tautologia ≈ margem
+        # mínima). Mantemos `roi_max` separado pra auditoria/debug.
         roi_max = _calcular_roi_no_maximo(av)
-        roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+        roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -158,6 +195,9 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
                 scraped_at_str = str(lote.scraped_at)
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
+        # Espelha SheetsExporter: laudo só conta como "analisado" quando veio de
+        # PDF real (confidence ≥ 0.6). Fallback _laudo_sem_pdf grava ≤ 0.55.
+        laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
         rows.append({
             "lote_id": av.lote_id,
             "modelo": f"{lote.marca} {lote.modelo}".strip(),
@@ -189,6 +229,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro": av.preco_giro,
             "viavel": viavel,
             "encerrado": encerrado,
+            "laudo_analisado": laudo_analisado,
         })
 
     # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
@@ -236,6 +277,22 @@ def audit(engine, sample_size: int = 20) -> List[str]:
                     "count": 1,
                     "exemplo_lote": row["lote_id"],
                     "exemplo_valor": valor,
+                }
+            else:
+                agregador[chave]["count"] += 1
+
+        # Invariantes que cruzam campos internos fora do HEADER
+        # (preco_giro_fipe vs FIPE etc).
+        for label, validator in INVARIANTES_INTERNAS:
+            motivo = validator(row)
+            if motivo is None:
+                continue
+            chave = (label, motivo)
+            if chave not in agregador:
+                agregador[chave] = {
+                    "count": 1,
+                    "exemplo_lote": row["lote_id"],
+                    "exemplo_valor": row.get("preco_giro_fipe"),
                 }
             else:
                 agregador[chave]["count"] += 1

@@ -20,6 +20,7 @@ from carros_sa.tools.sheets import (
     SheetsExporter,
     _calcular_roi_no_maximo,
     _col_letter,
+    _retorno_absoluto_no_alvo,
 )
 
 
@@ -61,13 +62,14 @@ def _avaliacao(
     score_roi: float = 0.3,
     preco_giro: int = 35000,
     preco_max: int = 30000,
+    preco_alvo: int = 25000,
     preco_giro_fipe: int = 35000,
     preco_giro_aa=None,
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
         empresa_id=empresa_id,
         lote_id=lote_id,
-        preco_alvo=25000,
+        preco_alvo=preco_alvo,
         preco_max=preco_max,
         score_roi=score_roi,
         fator_risco=0.8,
@@ -127,6 +129,46 @@ class TestCalcularRoiNoMaximo:
         av = _avaliacao()
         av.preco_max = 0
         assert _calcular_roi_no_maximo(av) == 0.0
+
+
+class TestRetornoAbsolutoNoAlvo:
+    """Gold da identidade `retorno_alvo = preco_giro × score_roi / (1 + score_roi)`."""
+
+    def test_retorno_bate_com_identidade_algebrica(self):
+        # score_roi=0.462 → retorno = 68000 × 0.462 / 1.462 ≈ 21_489
+        av = _avaliacao(preco_giro=68_000, preco_max=52_000, score_roi=0.462)
+        retorno = _retorno_absoluto_no_alvo(av)
+        assert 21_400 <= retorno <= 21_500
+
+    def test_maior_que_score_roi_vezes_preco_alvo(self):
+        """Fórmula nova dá número MAIOR que a antiga (score_roi × preco_alvo)
+        porque capital_alvo = preco_alvo + reforma + frete + taxas + custo_op
+        é sempre > preco_alvo, então multiplicar ROI por preco_alvo subestima
+        o lucro absoluto em ~15-40%.
+
+        Cenário realista: preco_alvo=15k, capital_alvo=18k (3k de reforma+frete+taxas),
+        score_roi=0.3 → preco_giro = 18k × 1.3 = 23.4k.
+        Novo: 23400 × 0.3 / 1.3 = 5400 (= 0.3 × 18000 = score_roi × capital_alvo)
+        Antigo: 0.3 × 15000 = 4500
+        """
+        av = _avaliacao(
+            preco_alvo=15_000,
+            preco_giro=23_400,  # 18k capital × 1.3
+            score_roi=0.3,
+        )
+        retorno_novo = _retorno_absoluto_no_alvo(av)
+        retorno_antigo = int(av.score_roi * av.preco_alvo)
+        assert retorno_novo > retorno_antigo, (
+            f"novo={retorno_novo} deveria > antigo={retorno_antigo}"
+        )
+        # Identidade: novo = score_roi × capital_alvo = 0.3 × 18000 = 5400
+        assert 5_390 <= retorno_novo <= 5_410
+
+    def test_score_roi_zero_ou_negativo_retorna_zero(self):
+        av = _avaliacao(preco_giro=30_000, score_roi=0.0)
+        assert _retorno_absoluto_no_alvo(av) == 0
+        av.score_roi = -0.15  # lote inviável
+        assert _retorno_absoluto_no_alvo(av) == 0
 
 
 class TestSheetsExporterQuery:
@@ -521,11 +563,18 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
-    def test_exportar_roi_baseado_no_lance_maximo(self):
-        """ROI anualizado deve ser calculado sobre o lance máximo, não sobre lance_atual."""
+    def test_exportar_roi_baseado_no_score_roi_calibrado(self):
+        """ROI anualizado = score_roi (ROI no alvo, calibrado por risco/liquidez) × 365/dias.
+
+        ANTES: usava _calcular_roi_no_maximo (ROI no teto) que por construção cai
+        em ~11% (margem mínima absoluta) pra todo lote — não diferenciava ranking.
+        AGORA: usa score_roi direto, que reflete fator_risco × fator_liquidez da
+        margem calibrada no precificador.
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=20000))
+            # score_roi=0.3 (default) → anualizado = 0.3 × 365/90 ≈ 121.7%
             av = _avaliacao("L001", preco_giro=35000, preco_max=25000)
             session.add(av)
             session.add(_laudo("L001"))
@@ -545,10 +594,46 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         idx_roi = HEADER.index("ROI anualizado (%)")
         roi_val = rows[2][idx_roi]
-        # ROI no máximo ≈ 11%; sem dias_giro preenchido, fallback = 90d
-        # ROI anualizado ≈ 11 × 365/90 ≈ 44%. Faixa larga pra acomodar pequenas
-        # variações do preco_alvo/fator_risco.
-        assert 20 < roi_val < 80
+        # score_roi=0.3, dias_giro=None → fallback 90d → 0.3 × 365/90 ≈ 121.7%
+        assert 115 < roi_val < 130
+
+    def test_exportar_roi_reflete_score_roi_calibrado_maior(self):
+        """Lote com score_roi maior deve ter ROI anualizado proporcionalmente maior."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10000))
+            session.add(_lote("L002", modelo="Gol", lance_atual=10000))
+            # Baixo fator_risco/liquidez → score_roi baixo
+            session.add(_avaliacao("L001", score_roi=0.2, preco_giro=30000, preco_max=25000))
+            # Alto → score_roi alto (ex.: laudo pior, mais margem exigida)
+            session.add(_avaliacao("L002", score_roi=0.8, preco_giro=30000, preco_max=25000))
+            session.add(_laudo("L001"))
+            session.add(_laudo("L002"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_roi = HEADER.index("ROI anualizado (%)")
+        # Lote com score_roi maior tem ROI anualizado maior.
+        # Ambos com mesma folga de lance (max − atual = 15k) então o desempate
+        # secundário não troca a ordem — mas em produção o ranking em sheets
+        # desempata por folga, não por ROI. Aqui só checamos a grandeza.
+        roi_values = {rows[i][HEADER.index("Modelo")]: rows[i][idx_roi] for i in (2, 3)}
+        # Gol (L002, score_roi=0.8) maior que Fiesta (L001, score_roi=0.2)
+        gol_roi = next(v for k, v in roi_values.items() if "Gol" in k)
+        fiesta_roi = next(v for k, v in roi_values.items() if "Fiesta" in k)
+        assert gol_roi > fiesta_roi
+        assert gol_roi / fiesta_roi == pytest.approx(4.0, rel=0.01)  # 0.8/0.2 = 4x
 
 
 class TestSheetsExporterFimEmObrigatorio:

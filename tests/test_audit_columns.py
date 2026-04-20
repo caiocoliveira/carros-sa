@@ -14,7 +14,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.audit import CHECKS, audit
+from carros_sa.tools.audit import CHECKS, INVARIANTES_INTERNAS, audit
 from carros_sa.tools.sheets import HEADER
 
 
@@ -60,6 +60,7 @@ def _avaliacao(
     webmotors_mediana: Optional[int] = 34000,
     preco_giro_fipe: int = 30000,
     preco_giro_aa: Optional[int] = None,
+    score_roi: float = 0.3,
     justificativa: str = "Laudo leve, FIPE R$30k, giro estimado 90 dias.",
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
@@ -67,7 +68,7 @@ def _avaliacao(
         lote_id=lote_id,
         preco_alvo=25000,
         preco_max=preco_max,
-        score_roi=0.3,
+        score_roi=score_roi,
         fator_risco=fator_risco,
         fator_liquidez=1.0,
         margem_aplicada=0.15,
@@ -147,15 +148,15 @@ class TestAuditHappyPath:
 
 class TestAuditDeteccao:
     def test_roi_absurdo_reportado(self):
-        """ROI anualizado > 1000% sugere erro de cálculo — fora do racional econômico."""
+        """ROI anualizado > 1000% sugere erro de cálculo (ex: dias_giro=1, floor deveria ser 30).
+
+        ROI anual = score_roi × 365 / dias_giro × 100. score_roi=5.0 com dias_giro=30
+        → 5 × 365/30 × 100 ≈ 6083% — fora de qualquer racional econômico.
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=1000))
-            # preco_giro enorme vs preco_max minúsculo → ROI no máximo explode,
-            # anualizado com dias_giro=30 vira ~5 dígitos.
-            session.add(_avaliacao("L001", preco_max=1000, preco_giro=100_000,
-                                   reforma_estimada=0, frete_incluso=0,
-                                   dias_giro_estimado=30))
+            session.add(_avaliacao("L001", score_roi=5.0, dias_giro_estimado=30))
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"
@@ -223,3 +224,150 @@ class TestAuditAgregacao:
         assert "KM" in texto
         assert "Reforma" in texto
         assert "Ano" in texto
+
+
+# ---------------------------------------------------------------------------
+# Sanity cruzando precificador com âncoras de mercado (FIPE)
+# Responde perguntas do usuário: faz sentido preco_max > FIPE? faz sentido
+# preco_giro_fipe muito diferente da FIPE? Resposta: NÃO — auditoria flagga.
+# ---------------------------------------------------------------------------
+
+class TestAuditVsFipe:
+    def test_lance_maximo_acima_fipe_reportado(self):
+        """preco_max > FIPE × 1.05 → capital bruto excede a âncora de revenda.
+
+        Cenário: precificador produziu teto de R$ 30k num carro com FIPE R$ 20k.
+        Revender acima da FIPE quase nunca acontece na janela do Auto Avaliar
+        (usualmente mediana ≤ FIPE × 0.95), então capital > FIPE é red flag.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                preco_max=30_000,
+                fipe=20_000,  # FIPE × 1.05 = 21.000, preco_max=30.000 viola
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Lance Máximo" in v and "FIPE" in v for v in violacoes), (
+            f"Esperava violação de Lance Máximo vs FIPE em {violacoes}"
+        )
+
+    def test_lance_maximo_abaixo_fipe_nao_reportado(self):
+        """preco_max ≤ FIPE × 1.05 é o caminho feliz e NÃO deve gerar violação."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                preco_max=20_000,
+                fipe=32_000,  # folga confortável
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Lance Máximo" in v and "FIPE" in v for v in violacoes), (
+            f"Não deveria ter violação de teto vs FIPE em {violacoes}"
+        )
+
+    def test_preco_giro_fipe_muito_acima_fipe_reportado(self):
+        """preco_giro_fipe > FIPE × 1.20 sugere webmotors outlier ou erro de parsing."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                fipe=20_000,
+                preco_giro_fipe=30_000,  # 150% da FIPE — suspeito
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("preco_giro_fipe" in v for v in violacoes), (
+            f"Esperava violação de preco_giro_fipe vs FIPE em {violacoes}"
+        )
+
+    def test_preco_giro_fipe_muito_abaixo_fipe_reportado(self):
+        """preco_giro_fipe < FIPE × 0.60 sugere mercado travado ou erro de parsing."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                fipe=30_000,
+                preco_giro_fipe=15_000,  # 50% da FIPE — travado demais
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("preco_giro_fipe" in v for v in violacoes), (
+            f"Esperava violação de preco_giro_fipe vs FIPE em {violacoes}"
+        )
+
+    def test_preco_giro_fipe_perto_da_fipe_nao_reportado(self):
+        """preco_giro_fipe em [FIPE×0.60, FIPE×1.20] é a janela saudável."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                fipe=30_000,
+                preco_giro_fipe=28_500,  # 95% da FIPE — típico
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("preco_giro_fipe" in v for v in violacoes), (
+            f"Não deveria ter violação de preco_giro_fipe vs FIPE em {violacoes}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Situação "⚠ LAUDO NÃO ANALISADO" precisa estar no domínio válido — evita
+# falso positivo no check de Situação quando lote novo ainda não teve laudo lido.
+# ---------------------------------------------------------------------------
+
+class TestSituacaoLaudoNaoAnalisado:
+    def test_lote_sem_laudo_tem_situacao_valida_sem_violacao(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            # Sem _laudo() — lote em retry pendente.
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Situação" in v for v in violacoes), (
+            f"Situação deveria aceitar '⚠ LAUDO NÃO ANALISADO' — {violacoes}"
+        )
+
+    def test_laudo_com_confidence_baixa_cai_em_nao_analisado(self):
+        """Laudo fallback (_laudo_sem_pdf) grava confidence ≤ 0.55 — não conta como analisado."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            laudo = _laudo("L001")
+            laudo.confidence = 0.4  # fallback sem PDF real
+            session.add(laudo)
+            session.commit()
+        violacoes = audit(engine)
+        # Não deve gerar violação de Situação; "⚠ LAUDO NÃO ANALISADO" é válido.
+        assert not any("Situação" in v for v in violacoes), (
+            f"confidence baixa deveria virar '⚠ LAUDO NÃO ANALISADO' — {violacoes}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Smoke: INVARIANTES_INTERNAS exportado e estruturado corretamente.
+# ---------------------------------------------------------------------------
+
+class TestInvariantesInternasShape:
+    def test_invariantes_internas_e_lista_de_tuplas(self):
+        assert isinstance(INVARIANTES_INTERNAS, list)
+        for entry in INVARIANTES_INTERNAS:
+            assert isinstance(entry, tuple) and len(entry) == 2
+            label, validator = entry
+            assert isinstance(label, str) and label
+            assert callable(validator)

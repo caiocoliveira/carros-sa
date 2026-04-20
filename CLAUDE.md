@@ -113,3 +113,43 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.
 - Listagem real de Uberlândia/MG: `data/scrapes/2026-04-14_uberlandia_listagem.json` (10 lotes variados).
 - Fixture de resposta Gemini: `tests/fixtures/21854782_visual_gemini.json`.
+
+## Aprendizados acumulados (sempre relevante)
+
+### Auditoria de colunas — colunas exportadas são contratos numéricos, não "valores mágicos"
+
+Sempre que uma coluna da planilha mudar de fórmula, **rodar o pipeline inteiro na cabeça**:
+1. O que essa fórmula é algebricamente equivalente a?
+2. A nova fórmula usa um campo persistido, ou reconstrói algo que já foi calculado uma vez pelo precificador?
+3. Se já existe no `AvaliacaoLote`, use direto — NÃO recalcule derivando a partir do `preco_max`, pq `preco_max` é o teto (já embute margem mínima) e vai virar tautologia.
+
+Exemplos concretos já cometidos:
+- `ROI anualizado` inicialmente usava `_calcular_roi_no_maximo` que por construção resulta em ~margem_mínima (~11%) → ranking virou insensível ao fator de risco. Trocado por `av.score_roi × 365/dias_giro`.
+- `Lucro/mês` usava `score_roi × preco_alvo`, que subestima em 15-40% porque `capital_alvo = preco_alvo + reforma + frete + taxas + custo_op` é sempre > `preco_alvo`. Identidade correta: `retorno_alvo = preco_giro × score_roi / (1 + score_roi) = score_roi × capital_alvo`.
+
+### Fixture de teste: defaults têm que ser self-consistent
+
+Fixture `_avaliacao` com `preco_alvo=25000` hardcoded é uma bomba-relógio — qualquer teste que passar `preco_giro` ou `score_roi` arbitrários pode gerar combinações impossíveis (ex: `preco_giro=30k, score_roi=0.25` implica `capital_alvo=24k < preco_alvo=25k`). Regra: se um teste passa `preco_giro` e `score_roi`, passe também `preco_alvo` coerente — senão o teste vai medir coisa errada. Ideal: fixture deriva valores dependentes ao invés de hardcodear.
+
+### Auditoria cruzada é mais valiosa que por-coluna
+
+Checagens por coluna pegam erros óbvios (reforma negativa, KM absurdo). Checagens CRUZADAS pegam os sutis e mais caros — aqueles que batem no bolso:
+- `preco_max > FIPE × 1.05` → capital bruto excede âncora de revenda
+- `preco_giro_fipe` muito longe da FIPE → webmotors outlier ou parsing errado
+- `preco_max` "viável" mas `score_roi < 0.05` → teto é formal, não econômico
+
+Mantenha `INVARIANTES_INTERNAS` em `carros_sa/tools/audit.py` separado de `CHECKS` (que é alinhado com HEADER) — paridade HEADER↔CHECKS é teste importante e não deve ser poluída com campos internos.
+
+### Dependências de teste: use sempre PYTHONPATH=. + pytest
+
+Repo tem `pyproject.toml` com `configfile`. Comandos que funcionam em qualquer env:
+```bash
+PYTHONPATH=. python -m pytest tests/ -v
+PYTHONPATH=. python -m pytest tests/<arquivo>.py::ClasseX::test_y -v
+```
+
+Se o venv `.venv/` não existir (ex: sessão em container CI), use `python` do sistema — normalmente já tem as deps de `.[dev]` via instalação de base. Não tente recriar venv sem necessidade.
+
+### Naming honesto > naming aspiracional
+
+Se um campo se chama `preco_giro_fipe` mas na verdade é `webmotors_mediana × f_km` (ajuste de KM), isso é um bug de nome que atrasa todo mundo que ler o código depois. Quando encontrar esse padrão: ou renomeie no DB/migração, ou pelo menos coloque docstring gritando a discrepância. Nomes que mentem são débito técnico silencioso.

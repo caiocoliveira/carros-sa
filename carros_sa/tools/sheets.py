@@ -24,6 +24,11 @@ from sqlmodel import Session, select
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
+from carros_sa.tools.auditoria_laudos import (
+    StatusLaudo,
+    classificar_status,
+    situacao_label,
+)
 
 HEADER = [
     "Rank",
@@ -181,13 +186,14 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
-            # Laudo só conta como "analisado" se veio de um PDF real — fallback
-            # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
-            # confidence <= 0.55. Sem essa distinção o usuário via reforma de
-            # R$ 1.000 (piso) em 63/68 lotes e ia achando que o carro "tava ok"
-            # quando na verdade ninguém leu o laudo. Regra do usuário: não dar
-            # fallback de valor, avisar explicitamente que não foi analisado.
-            laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
+            # Status do laudo — enumerado em `auditoria_laudos.StatusLaudo`.
+            # Centraliza a classificação dos 5 modos de falha (sem detalhe /
+            # URL / decoy / PDF ausente / extração falhou) para que planilha,
+            # auditor CLI e testes compartilhem a mesma lógica. Quando OK,
+            # `situacao_label` devolve None e a célula "Situação" usa o
+            # ranking normal (Viável / Caro demais).
+            status_laudo = classificar_status(lote, laudo)
+            laudo_analisado = status_laudo == StatusLaudo.OK
 
             rows.append({
                 "lote_id": av.lote_id,
@@ -206,6 +212,7 @@ class SheetsExporter:
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "laudo_analisado": laudo_analisado,
+                "status_laudo": status_laudo,
             })
         return rows
 
@@ -232,7 +239,11 @@ class SheetsExporter:
         for rank, r in enumerate(rows, start=1):
             nao_analisado = not r["laudo_analisado"]
             if nao_analisado:
-                situacao = "⚠ LAUDO NÃO ANALISADO"
+                # Mostra o MOTIVO específico do gap pra o operador não precisar
+                # adivinhar se o problema é scraper (sem URL/detalhe), decoy,
+                # PDF sumiu ou extração falhou. Prefixo "LAUDO NÃO ANALISADO"
+                # preservado pra filtros históricos continuarem casando.
+                situacao = situacao_label(r["status_laudo"]) or "⚠ LAUDO NÃO ANALISADO"
             elif r["viavel"]:
                 situacao = "✓ Viável"
             else:
@@ -414,8 +425,12 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO ANALISADO quando o PDF não foi extraído. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠, não dê lance — os números numéricos ficam '—' até o retry do laudo rodar.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. "
+                "⚠ LAUDO NÃO ANALISADO sufixado com o motivo específico: "
+                "'detalhe não raspado' · 'URL não encontrada' · 'URL decoy' · "
+                "'PDF ausente' · 'extração falhou' (ver `make auditar-laudos`). "
+                "Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
+                "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠, não dê lance — os números numéricos ficam '—' até o retry do laudo rodar; o sufixo indica se a próxima triagem resolve (sem URL/detalhe/PDF) ou se precisa de auto-fix (URL decoy → `make limpar-decoys`).",
             ],
             [
                 "Modelo",

@@ -379,6 +379,22 @@ Já registrado:
   - Lotes sem `origem_cidade`/`origem_uf` populados não entram na contagem (o scraper costuma popular, mas snapshots antigos podem ter NULL).
   - `lru_cache(32)` em `carregar_empresa` significa que mudanças no YAML em runtime do mesmo processo só refletem após reload — não impacta operação batch (script encerra entre runs).
 
+### T — Auditoria de laudos + motivo específico na planilha ✅
+- **Branch:** `claude/great-turing-TjfUI`
+- **Arquivos:**
+  - [`carros_sa/tools/auditoria_laudos.py`](carros_sa/tools/auditoria_laudos.py) — novo `StatusLaudo` enum (OK + 5 modos de falha: `SEM_DETALHE`, `SEM_URL`, `URL_DECOY`, `PDF_AUSENTE`, `EXTRACAO_FALHOU`) + `classificar_status(lote, laudo)` com caminho feliz (cache conf≥0.6 → OK) seguido do diagnóstico do primeiro ponto do pipeline que falhou + `situacao_label(status)` com prefixo histórico "LAUDO NÃO ANALISADO" preservado + `auditar_empresa(empresa_id, session)` retornando `ResultadoAuditoria` (contagens + IDs de lotes por status).
+  - [`scripts/auditar_laudos.py`](scripts/auditar_laudos.py) — CLI Typer com tabela Rich, ação sugerida por status, flag `--auto-fix` (chama `limpar_decoys` + reusa `_reprocessar_um` do `reprocessar_laudos.py` pra re-extrair de PDF local). **Exit code != 0 quando sobra qualquer gap** — permite plugar em cron/CI.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `_query` delega ao `classificar_status`; célula "Situação" mostra o sufixo específico (`⚠ LAUDO NÃO ANALISADO · URL decoy`, `· PDF ausente`, etc.) em vez do ⚠ genérico; Glossário atualizado.
+  - [`Makefile`](Makefile) — alvo `make auditar-laudos [EMPRESA=<id>] [FIX=1]`.
+  - [`tests/test_auditoria_laudos.py`](tests/test_auditoria_laudos.py) — 14 testes novos: 1 por modo de falha + OK + sufixos distintos + filtro de empresa ativa + 2 testes de exit code do CLI (isolando DB com `CARROS_SA_DB` + `importlib.reload`).
+- **Motivação:** Usuário (2026-04-20): "Garantir que todos carros na lista tem laudo baixado, revisado e link na planilha. Se não, identificar razão e resolver pra nunca mais acontecer." Antes a planilha mostrava um único ⚠ genérico pra 5 causas distintas; operador tinha que escavar no DB pra descobrir se o problema era scraper sem detalhe, URL decoy, PDF sumido ou extração falhada. Agora cada gap carrega sua causa e a ação correspondente fica documentada num único lugar.
+- **Como funciona:** Mesmo universo do `SheetsExporter` (AvaliacaoLote por empresa + fim_em > now). Classificador tem short-circuit: se `LaudoCache.confidence >= 0.6`, retorna `OK` direto (cache confiável implica que todas as etapas anteriores funcionaram). Senão, diagnostica na ordem: `raw_json.detalhe` presente? → URL no detalhe? → passa `is_laudo_pdf_url`? → PDF em `data/laudos_pdfs/<lote>.pdf`? → cai em `EXTRACAO_FALHOU`. Mapa de ações curto (`_ACAO` no CLI): `SEM_DETALHE`/`SEM_URL`/`PDF_AUSENTE` → rodar `make triagem` (re-scrape); `URL_DECOY` → auto-fix via `limpar_decoys`; `EXTRACAO_FALHOU` → auto-fix re-extrai do PDF local.
+- **Cobertura:** 325 testes passando (+14 novos). Sheets backward-compat via short-circuit (fixtures antigas sem `raw_json.detalhe` continuam sendo OK quando cache conf≥0.6).
+- **Limitações conhecidas:**
+  - Auto-fix de `EXTRACAO_FALHOU` depende de vision client online (`GEMINI_API_KEY` / `ANTHROPIC_API_KEY`); sem chave, CLI loga e pula sem quebrar.
+  - `PDF_AUSENTE` só se resolve re-scraping (URL assinada do Auto Avaliar expira ~1h, não dá pra só re-baixar).
+  - Prefixo histórico "LAUDO NÃO ANALISADO" preservado por compat com filtros do operador — nova mensagem é `⚠ LAUDO NÃO ANALISADO · <sufixo>`, o prefixo continua casando em buscas antigas.
+
 ---
 
 ## Marcos (do plano arquitetural original)

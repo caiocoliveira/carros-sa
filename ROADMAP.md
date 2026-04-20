@@ -369,6 +369,14 @@ Já registrado:
 - **Cobertura:** 8 testes novos (202 total verde). Migração SQLite validada: campo aparece tanto em DB fresco quanto em DB existente sem perda de dados.
 - **Limitações:** coluna tem largura livre — se LLM retornar justificativa muito longa (>500 chars) vai ficar feia no Google Sheets. Prompt hoje pede "uma frase", mas não enforce. Mitigável com truncagem se virar problema.
 
+### T — Coluna FIPE + alerta de lance acima da FIPE ✅
+- **Branch:** `claude/fipe-value-bid-validation-AFYm2`
+- **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) (nova coluna `FIPE (R$)` + constante `FIPE_ALERTA_THRESHOLD = 1.05` + empilhamento do prefixo `⚠ LANCE > FIPE ·` na Situação), [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) (invariante + extractor da nova coluna), [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) (`TestFipeColunaEAlerta`, 5 testes).
+- **Motivação:** usuário pediu pra "voltar com o valor FIPE" na planilha e "sempre avaliar quando o lance máximo passa muito da FIPE". `AvaliacaoLote.fipe` já era persistido pelo precificador mas não era exposto ao operador.
+- **Como funciona:** `FIPE (R$)` exibe o bruto da tabela FIPE (placeholder `—` pra registros antigos `fipe=None`). Alerta dispara quando `preco_max > fipe × 1.05` — `preco_giro_fipe = fipe × 0.95` por design, então após descontar reforma + frete + taxas + margem mínima o lance máximo deveria ficar bem abaixo da FIPE; quando ultrapassa, significa que a âncora sumiu (FIPE=0 ou None no snapshot) ou houve outlier na precificação. `⚠ LAUDO NÃO ANALISADO` tem prioridade (não empilha alerta FIPE — o laudo precisa ser resolvido antes).
+- **Cobertura:** 5 testes novos cobrem valor exibido, placeholder pra fipe ausente, alerta disparado, alerta não-disparado, e prioridade do flag de laudo.
+- **Limitações:** threshold de 1.05 é heurístico; se aparecer ruído na prática, dá pra expor como config por empresa (hoje é constante).
+
 ### S — Aba Cidades & Frete na planilha ✅
 - **Branch:** `claude/festive-tesla-6c18ae`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — novo `_write_cidades_frete_sheet(empresa_id, session)` engatado no `exportar()`. Aba `cidades_<empresa_id>` com 1 linha por município no raio operacional + frete por categoria + contagem de lotes ativos (fim_em > now) com origem naquela cidade.

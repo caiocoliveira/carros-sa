@@ -35,12 +35,20 @@ HEADER = [
     "KM",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
+    "FIPE (R$)",
     "Lucro/mês (R$)",
     "ROI anualizado (%)",
     "Reforma (R$)",
     "Anúncio",
     "Laudo",
 ]
+
+# Flag o operador quando o lance máximo fica em 5% ou mais acima da FIPE.
+# Motivação: preco_giro_fipe = fipe × 0.95 por design; após descontar reforma,
+# frete, taxas e margem mínima, preco_max deveria ficar BEM abaixo da FIPE.
+# Se ultrapassa, significa que a âncora de FIPE sumiu (fipe=0/None) ou houve
+# um outlier na precificação — operador precisa conferir antes de dar lance.
+FIPE_ALERTA_THRESHOLD = 1.05
 
 # Formato numérico explícito por coluna. Necessário porque `ws.clear()` apaga
 # valores mas PRESERVA formatação de célula — colunas cuja posição já foi
@@ -55,6 +63,7 @@ COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
+    "FIPE (R$)": _NUMBER_INTEIRO,
     "Lucro/mês (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
@@ -153,6 +162,14 @@ class SheetsExporter:
 
             viavel = av.preco_max > (lote.lance_atual or 0)
 
+            # Alerta quando o lance máximo passa da FIPE — preco_giro_fipe é
+            # fipe × 0.95 por design, então preco_max > fipe × 1.05 indica que
+            # a âncora FIPE sumiu ou houve outlier. Registros antigos sem
+            # fipe persistido (Optional[int]) não disparam o alerta.
+            passa_fipe = bool(
+                av.fipe and av.fipe > 0 and av.preco_max > av.fipe * FIPE_ALERTA_THRESHOLD
+            )
+
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
@@ -198,6 +215,8 @@ class SheetsExporter:
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
+                "fipe": av.fipe,
+                "passa_fipe": passa_fipe,
                 "roi_anualizado": round(roi_anual, 1),
                 "lucro_mes": lucro_mes,
                 "reforma_estimada": av.reforma_estimada,
@@ -237,6 +256,10 @@ class SheetsExporter:
                 situacao = "✓ Viável"
             else:
                 situacao = "✗ Caro demais"
+            # Empilha o alerta de "lance passa da FIPE" em cima da situação
+            # regular — operador vê o status + o red flag na mesma célula.
+            if r["passa_fipe"] and not nao_analisado:
+                situacao = "⚠ LANCE > FIPE · " + situacao
             # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
             # em vez da URL crua longa. Sheets interpreta com USER_ENTERED.
             if r["url"]:
@@ -271,6 +294,10 @@ class SheetsExporter:
                 roi_anual_cell = r["roi_anualizado"]
                 reforma_cell = r["reforma_estimada"]
 
+            # FIPE é independente da análise do laudo — vem do SinalMercado e é
+            # útil mesmo quando o operador ainda não conferiu o PDF.
+            fipe_cell = r["fipe"] if r["fipe"] else "—"
+
             sheet_rows.append([
                 rank,
                 situacao,
@@ -281,6 +308,7 @@ class SheetsExporter:
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
                 preco_max_cell,
+                fipe_cell,
                 lucro_mes_cell,
                 roi_anual_cell,
                 reforma_cell,
@@ -414,8 +442,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO ANALISADO quando o PDF não foi extraído. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠, não dê lance — os números numéricos ficam '—' até o retry do laudo rodar.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO ANALISADO quando o PDF não foi extraído. Quando Lance Máximo > FIPE × 1.05, prefixa '⚠ LANCE > FIPE ·' na célula. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
+                "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠ LAUDO, não dê lance — números ficam '—' até o retry rodar. Se ⚠ LANCE > FIPE, a âncora FIPE sumiu ou houve outlier; conferir antes de dar lance.",
             ],
             [
                 "Modelo",
@@ -458,6 +486,12 @@ class SheetsExporter:
                 "Precificador",
                 "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo.",
                 "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
+            ],
+            [
+                "FIPE (R$)",
+                "AvaliadorMercado",
+                "Valor bruto da tabela FIPE pro (marca, modelo, ano). '—' quando o registro é antigo e não tem FIPE persistida.",
+                "Âncora de referência exibida lado a lado com o Lance Máximo. Quando Lance Máximo > FIPE × 1.05, o prefixo '⚠ LANCE > FIPE ·' aparece em Situação — operador precisa conferir antes de dar lance (âncora FIPE sumiu ou outlier na precificação).",
             ],
             [
                 "Lucro/mês (R$)",

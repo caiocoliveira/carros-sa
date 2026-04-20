@@ -63,6 +63,7 @@ def _avaliacao(
     preco_max: int = 30000,
     preco_giro_fipe: int = 35000,
     preco_giro_aa=None,
+    fipe: Optional[int] = None,
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
         empresa_id=empresa_id,
@@ -79,6 +80,7 @@ def _avaliacao(
         preco_giro=preco_giro,
         preco_giro_fipe=preco_giro_fipe,
         preco_giro_aa=preco_giro_aa,
+        fipe=fipe,
         justificativa="Laudo leve, FIPE R$30k, giro estimado 30 dias.",
         criado_em=datetime.utcnow(),
     )
@@ -891,3 +893,137 @@ class TestCidadesFreteSheet:
                 # `uberlandia_mg` não tem YAML — exportar deve completar sem erro
                 n = exporter.exportar("uberlandia_mg", session)
         assert n == 1
+
+
+class TestFipeColunaEAlerta:
+    """Coluna FIPE (R$) exibe o valor bruto da tabela FIPE; alerta na Situação
+    dispara quando Lance Máximo > FIPE × 1.05 (âncora sumiu ou outlier)."""
+
+    def test_coluna_fipe_exibe_valor_bruto(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", fipe=32000))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_fipe = HEADER.index("FIPE (R$)")
+        assert rows[2][idx_fipe] == 32000
+
+    def test_fipe_ausente_mostra_placeholder(self):
+        """Registros antigos sem fipe persistida → célula '—', sem crash."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))  # fipe=None (default)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_fipe = HEADER.index("FIPE (R$)")
+        assert rows[2][idx_fipe] == "—"
+        # E o alerta de FIPE NÃO dispara quando não há fipe de referência.
+        idx_situacao = HEADER.index("Situação")
+        assert "LANCE > FIPE" not in rows[2][idx_situacao]
+
+    def test_alerta_quando_preco_max_passa_da_fipe(self):
+        """Lance Máximo acima de FIPE × 1.05 → prefixo '⚠ LANCE > FIPE ·' na Situação."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20000))
+            # fipe=30k, preco_max=40k → 40k/30k = 1.33 > 1.05 → dispara
+            session.add(_avaliacao("L001", preco_max=40000, fipe=30000))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_situacao = HEADER.index("Situação")
+        situacao = rows[2][idx_situacao]
+        assert situacao.startswith("⚠ LANCE > FIPE ·")
+        # Preserva o status regular atrás do prefixo (viável, nesse caso).
+        assert "Viável" in situacao
+
+    def test_alerta_nao_dispara_quando_preco_max_esta_abaixo_da_fipe(self):
+        """Cenário regular: preco_max < fipe → sem alerta de FIPE."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20000))
+            # fipe=35k, preco_max=30k → 30/35 = 0.86 < 1.05 → sem alerta
+            session.add(_avaliacao("L001", preco_max=30000, fipe=35000))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_situacao = HEADER.index("Situação")
+        assert "LANCE > FIPE" not in rows[2][idx_situacao]
+
+    def test_alerta_nao_substitui_laudo_nao_analisado(self):
+        """Se o laudo não foi analisado, o status '⚠ LAUDO NÃO ANALISADO' tem
+        prioridade — o alerta FIPE não é empilhado (operador precisa resolver
+        o laudo antes, senão os números que dispararam o alerta são lixo)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20000))
+            session.add(_avaliacao("L001", preco_max=40000, fipe=30000))
+            # Sem LaudoCache → laudo não analisado
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_situacao = HEADER.index("Situação")
+        assert rows[2][idx_situacao] == "⚠ LAUDO NÃO ANALISADO"

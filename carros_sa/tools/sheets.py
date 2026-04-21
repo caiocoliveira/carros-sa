@@ -42,6 +42,39 @@ HEADER = [
     "Laudo",
 ]
 
+# Cabeçalho da aba de pendentes (lotes que caíram de fora da main por faltar
+# laudo baixado/revisado/link). Coluna "Motivo" explica exatamente o que falta
+# pro operador agir (abrir o anúncio manualmente ou aguardar próximo retry).
+HEADER_PENDENTES = [
+    "Rank",
+    "Motivo",
+    "Modelo",
+    "Ano",
+    "Cidade",
+    "Fim do Leilão",
+    "KM",
+    "Lance Atual (R$)",
+    "Anúncio",
+    "Laudo",
+]
+
+# Mensagens humanas por motivo. Chaves fixas → testes batem strings específicas
+# sem acoplar em implementação. Se o motivo mudar, os testes capturam via chave.
+MOTIVOS_PENDENCIA = {
+    "sem_url_e_extracao_falhou": (
+        "Scraper não achou o link do laudo no modal e a extração falhou — "
+        "abrir o anúncio manualmente pra inspecionar"
+    ),
+    "url_invalida_ou_decoy": (
+        "URL do laudo ausente ou aponta pra decoy (Relatório de Transparência) — "
+        "scraper não localizou o PDF real; retry diário vai tentar de novo"
+    ),
+    "extracao_falhou": (
+        "URL do laudo ok, mas extração ficou abaixo do limiar de confiança — "
+        "LLM indisponível ou PDF corrompido; retry diário vai tentar de novo"
+    ),
+}
+
 # Formato numérico explícito por coluna. Necessário porque `ws.clear()` apaga
 # valores mas PRESERVA formatação de célula — colunas cuja posição já foi
 # ocupada por "Atualizado em" em versões anteriores do HEADER herdaram formato
@@ -72,6 +105,22 @@ def _col_letter(idx_0based: int) -> str:
             return letters
 
 
+def _classificar_pendencia(*, laudo_analisado: bool, laudo_url_valida: bool) -> Optional[str]:
+    """Retorna chave em MOTIVOS_PENDENCIA se lote falta algum requisito pra main
+    sheet, ou None se está completo (laudo baixado+revisado E link válido).
+
+    Separado do `_query` pra permitir teste direto dos quatro quadrantes
+    (2x2: laudo_analisado × laudo_url_valida).
+    """
+    if laudo_analisado and laudo_url_valida:
+        return None
+    if not laudo_analisado and not laudo_url_valida:
+        return "sem_url_e_extracao_falhou"
+    if not laudo_url_valida:
+        return "url_invalida_ou_decoy"
+    return "extracao_falhou"
+
+
 def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
     """ROI garantido se ganhar o lote exatamente pelo lance máximo.
 
@@ -100,25 +149,56 @@ class SheetsExporter:
         return self._gc
 
     def exportar(self, empresa_id: str, session: Session) -> int:
-        """Lê SQLite, escreve aba <empresa_id> + aba de cidades + aba Glossário. Retorna n linhas exportadas."""
+        """Lê SQLite e escreve três abas: main (<empresa_id>), pendentes, cidades, Glossário.
+
+        A aba principal só contém lotes "completos" — com laudo baixado,
+        revisado (LaudoCache.confidence >= 0.6) e link válido (URL passa
+        `is_laudo_pdf_url`). Lotes faltando qualquer uma dessas três coisas
+        vão pra aba `<empresa_id>_pendentes` com uma coluna "Motivo" explicando
+        o que está faltando. Assim o operador vê só aquilo em que pode agir
+        no fluxo principal e mantém visibilidade do backlog em aba separada.
+
+        Retorna n linhas EXPORTADAS NA ABA PRINCIPAL.
+        """
         rows = self._query(empresa_id, session)
         # Filtro duro: lote encerrado (timer vencido OU badge ARREMATADO) é
         # ruído — operador não pode mais dar lance. Antes empurrávamos pro
         # final; agora removemos completamente.
         rows_ativos = [r for r in rows if not r["encerrado"]]
+
+        # Particiona: "ok" = laudo baixado+revisado+link válido; resto vai
+        # pra aba pendentes com o motivo específico.
+        rows_ok = [r for r in rows_ativos if r["motivo_pendencia"] is None]
+        rows_pendentes = [r for r in rows_ativos if r["motivo_pendencia"] is not None]
+
         rows_sorted = sorted(
-            rows_ativos,
+            rows_ok,
             key=lambda r: (
-                0 if r["laudo_analisado"] else 2,   # lotes com laudo real primeiro;
-                                                    # não-analisados só no final pra
-                                                    # o operador conferir depois
                 0 if r["viavel"] else 1,            # viáveis antes dos inviáveis
                 -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
             ),
         )
+        # Pendentes ordenados por urgência (fim_em mais próximo primeiro) pra
+        # o operador priorizar retry manual nos lotes que mais estão pra fechar.
+        rows_pendentes_sorted = sorted(
+            rows_pendentes,
+            key=lambda r: r["fim_em_raw"] or datetime.max,
+        )
+
         self._write_sheet(empresa_id, rows_sorted)
+        self._write_pendentes_sheet(empresa_id, rows_pendentes_sorted)
         self._write_cidades_frete_sheet(empresa_id, session)
         self._write_glossario_sheet()
+
+        # GUARD DE INVARIANTE: por construção, nenhum lote em `rows_ok` pode
+        # ter motivo_pendencia não-None. Se esse assert disparar em produção,
+        # é sinal de que alguém mudou `_classificar_pendencia` sem atualizar
+        # o filtro em `exportar`. O teste `test_main_sheet_nunca_tem_lote_pendente`
+        # em tests/test_exportar_sheets.py cobre o mesmo invariante em CI.
+        assert all(r["motivo_pendencia"] is None for r in rows_sorted), (
+            "main sheet tem lote pendente — invariante 'laudo baixado+revisado+link' quebrado"
+        )
+
         return len(rows_sorted)
 
     def _query(self, empresa_id: str, session: Session) -> List[dict]:
@@ -189,12 +269,19 @@ class SheetsExporter:
             # fallback de valor, avisar explicitamente que não foi analisado.
             laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
 
+            # Classifica: invariante do sheet principal é "tem laudo baixado,
+            # revisado E link visível". `motivo_pendencia=None` = lote completo.
+            motivo_pendencia = _classificar_pendencia(
+                laudo_analisado=laudo_analisado, laudo_url_valida=bool(laudo_url),
+            )
+
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo}",
                 "ano": lote.ano,
                 "cidade": lote.origem_cidade or "—",
                 "fim_em": fim_em_str,
+                "fim_em_raw": lote.fim_em,  # pra ordenar pendentes por urgência
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
@@ -206,6 +293,7 @@ class SheetsExporter:
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "laudo_analisado": laudo_analisado,
+                "motivo_pendencia": motivo_pendencia,
             })
         return rows
 
@@ -230,46 +318,22 @@ class SheetsExporter:
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):
-            nao_analisado = not r["laudo_analisado"]
-            if nao_analisado:
-                situacao = "⚠ LAUDO NÃO ANALISADO"
-            elif r["viavel"]:
-                situacao = "✓ Viável"
-            else:
-                situacao = "✗ Caro demais"
-            # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
-            # em vez da URL crua longa. Sheets interpreta com USER_ENTERED.
+            # Garante de contrato: quem chega aqui JÁ passou pelo filtro de
+            # completude em `exportar()`, então `laudo_analisado` é True e
+            # `laudo_url` é válida. Os branches de "⚠ LAUDO NÃO ANALISADO"
+            # + numéricos "—" foram removidos — lotes incompletos vão pra
+            # aba `<empresa_id>_pendentes` com coluna Motivo explicando.
+            situacao = "✓ Viável" if r["viavel"] else "✗ Caro demais"
+
+            # URL → HYPERLINK clicável com label curto ("Abrir anúncio").
             if r["url"]:
                 url_escaped = r["url"].replace('"', '""')
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
-            # Link pro PDF do laudo. Se URL passou pelo filtro de decoy
-            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, "—".
-            # Motivação: usuário quer conferir o laudo antes de dar lance
-            # sem precisar clicar no anúncio, abrir o modal e esperar carregar.
-            if r["laudo_url"]:
-                laudo_escaped = r["laudo_url"].replace('"', '""')
-                laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
-            else:
-                laudo_cell = "—"
-
-            # Quando o laudo não foi analisado de verdade (sem PDF ou extração
-            # falhou), NÃO exibimos preço-alvo, ROI nem reforma — seriam chutes
-            # baseados em laudo vazio e induziriam o operador a dar lance no
-            # escuro. Mantemos identificação do lote + link pra ele resolver
-            # manualmente. O retry automático (scripts/retry_laudos_pendentes.py)
-            # tenta preencher esses campos na próxima passada.
-            if nao_analisado:
-                preco_max_cell = "—"
-                lucro_mes_cell = "—"
-                roi_anual_cell = "—"
-                reforma_cell = "—"
-            else:
-                preco_max_cell = r["preco_max"]
-                lucro_mes_cell = r["lucro_mes"]
-                roi_anual_cell = r["roi_anualizado"]
-                reforma_cell = r["reforma_estimada"]
+            # Link pro PDF do laudo — por invariante da main, `laudo_url` não é None.
+            laudo_escaped = r["laudo_url"].replace('"', '""')
+            laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
 
             sheet_rows.append([
                 rank,
@@ -280,10 +344,10 @@ class SheetsExporter:
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
-                preco_max_cell,
-                lucro_mes_cell,
-                roi_anual_cell,
-                reforma_cell,
+                r["preco_max"],
+                r["lucro_mes"],
+                r["roi_anualizado"],
+                r["reforma_estimada"],
                 url_cell,
                 laudo_cell,
             ])
@@ -293,6 +357,69 @@ class SheetsExporter:
         ws.update(sheet_rows, value_input_option="USER_ENTERED")
 
         # Congela banner (linha 1) + header (linha 2)
+        ws.freeze(rows=2)
+
+    def _write_pendentes_sheet(self, empresa_id: str, rows: List[dict]) -> None:
+        """Aba `<empresa_id>_pendentes` — lotes que falharam o invariante da main.
+
+        Cada linha tem coluna "Motivo" descrevendo o que falta (sem URL, extração
+        falhou, ambos). Operador usa essa aba pra abrir o anúncio manualmente e
+        resolver (conferir laudo no site, dar retry forçado, ou descartar o lote
+        se o grupo não expõe laudo de jeito nenhum). Retry diário do cron
+        (`reprocessar_lotes_do_db.py --somente-laudo-pendente`) tenta mover
+        lotes daqui pra main automaticamente.
+
+        A aba SEMPRE é (re)escrita — inclusive quando rows está vazia, pra que
+        o operador veja banner limpo indicando "sem pendências".
+        """
+        gc = self._client()
+        sh = gc.open_by_key(self._spreadsheet_id)
+        aba_nome = f"{empresa_id}_pendentes"
+        try:
+            ws = sh.worksheet(aba_nome)
+        except Exception:
+            ws = sh.add_worksheet(
+                title=aba_nome, rows=max(len(rows) + 10, 100), cols=len(HEADER_PENDENTES),
+            )
+
+        ts = datetime.now().strftime("%d/%m/%Y %H:%M")
+        if rows:
+            subtitulo = f"{len(rows)} lote(s) sem laudo baixado/revisado/link — atualizado {ts}"
+        else:
+            subtitulo = f"Sem pendências — todos os lotes ativos têm laudo completo ({ts})"
+        banner = [subtitulo] + [""] * (len(HEADER_PENDENTES) - 1)
+
+        sheet_rows = [banner, HEADER_PENDENTES]
+        for rank, r in enumerate(rows, start=1):
+            if r["url"]:
+                url_escaped = r["url"].replace('"', '""')
+                url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
+            else:
+                url_cell = "—"
+            # Link do laudo pode existir (extracao_falhou) ou não — respeita o
+            # que veio filtrado pelo `is_laudo_pdf_url` lá no _query.
+            if r["laudo_url"]:
+                laudo_escaped = r["laudo_url"].replace('"', '""')
+                laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
+            else:
+                laudo_cell = "—"
+
+            motivo_humano = MOTIVOS_PENDENCIA.get(r["motivo_pendencia"], r["motivo_pendencia"])
+            sheet_rows.append([
+                rank,
+                motivo_humano,
+                r["modelo"],
+                r["ano"],
+                r["cidade"],
+                r["fim_em"],
+                r["km"] if r["km"] is not None else "—",
+                r["lance_atual"],
+                url_cell,
+                laudo_cell,
+            ])
+
+        ws.clear()
+        ws.update(sheet_rows, value_input_option="USER_ENTERED")
         ws.freeze(rows=2)
 
     @staticmethod
@@ -414,8 +541,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO ANALISADO quando o PDF não foi extraído. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠, não dê lance — os números numéricos ficam '—' até o retry do laudo rodar.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. Lotes encerrados (badge ARREMATADO ou Fim do Leilão passado) são filtrados antes do export. Lotes sem laudo baixado+revisado+link válido são movidos pra aba '<empresa>_pendentes' com coluna Motivo — NÃO entram na aba principal.",
+                "Resumo de uma célula do que o operador pode/deve fazer. Aba principal é invariante: todo lote aqui tem laudo completo e link clicável. Pra acompanhar lotes sem laudo, olhar a aba de pendentes.",
             ],
             [
                 "Modelo",
@@ -486,8 +613,14 @@ class SheetsExporter:
             [
                 "Laudo",
                 "Scraper detalhe",
-                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. URLs que não são laudo real (Relatório de Transparência, listagem) são filtradas e a célula fica '—'.",
-                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. '—' = laudo não achado ou selo 'SEM LAUDO'.",
+                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. Na aba principal SEMPRE tem link (invariante — lotes sem link vão pra '<empresa>_pendentes').",
+                "Evidência material pra confirmar avarias antes do lance. Se clicar e der 404/expirado, retry diário vai revalidar na próxima coleta.",
+            ],
+            [
+                "Aba '<empresa>_pendentes'",
+                "Derivado",
+                "Lotes ativos sem laudo baixado+revisado+link válido. Coluna Motivo explica o que falta: (a) scraper não achou o link no modal, (b) URL era decoy filtrado, (c) extração LLM ficou abaixo de confidence 0.6.",
+                "Operador usa pra decidir se abre o anúncio manualmente, força retry, ou descarta. Retry do cron (2x/dia) tenta mover lotes daqui pra main automaticamente.",
             ],
         ]
 

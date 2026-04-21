@@ -23,7 +23,8 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
+from carros_sa.scraping.parsers import is_laudo_pdf_url
+from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo, _classificar_pendencia
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
@@ -80,7 +81,12 @@ CHECKS: Dict[str, Validator] = {
         "Reforma negativa" if v is not None and v < 0 else None
     ),
     "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
-    "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
+    "Laudo": lambda v, r: (
+        # Na aba principal o link do laudo é INVARIANTE (lotes sem laudo vão pra
+        # aba de pendentes, não aqui). Se um "—" escapa pra main, é bug.
+        "Laudo '—' na aba principal — lote deveria ter sido filtrado pra '<empresa>_pendentes'"
+        if v == "—" else None
+    ),
 }
 
 
@@ -158,6 +164,16 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
                 scraped_at_str = str(lote.scraped_at)
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
+
+        # Classifica pendência igual a `SheetsExporter._query` pra podermos
+        # filtrar lotes que NÃO vão pra main sheet (eles tem aba própria).
+        laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
+        laudo_url_valida = bool(is_laudo_pdf_url(laudo_url_raw))
+        laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
+        motivo_pendencia = _classificar_pendencia(
+            laudo_analisado=laudo_analisado, laudo_url_valida=laudo_url_valida,
+        )
+
         rows.append({
             "lote_id": av.lote_id,
             "modelo": f"{lote.marca} {lote.modelo}".strip(),
@@ -189,11 +205,15 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro": av.preco_giro,
             "viavel": viavel,
             "encerrado": encerrado,
+            "laudo_url": laudo_url_raw if laudo_url_valida else None,
+            "motivo_pendencia": motivo_pendencia,
         })
 
-    # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
-    # primeiro, desempate por folga de lance.
+    # Espelha SheetsExporter.exportar: filtra encerrados + pendentes (lotes
+    # sem laudo baixado/revisado/link vão pra aba `<empresa>_pendentes`, não
+    # pra main — auditoria só deve olhar a main).
     rows = [r for r in rows if not r["encerrado"]]
+    rows = [r for r in rows if r.get("motivo_pendencia") is None]
     rows.sort(key=lambda r: (
         0 if r["viavel"] else 1,
         -(r["preco_max"] - r["lance_atual"]),

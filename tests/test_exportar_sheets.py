@@ -35,12 +35,26 @@ def _engine_mem():
 
 def _lote(lote_id: str = "L001", marca: str = "Ford", modelo: str = "Fiesta", ano: int = 2013,
           km: Optional[int] = 45000, lance_atual: int = 20000,
-          fim_em: Optional[datetime] = None) -> Lote:
+          fim_em: Optional[datetime] = None,
+          com_laudo_url: bool = True) -> Lote:
     # fim_em default no futuro pra passar pelo filtro de "sem data de leilão" do
     # exportador. Testes que querem cobrir o caso None (lote fora de leilão ativo)
     # passam fim_em=... explicitamente como sentinela.
     if fim_em is None:
         fim_em = datetime.now() + timedelta(days=3)
+    # A aba principal exige laudo_pdf_url válida (invariante pós-fix do split em
+    # pendentes). Helpers antigos criavam lote sem URL porque a invariante
+    # ainda não existia — agora injetamos URL de laudo válida por default e
+    # testes que cobrem cenários de URL ausente passam `com_laudo_url=False`.
+    raw_json = {}
+    if com_laudo_url:
+        raw_json = {
+            "detalhe": {
+                "laudo_pdf_url": (
+                    f"https://storage.googleapis.com/doc-b2b/laudos/{lote_id}/laudo.pdf?sig=test"
+                ),
+            },
+        }
     return Lote(
         id=lote_id,
         leilao="auto_arremate",
@@ -51,6 +65,7 @@ def _lote(lote_id: str = "L001", marca: str = "Ford", modelo: str = "Fiesta", an
         km=km,
         lance_atual=lance_atual,
         fim_em=fim_em,
+        raw_json=raw_json,
         scraped_at=datetime.utcnow(),
     )
 
@@ -153,8 +168,9 @@ class TestSheetsExporterQuery:
                 n = exporter.exportar("uberlandia_mg", session)
 
         assert n == 2
-        # update é chamado 2x: primeira = aba da empresa, segunda = aba Glossário
-        assert mock_ws.update.call_count == 2
+        # update é chamado 3x: main + pendentes + Glossário (cidades pula p/ empresa
+        # sem YAML). Mock único de worksheet colapsa todas as chamadas no mesmo mock.
+        assert mock_ws.update.call_count == 3
         # Layout: rows[0] = banner de última atualização, rows[1] = HEADER
         call_args = mock_ws.update.call_args_list[0][0][0]
         assert "Última atualização" in call_args[0][0]
@@ -195,15 +211,17 @@ class TestSheetsExporterQuery:
         assert "Compass" in rows[3][idx_modelo]
         assert "Caro" in rows[3][idx_situacao]
 
-    def test_exportar_sem_laudo_marca_nao_analisado(self):
-        """Lote sem LaudoCache é exportado mas sinaliza "LAUDO NÃO ANALISADO" e zera
-        campos numéricos derivados do laudo — operador não pode dar lance sem conferir
-        primeiro (feedback usuário 2026-04-18)."""
+    def test_exportar_sem_laudo_vai_pra_pendentes(self):
+        """Lote sem LaudoCache falha o invariante (laudo não analisado) → NÃO entra
+        na main; é movido pra aba de pendentes com Motivo explicando. Defende o
+        contrato 'laudo baixado+revisado+link' da aba principal — operador só
+        vê ali o que pode avaliar diretamente."""
         engine = _engine_mem()
         with Session(engine) as session:
+            # Lote tem URL de laudo (default do helper), mas não tem LaudoCache.
+            # Motivo esperado: `extracao_falhou` (URL ok, extração não rolou).
             session.add(_lote("L001"))
             session.add(_avaliacao("L001"))
-            # sem LaudoCache → laudo não foi analisado
             session.commit()
 
         mock_ws = MagicMock()
@@ -217,21 +235,47 @@ class TestSheetsExporterQuery:
             with Session(engine) as session:
                 n = exporter.exportar("uberlandia_mg", session)
 
-        assert n == 1
-        rows = mock_ws.update.call_args_list[0][0][0]
-        data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
-        # Numéricos derivados de um laudo vazio viram traço: piso de R$ 1k em
-        # "Reforma" + ROI/preço-alvo calculados com reforma=piso seriam
-        # tudo chute, então a planilha esconde.
-        assert data_row[HEADER.index("Reforma (R$)")] == "—"
-        assert data_row[HEADER.index("Lance Máximo (R$)")] == "—"
-        assert data_row[HEADER.index("ROI anualizado (%)")] == "—"
-        assert data_row[HEADER.index("Lucro/mês (R$)")] == "—"
+        assert n == 0, "main deve estar vazia — lote sem laudo cai em pendentes"
+        # update[0] = main (vazia), update[1] = pendentes (com o lote), update[2] = glossário
+        main_rows = mock_ws.update.call_args_list[0][0][0]
+        assert len(main_rows) == 2, "só banner + header na main"
+        pendentes_rows = mock_ws.update.call_args_list[1][0][0]
+        # rows[0]=banner, rows[1]=header, rows[2]=primeiro lote pendente
+        assert len(pendentes_rows) >= 3
+        motivo_cell = pendentes_rows[2][1]  # coluna Motivo é a 2ª em HEADER_PENDENTES
+        assert "extração ficou abaixo do limiar" in motivo_cell
 
-    def test_exportar_laudo_fallback_confidence_baixa_marca_nao_analisado(self):
+    def test_exportar_sem_laudo_e_sem_url_vira_pendente_com_motivo_duplo(self):
+        """Lote sem LaudoCache E sem URL de laudo → motivo 'sem_url_e_extracao_falhou'.
+        Cenário mais crítico: scraper falhou E LLM também não rodou. Operador precisa
+        abrir o anúncio manualmente pra decidir."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", com_laudo_url=False))
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar("uberlandia_mg", session)
+
+        assert n == 0
+        pendentes_rows = mock_ws.update.call_args_list[1][0][0]
+        motivo_cell = pendentes_rows[2][1]
+        assert "Scraper não achou o link" in motivo_cell
+
+    def test_exportar_laudo_fallback_confidence_baixa_vai_pra_pendentes(self):
         """LaudoCache com confidence=0.5 é fallback `_laudo_sem_pdf` — trata igual a
-        laudo ausente. Limite 0.6 aceita só laudos realmente extraídos de PDF."""
+        laudo ausente. Limite 0.6 aceita só laudos realmente extraídos de PDF, e
+        abaixo disso o lote cai em pendentes (motivo `extracao_falhou`, pois a URL
+        está presente por default do helper)."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))
@@ -253,11 +297,12 @@ class TestSheetsExporterQuery:
             with Session(engine) as session:
                 n = exporter.exportar("uberlandia_mg", session)
 
-        assert n == 1
-        rows = mock_ws.update.call_args_list[0][0][0]
-        data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
-        assert data_row[HEADER.index("Reforma (R$)")] == "—"
+        assert n == 0, "confidence<0.6 conta como não-revisado → cai em pendentes"
+        main_rows = mock_ws.update.call_args_list[0][0][0]
+        assert len(main_rows) == 2
+        pendentes_rows = mock_ws.update.call_args_list[1][0][0]
+        motivo_cell = pendentes_rows[2][1]
+        assert "extração ficou abaixo do limiar" in motivo_cell
 
     def test_exportar_laudo_confidence_alta_mantem_valores(self):
         """LaudoCache com confidence>=0.6 é laudo real — mantém campos numéricos."""
@@ -341,6 +386,7 @@ class TestSheetsExporterQuery:
         with Session(engine) as session:
             session.add(_lote("L001"))  # url = https://autoavaliar.com.br/lote/L001
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -374,6 +420,7 @@ class TestSheetsExporterQuery:
             }
             session.add(lote)
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))  # laudo revisado — requerido pra main
             session.commit()
 
         mock_ws = MagicMock()
@@ -394,10 +441,10 @@ class TestSheetsExporterQuery:
         assert "doc-b2b/laudos/L001/laudo.pdf" in cell
         assert "Ver laudo" in cell
 
-    def test_exportar_laudo_url_decoy_transparencia_vira_placeholder(self):
-        """URL de Relatório de Transparência (decoy conhecido) NÃO deve virar
-        hyperlink — célula fica '—'. Evita o usuário clicar num PDF de RH
-        achando que é laudo do carro. Cobre 83/85 lotes afetados antes do fix."""
+    def test_exportar_laudo_url_decoy_transparencia_vai_pra_pendentes(self):
+        """URL de Relatório de Transparência (decoy conhecido) não vira link na main —
+        lote cai em pendentes com motivo `url_invalida_ou_decoy`. Cobre o cenário
+        histórico (83/85 lotes afetados antes do fix de deteção de decoy)."""
         engine = _engine_mem()
         decoy = (
             "https://repo-site-aav-production.storage.googleapis.com/app/uploads/"
@@ -405,10 +452,11 @@ class TestSheetsExporterQuery:
             "de-Mulheres-e-Homens-2-o-semestre.pdf"
         )
         with Session(engine) as session:
-            lote = _lote("L001")
+            lote = _lote("L001", com_laudo_url=False)
             lote.raw_json = {"detalhe": {"laudo_pdf_url": decoy}}
             session.add(lote)
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))  # laudo extraído OK, só URL é decoy
             session.commit()
 
         mock_ws = MagicMock()
@@ -420,18 +468,22 @@ class TestSheetsExporterQuery:
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
             with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
+                n = exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args_list[0][0][0]
-        idx_laudo = HEADER.index("Laudo")
-        assert rows[2][idx_laudo] == "—"
+        assert n == 0, "URL decoy ≠ URL válida → não entra na main"
+        pendentes_rows = mock_ws.update.call_args_list[1][0][0]
+        # Motivo esperado: `url_invalida_ou_decoy`
+        motivo_cell = pendentes_rows[2][1]
+        assert "URL do laudo ausente ou aponta pra decoy" in motivo_cell
 
-    def test_exportar_laudo_url_ausente_vira_placeholder(self):
-        """Lote sem `laudo_pdf_url` em raw_json → célula '—', sem crash."""
+    def test_exportar_laudo_url_ausente_vai_pra_pendentes(self):
+        """Lote sem `laudo_pdf_url` em raw_json cai em pendentes com motivo
+        `url_invalida_ou_decoy` (mesmo bucket de URL decoy — ambos = sem link válido)."""
         engine = _engine_mem()
         with Session(engine) as session:
-            session.add(_lote("L001"))   # raw_json default = {}
+            session.add(_lote("L001", com_laudo_url=False))  # raw_json vazio
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -443,11 +495,12 @@ class TestSheetsExporterQuery:
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
             with Session(engine) as session:
-                exporter.exportar("uberlandia_mg", session)
+                n = exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args_list[0][0][0]
-        idx_laudo = HEADER.index("Laudo")
-        assert rows[2][idx_laudo] == "—"
+        assert n == 0
+        pendentes_rows = mock_ws.update.call_args_list[1][0][0]
+        motivo_cell = pendentes_rows[2][1]
+        assert "URL do laudo ausente ou aponta pra decoy" in motivo_cell
 
     def test_exportar_url_vazia_nao_gera_hyperlink(self):
         """Lote sem URL deve cair pro placeholder '—', sem fórmula HYPERLINK quebrada."""
@@ -457,6 +510,7 @@ class TestSheetsExporterQuery:
             lote.url = ""  # sem URL
             session.add(lote)
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -481,6 +535,7 @@ class TestSheetsExporterQuery:
         with Session(engine) as session:
             session.add(_lote("L001"))
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -551,6 +606,99 @@ class TestSheetsExporterQuery:
         assert 20 < roi_val < 80
 
 
+class TestInvarianteMainSheetCompleta:
+    """Invariante: TODO lote na aba principal tem laudo baixado, revisado (confidence
+    >= 0.6) E link válido (passa `is_laudo_pdf_url`). Qualquer combinação faltante
+    (URL decoy, URL ausente, confidence baixa, sem LaudoCache) deve empurrar o lote
+    pra aba `<empresa>_pendentes`. Defende o feedback "garantir que todos carros na
+    lista tem laudo baixado, revisado e link na planilha" — se essa garantia
+    quebrar, esse teste é o primeiro a cair.
+    """
+
+    def test_classificar_pendencia_os_quatro_quadrantes(self):
+        """Matriz 2×2 (laudo_analisado × laudo_url_valida) cobre todas as possibilidades.
+        Implementação explicita invariante: só um canto retorna None (tudo ok)."""
+        from carros_sa.tools.sheets import _classificar_pendencia
+
+        # (1,1) — ok, não há motivo
+        assert _classificar_pendencia(
+            laudo_analisado=True, laudo_url_valida=True,
+        ) is None
+        # (0,0) — ambos faltando, motivo composto
+        assert _classificar_pendencia(
+            laudo_analisado=False, laudo_url_valida=False,
+        ) == "sem_url_e_extracao_falhou"
+        # (1,0) — laudo extraído mas URL decoy/ausente
+        assert _classificar_pendencia(
+            laudo_analisado=True, laudo_url_valida=False,
+        ) == "url_invalida_ou_decoy"
+        # (0,1) — URL ok mas extração falhou
+        assert _classificar_pendencia(
+            laudo_analisado=False, laudo_url_valida=True,
+        ) == "extracao_falhou"
+
+    def test_main_sheet_nunca_tem_lote_pendente(self):
+        """E2E: mistura 4 lotes (1 ok + 3 em cada motivo de pendência), confirma que
+        a main só exporta o ok e os outros 3 caem no pendentes. Se alguém quebrar
+        o filtro em `exportar()` ou mudar `_classificar_pendencia` sem coordenar,
+        esse teste pega antes de ir pro usuário."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # OK: laudo revisado + URL válida
+            session.add(_lote("L_OK"))
+            session.add(_avaliacao("L_OK"))
+            session.add(_laudo("L_OK"))
+            # SEM URL + SEM LAUDO
+            session.add(_lote("L_AMBOS", com_laudo_url=False))
+            session.add(_avaliacao("L_AMBOS"))
+            # URL VÁLIDA + SEM LAUDO (extracao_falhou)
+            session.add(_lote("L_SEMREV"))
+            session.add(_avaliacao("L_SEMREV"))
+            # URL DECOY + LAUDO OK (url_invalida_ou_decoy)
+            decoy = "https://repo-site-aav-production.storage.googleapis.com/Relatorio-de-Transparencia.pdf"
+            l_decoy = _lote("L_DECOY", com_laudo_url=False)
+            l_decoy.raw_json = {"detalhe": {"laudo_pdf_url": decoy}}
+            session.add(l_decoy)
+            session.add(_avaliacao("L_DECOY"))
+            session.add(_laudo("L_DECOY"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar("uberlandia_mg", session)
+
+        assert n == 1, "só L_OK passa pra main"
+        # update[0] = main, update[1] = pendentes, update[2] = glossário
+        main_rows = mock_ws.update.call_args_list[0][0][0]
+        # banner + header + 1 data row
+        assert len(main_rows) == 3
+        # Nenhuma célula na main pode ter "LAUDO NÃO ANALISADO" nem "—" em Laudo
+        idx_laudo = HEADER.index("Laudo")
+        data_row = main_rows[2]
+        laudo_cell = data_row[idx_laudo]
+        assert laudo_cell.startswith("=HYPERLINK("), (
+            f"main tem Laudo sem hyperlink: {laudo_cell!r} — invariante quebrado"
+        )
+        assert "—" not in laudo_cell
+
+        # Pendentes tem os 3 lotes faltosos, cada um com motivo distinto.
+        pendentes_rows = mock_ws.update.call_args_list[1][0][0]
+        assert len(pendentes_rows) == 2 + 3  # banner + header + 3 dados
+        motivos_presentes = {pendentes_rows[i][1] for i in range(2, 5)}
+        # Cada um dos 3 motivos de MOTIVOS_PENDENCIA deve aparecer exatamente uma vez
+        from carros_sa.tools.sheets import MOTIVOS_PENDENCIA
+        assert motivos_presentes == set(MOTIVOS_PENDENCIA.values()), (
+            f"motivos em pendentes não cobrem os 3 quadrantes: {motivos_presentes}"
+        )
+
+
 class TestSheetsExporterFimEmObrigatorio:
     """Lotes sem fim_em (Auto Avaliar não está mais mostrando countdown = lote
     saiu do leilão ativo) não entram no export. Feedback do usuário 2026-04-16:
@@ -563,11 +711,13 @@ class TestSheetsExporterFimEmObrigatorio:
             # L001: com fim_em → aparece
             session.add(_lote("L001"))
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             # L002: sem fim_em → filtrado
             l2 = _lote("L002", modelo="Gol", fim_em=datetime.now() + timedelta(days=3))
             l2.fim_em = None
             session.add(l2)
             session.add(_avaliacao("L002"))
+            session.add(_laudo("L002"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -678,18 +828,21 @@ class TestSheetsExporterEncerrados:
             l1.fim_em = datetime.now() + timedelta(days=3)
             session.add(l1)
             session.add(_avaliacao("L001", preco_max=30000))
+            session.add(_laudo("L001"))
 
             # L002: ativo caro (lance > max) — ainda entra, o operador decide
             l2 = _lote("L002", modelo="Gol", lance_atual=50000)
             l2.fim_em = datetime.now() + timedelta(days=3)
             session.add(l2)
             session.add(_avaliacao("L002", preco_max=30000))
+            session.add(_laudo("L002"))
 
             # L003: encerrado — NÃO entra
             l3 = _lote("L003", modelo="Compass", lance_atual=20000)
             l3.fim_em = datetime.now() - timedelta(days=1)
             session.add(l3)
             session.add(_avaliacao("L003", preco_max=50000))
+            session.add(_laudo("L003"))
             session.commit()
 
         mock_ws = MagicMock()
@@ -771,10 +924,11 @@ class TestCidadesFreteSheet:
     """Aba de cidades do raio operacional + frete por categoria por cidade."""
 
     def _separa_chamadas(self, mock_sh):
-        """Devolve (mock_ws_empresa, mock_ws_cidades, mock_ws_glossario) na ordem em que foram criados."""
+        """Devolve (ws_empresa, ws_pendentes, ws_cidades, ws_glossario) na ordem em que foram criados.
+        Ordem bate com a sequência de _write_*_sheet em SheetsExporter.exportar."""
         # `worksheet(...)` levanta porque a aba ainda não existe → cai no add_worksheet,
         # que retorna a sequência de mocks dada.
-        criados = [MagicMock(), MagicMock(), MagicMock()]
+        criados = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
         mock_sh.worksheet.side_effect = Exception("não existe")
         mock_sh.add_worksheet.side_effect = criados
         return criados
@@ -785,22 +939,24 @@ class TestCidadesFreteSheet:
         with Session(engine) as session:
             session.add(_lote("L001"))
             session.add(_avaliacao("L001", empresa_id="carros_uberlandia"))
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_sh = MagicMock()
         mock_gc = MagicMock()
         mock_gc.open_by_key.return_value = mock_sh
-        ws_empresa, ws_cidades, ws_glossario = self._separa_chamadas(mock_sh)
+        ws_empresa, ws_pendentes, ws_cidades, ws_glossario = self._separa_chamadas(mock_sh)
 
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
             with Session(engine) as session:
                 exporter.exportar("carros_uberlandia", session)
 
-        # Ordem das chamadas a add_worksheet: empresa, cidades, glossário
+        # Ordem das chamadas a add_worksheet: empresa, pendentes, cidades, glossário
         titulos = [c.kwargs["title"] for c in mock_sh.add_worksheet.call_args_list]
         assert titulos == [
             "carros_uberlandia",
+            "carros_uberlandia_pendentes",
             "cidades_carros_uberlandia",
             "Glossário",
         ]
@@ -813,7 +969,7 @@ class TestCidadesFreteSheet:
         mock_sh = MagicMock()
         mock_gc = MagicMock()
         mock_gc.open_by_key.return_value = mock_sh
-        _, ws_cidades, _ = self._separa_chamadas(mock_sh)
+        _, _, ws_cidades, _ = self._separa_chamadas(mock_sh)
 
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
@@ -856,7 +1012,7 @@ class TestCidadesFreteSheet:
         mock_sh = MagicMock()
         mock_gc = MagicMock()
         mock_gc.open_by_key.return_value = mock_sh
-        _, ws_cidades, _ = self._separa_chamadas(mock_sh)
+        _, _, ws_cidades, _ = self._separa_chamadas(mock_sh)
 
         with patch("gspread.service_account", return_value=mock_gc):
             exporter = _exporter()
@@ -877,6 +1033,7 @@ class TestCidadesFreteSheet:
         with Session(engine) as session:
             session.add(_lote("L001"))
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             session.commit()
 
         mock_ws = MagicMock()

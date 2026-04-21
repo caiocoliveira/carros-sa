@@ -32,7 +32,23 @@ def _lote(
     km: Optional[int] = 45000,
     lance_atual: int = 20000,
     fim_em: Optional[datetime] = None,
+    com_laudo_url: bool = True,
 ) -> Lote:
+    # Auditoria, igual o export de main sheet, filtra lotes sem laudo
+    # baixado+revisado+link (invariante de "nunca mostrar lote sem laudo" pro
+    # operador). Testes focados em validar checks de OUTRAS colunas precisam
+    # que o lote passe no filtro de pendência — por isso injetamos URL de laudo
+    # válida por default. Se um caso específico quiser um lote com laudo
+    # incompleto, passa `com_laudo_url=False`.
+    raw_json = {}
+    if com_laudo_url:
+        raw_json = {
+            "detalhe": {
+                "laudo_pdf_url": (
+                    f"https://storage.googleapis.com/doc-b2b/laudos/{lote_id}/laudo.pdf?sig=test"
+                ),
+            },
+        }
     return Lote(
         id=lote_id,
         leilao="auto_arremate",
@@ -43,6 +59,7 @@ def _lote(
         km=km,
         lance_atual=lance_atual,
         fim_em=fim_em or (datetime.now() + timedelta(days=3)),
+        raw_json=raw_json,
         scraped_at=datetime.utcnow(),
     )
 
@@ -156,6 +173,7 @@ class TestAuditDeteccao:
             session.add(_avaliacao("L001", preco_max=1000, preco_giro=100_000,
                                    reforma_estimada=0, frete_incluso=0,
                                    dias_giro_estimado=30))
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"
@@ -165,6 +183,7 @@ class TestAuditDeteccao:
         with Session(engine) as session:
             session.add(_lote("L001"))
             session.add(_avaliacao("L001", reforma_estimada=-100))
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
         assert any("Reforma" in v for v in violacoes), f"Violacoes: {violacoes}"
@@ -174,6 +193,7 @@ class TestAuditDeteccao:
         with Session(engine) as session:
             session.add(_lote("L001", km=5_000_000))
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
         assert any("KM" in v for v in violacoes), f"Violacoes: {violacoes}"
@@ -184,6 +204,7 @@ class TestAuditDeteccao:
             lote = _lote("L001", marca="", modelo="", ano=2013)
             session.add(lote)
             session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
         assert any("Modelo" in v for v in violacoes), f"Violacoes: {violacoes}"
@@ -202,6 +223,7 @@ class TestAuditAgregacao:
                 session.add(_lote(lid))
                 # 3 lotes com reforma_estimada negativa
                 session.add(_avaliacao(lid, reforma_estimada=-100))
+                session.add(_laudo(lid))
             session.commit()
         violacoes = audit(engine)
         reforma = [v for v in violacoes if "Reforma" in v]
@@ -213,10 +235,12 @@ class TestAuditAgregacao:
         with Session(engine) as session:
             session.add(_lote("L001", km=5_000_000))  # KM absurdo
             session.add(_avaliacao("L001", reforma_estimada=-50))  # Reforma negativa
+            session.add(_laudo("L001"))
 
             lote2 = _lote("L002", ano=1900)  # Ano fora da faixa
             session.add(lote2)
             session.add(_avaliacao("L002"))
+            session.add(_laudo("L002"))
             session.commit()
         violacoes = audit(engine)
         texto = "\n".join(violacoes)

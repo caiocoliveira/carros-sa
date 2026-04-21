@@ -223,3 +223,80 @@ class TestAuditAgregacao:
         assert "KM" in texto
         assert "Reforma" in texto
         assert "Ano" in texto
+
+
+# ---------------------------------------------------------------------------
+# Cross-column: FIPE × preco_giro × lance_máximo
+# Cobre a pergunta do operador (2026-04-21): "faz sentido lance_max >> FIPE?
+# faz sentido giro_fipe mt diferente da FIPE?" — a planilha hoje não mostra
+# giro_fipe na visão enxuta, mas o DB persiste; auditoria cruza o racional
+# econômico antes do dado sair pra decisão humana.
+# ---------------------------------------------------------------------------
+
+class TestAuditCrossColumn:
+    def test_lance_maximo_acima_da_fipe_reportado(self):
+        """preco_max > FIPE × 1.05 viola o racional (margem deveria garantir teto < venda)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=1000))
+            # FIPE R$ 30k mas preco_max R$ 40k — 1.33x, violação clara
+            session.add(_avaliacao("L001", preco_max=40_000, fipe=30_000,
+                                   preco_giro=45_000, preco_giro_fipe=45_000,
+                                   reforma_estimada=0, frete_incluso=0))
+            session.commit()
+        violacoes = audit(engine)
+        lance = [v for v in violacoes if "Lance Máximo" in v and "FIPE" in v]
+        assert lance, f"Esperava violação de Lance Máximo vs FIPE, obtive: {violacoes}"
+
+    def test_lance_maximo_dentro_da_fipe_nao_reporta(self):
+        """Caso normal: preco_max < FIPE — silêncio."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=15_000))
+            session.add(_avaliacao("L001", preco_max=25_000, fipe=32_000,
+                                   preco_giro=31_000, preco_giro_fipe=31_000))
+            session.commit()
+        violacoes = audit(engine)
+        assert all("Lance Máximo" not in v or "FIPE" not in v for v in violacoes), (
+            f"Não deveria flagar caso normal: {violacoes}"
+        )
+
+    def test_preco_giro_fipe_muito_acima_da_fipe_reportado(self):
+        """preco_giro_fipe > FIPE × 1.30 sinaliza webmotors_mediana inflada ou FIPE baixa."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=1000))
+            # preco_giro_fipe 1.5x FIPE — fora da faixa [0.6, 1.3]
+            session.add(_avaliacao("L001", preco_max=25_000, fipe=30_000,
+                                   preco_giro=45_000, preco_giro_fipe=45_000))
+            session.commit()
+        violacoes = audit(engine)
+        interno = [v for v in violacoes if "preco_giro_fipe" in v]
+        assert interno, f"Esperava violação de preco_giro_fipe vs FIPE: {violacoes}"
+
+    def test_preco_giro_fipe_muito_abaixo_da_fipe_reportado(self):
+        """preco_giro_fipe < FIPE × 0.60 também sinaliza dado bagunçado."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=1000))
+            # 0.40x FIPE
+            session.add(_avaliacao("L001", preco_max=5_000, fipe=30_000,
+                                   preco_giro=12_000, preco_giro_fipe=12_000))
+            session.commit()
+        violacoes = audit(engine)
+        interno = [v for v in violacoes if "preco_giro_fipe" in v]
+        assert interno, f"Esperava violação de preco_giro_fipe muito baixo: {violacoes}"
+
+    def test_preco_giro_aa_acima_da_fipe_reportado(self):
+        """AA é atacado — preco_giro_aa > FIPE × 1.30 é suspeito."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=1000))
+            # giro_aa 1.5x FIPE — AA não deveria ser tão maior que FIPE
+            session.add(_avaliacao("L001", preco_max=25_000, fipe=30_000,
+                                   preco_giro=45_000, preco_giro_fipe=30_000,
+                                   preco_giro_aa=45_000))
+            session.commit()
+        violacoes = audit(engine)
+        interno = [v for v in violacoes if "preco_giro_aa" in v]
+        assert interno, f"Esperava violação de preco_giro_aa vs FIPE: {violacoes}"

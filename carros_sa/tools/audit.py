@@ -27,6 +27,18 @@ from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
+# Tolerâncias para checagens cross-column.
+# Referência empírica: em fallback (sem Webmotors real), preco_giro_fipe = FIPE*0.97*f_km,
+# com f_km ∈ [0.75, 1.15] → razão vs FIPE ∈ [0.73, 1.12]. Com Webmotors real ativo,
+# mediana pode divergir mais de FIPE (varejo vs tabela). Faixa >30% abaixo ou >30%
+# acima da FIPE é sinal de dado bagunçado (FIPE errada, similares estragados, etc.).
+_GIRO_VS_FIPE_MIN = 0.60
+_GIRO_VS_FIPE_MAX = 1.30
+# Lance máximo não deve ultrapassar FIPE por muito — o preço de venda esperado
+# TEM QUE cobrir margem + custos, então preco_max < preco_giro < ~FIPE.
+# Tolerância 5% pra absorver ruído em lotes muito baratos (pouca sensibilidade).
+_LANCE_MAX_VS_FIPE_MAX = 1.05
+
 
 # Validator retorna None se ok; string com motivo se suspeito.
 Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
@@ -34,6 +46,57 @@ Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
 
 def _situacao(row: Dict[str, Any]) -> str:
     return "✓ Viável" if row["viavel"] else "✗ Caro demais"
+
+
+def _checar_lance_maximo(v: Any, r: Dict[str, Any]) -> Optional[str]:
+    """Sanidade do teto de lance — viabilidade + razão vs FIPE.
+
+    Cobre:
+      (1) lote 'Viável' com teto não-positivo (bug no precificador)
+      (2) teto muito acima de FIPE (preco_giro inflado ou FIPE subestimada —
+          operador vai ancorar decisão em valor irreal)
+    """
+    if r["situacao"] == "✓ Viável" and (v is None or v <= 0):
+        return "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
+    fipe = r.get("fipe")
+    if v is not None and v > 0 and fipe and v > fipe * _LANCE_MAX_VS_FIPE_MAX:
+        razao = v / fipe
+        return (
+            f"Lance Máximo {razao:.2f}× FIPE — teto acima da FIPE (>{_LANCE_MAX_VS_FIPE_MAX:.2f}) "
+            f"quando margem deveria garantir teto < preço de venda"
+        )
+    return None
+
+
+def _checar_giro_vs_fipe(row: Dict[str, Any]) -> List[str]:
+    """Checagens sistêmicas que não mapeiam 1:1 pra coluna da planilha.
+
+    Returns lista de (motivo) — vazia se tudo ok. Cada motivo gera uma entrada
+    agregada sob o rótulo '<interno>' pra sinalizar que é invariante de dado
+    persistido, não de coluna exibida.
+    """
+    alertas: List[str] = []
+    fipe = row.get("fipe") or 0
+    giro_fipe = row.get("preco_giro_fipe") or 0
+    giro_aa = row.get("preco_giro_aa")
+
+    if fipe > 0 and giro_fipe > 0:
+        razao = giro_fipe / fipe
+        if razao > _GIRO_VS_FIPE_MAX or razao < _GIRO_VS_FIPE_MIN:
+            alertas.append(
+                f"preco_giro_fipe {razao:.2f}× FIPE (fora da faixa "
+                f"[{_GIRO_VS_FIPE_MIN:.2f}, {_GIRO_VS_FIPE_MAX:.2f}]) — "
+                f"webmotors_mediana ou FIPE com dado estranho"
+            )
+
+    if fipe > 0 and giro_aa is not None and giro_aa > 0:
+        if giro_aa > fipe * _GIRO_VS_FIPE_MAX:
+            alertas.append(
+                f"preco_giro_aa ({giro_aa}) >> FIPE ({fipe}) — Tabela Auto Avaliar "
+                f"é atacado, deveria ficar abaixo da FIPE"
+            )
+
+    return alertas
 
 
 CHECKS: Dict[str, Validator] = {
@@ -61,11 +124,7 @@ CHECKS: Dict[str, Validator] = {
     "Lance Atual (R$)": lambda v, r: (
         "Lance atual negativo" if v is not None and v < 0 else None
     ),
-    "Lance Máximo (R$)": lambda v, r: (
-        "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
-        if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
-        else None
-    ),
+    "Lance Máximo (R$)": lambda v, r: _checar_lance_maximo(v, r),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"
         if v is not None and v > 1000
@@ -236,6 +295,19 @@ def audit(engine, sample_size: int = 20) -> List[str]:
                     "count": 1,
                     "exemplo_lote": row["lote_id"],
                     "exemplo_valor": valor,
+                }
+            else:
+                agregador[chave]["count"] += 1
+
+        # Checagens cross-column que não ligam a uma coluna da planilha: rótulo
+        # '<interno>' sinaliza invariante de dado persistido.
+        for motivo in _checar_giro_vs_fipe(row):
+            chave = ("<interno>", motivo)
+            if chave not in agregador:
+                agregador[chave] = {
+                    "count": 1,
+                    "exemplo_lote": row["lote_id"],
+                    "exemplo_valor": f"fipe={row.get('fipe')}, giro_fipe={row.get('preco_giro_fipe')}, giro_aa={row.get('preco_giro_aa')}",
                 }
             else:
                 agregador[chave]["count"] += 1

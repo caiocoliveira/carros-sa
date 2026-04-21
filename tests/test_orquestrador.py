@@ -430,6 +430,52 @@ class TestPersistencia:
             assert persistida is not None
             assert persistida.preco_alvo == 18000
 
+    def test_upsert_lote_preserva_dados_de_detalhe_entre_runs(self):
+        """Re-upsert a partir da listagem NÃO wipa preco_referencia_aa, fipe_pct_lance_minimo
+        e raw_json['detalhe'] populados pelo pipeline anterior. Sem esse guard cada triagem
+        zerava sinais de detalhe dos lotes que entram no short-circuit (ja_avaliado + laudo_ok).
+        """
+        from carros_sa.models import LoteRaw
+
+        engine = _engine()
+        with Session(engine) as session:
+            lote_raw1 = LoteRaw(
+                lote_id="L888",
+                leilao="autoavaliar",
+                url="https://b2b.autoavaliar.com.br/L888",
+                marca="VW", modelo="Gol", ano=2015, lance_atual=15_000,
+                fim_em=datetime(2026, 5, 1),
+            )
+            lote = _upsert_lote(lote_raw1, session, loja="Loja A")
+            flags = DetalheFlags(
+                specs={"ANO": "2015"},
+                preco_referencia_aa=18_000,
+                fipe_pct_lance_minimo=85,
+            )
+            _persistir_flags_no_lote(lote, flags, session)
+            session.commit()
+
+            # Segunda coleta da listagem — lance subiu, mas sem re-scrape de detalhe.
+            lote_raw2 = LoteRaw(
+                lote_id="L888",
+                leilao="autoavaliar",
+                url="https://b2b.autoavaliar.com.br/L888",
+                marca="VW", modelo="Gol", ano=2015, lance_atual=15_500,
+                fim_em=datetime(2026, 5, 1),
+            )
+            _upsert_lote(lote_raw2, session)
+            session.commit()
+
+            atual = session.get(Lote, "L888")
+            # Campo atualizado pela listagem nova
+            assert atual.lance_atual == 15_500
+            # Dados do pipeline anterior preservados
+            assert atual.preco_referencia_aa == 18_000
+            assert atual.fipe_pct_lance_minimo == 85
+            assert atual.raw_json.get("detalhe", {}).get("preco_referencia_aa") == 18_000
+            # Loja também continua preservada mesmo sem ser informada na 2ª coleta
+            assert atual.raw_json.get("loja") == "Loja A"
+
 
 # ---------------------------------------------------------------------------
 # Testes de _persistir_flags_no_lote (workstream N)

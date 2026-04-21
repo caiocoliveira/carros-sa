@@ -329,14 +329,32 @@ def _upsert_lote(
 
     `loja` é mergeado em `raw_json["loja"]` quando informado — não faz parte do
     contrato LoteRaw, fica como campo adicional pra sobreviver em reprocessos.
+
+    Preserva dados vindos do pipeline anterior (detalhe, preco_referencia_aa,
+    fipe_pct_lance_minimo) quando a coleta corrente é só da listagem. Sem isso,
+    cada nova triagem wipa os sinais de detalhe dos lotes que entram no short-
+    circuit (ja_avaliado + laudo_ok) — na iteração seguinte a planilha perde
+    preço-referência Auto Avaliar e % FIPE. Bug reproduzido 2026-04-21.
     """
     existente = session.get(Lote, lote_raw.lote_id)
     raw_json = lote_raw.model_dump(mode="json")
     if loja:
         raw_json["loja"] = loja
-    elif existente and isinstance(existente.raw_json, dict) and existente.raw_json.get("loja"):
-        # Preserva loja de coleta anterior quando a atual não trouxe o dado.
-        raw_json["loja"] = existente.raw_json["loja"]
+    if existente and isinstance(existente.raw_json, dict):
+        if not loja and existente.raw_json.get("loja"):
+            raw_json["loja"] = existente.raw_json["loja"]
+        # Preserva a seção 'detalhe' populada por _persistir_flags_no_lote em
+        # runs anteriores — listagem não repopula, sem preservar zera o histórico.
+        if existente.raw_json.get("detalhe"):
+            raw_json["detalhe"] = existente.raw_json["detalhe"]
+    # Coalesce: listagem raramente traz preços AA e % FIPE (vêm do detalhe).
+    # Quando LoteRaw atual tem None e já havia valor, preserva o valor persistido.
+    preco_ref_aa = lote_raw.preco_referencia_aa
+    if preco_ref_aa is None and existente is not None:
+        preco_ref_aa = existente.preco_referencia_aa
+    fipe_pct = lote_raw.fipe_pct_lance_minimo
+    if fipe_pct is None and existente is not None:
+        fipe_pct = existente.fipe_pct_lance_minimo
     row = Lote(
         id=lote_raw.lote_id,
         leilao=lote_raw.leilao,
@@ -349,6 +367,8 @@ def _upsert_lote(
         fim_em=lote_raw.fim_em,
         origem_cidade=lote_raw.origem_cidade,
         origem_uf=lote_raw.origem_uf,
+        preco_referencia_aa=preco_ref_aa,
+        fipe_pct_lance_minimo=fipe_pct,
         raw_json=raw_json,
         scraped_at=datetime.utcnow(),
     )

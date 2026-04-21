@@ -1,21 +1,31 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
-    preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
-    margem_min       = margem_base * fator_risco * fator_liquidez
-    preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
+Fórmula atual (pós ajuste-km e consolidação FIPE↔AA):
+    preco_giro_fipe  = webmotors_mediana * f_km            # âncora "ampla"
+    preco_giro_aa    = min(auto_avaliar_ref, webmotors_mediana) * f_km
+                                                           # só quando AA existe
+    preco_giro       = min(preco_giro_fipe, preco_giro_aa) # consolidado
+    margem_aplicada  = margem_base * fator_risco * fator_liquidez
+    preco_alvo       = (preco_giro - reforma - frete - custo_op - margem_reais - taxa_fixa)
+                       / (1 + taxa_pct)
+    preco_max        = mesma fórmula com margem_reais_min (piso absoluto da empresa)
+
+Duas observações de semântica (o nome `preco_giro_fipe` é histórico, NÃO
+reflete mais FIPE diretamente):
+- `preco_giro_fipe` é sempre `webmotors_mediana * f_km`. Quando não há amostra
+  real Webmotors, `AvaliadorMercado` usa `webmotors_mediana = FIPE * 0.97` como
+  fallback — aí `preco_giro_fipe ≈ FIPE * 0.97 * f_km` e a analogia com FIPE
+  se mantém. Com Webmotors real ligado, pode divergir da FIPE.
+- `preco_giro_aa` usa `webmotors_mediana` como teto (não p25 como o nome antigo
+  sugeria). `min(aa_ref, mediana)` garante que, quando AA está anormalmente alto
+  (aa_ref > mediana), não superestimamos o preço de venda.
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
-Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
-- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
-  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
-  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
-  de giro consolidado.
+Quando Auto Avaliar é atacado real e < FIPE, `preco_giro` fica ancorado em AA
+(comportamento conservador esperado). Quando AA é otimista demais, a mediana
+Webmotors aperta.
 """
 
 from __future__ import annotations

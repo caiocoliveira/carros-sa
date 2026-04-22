@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -80,7 +81,14 @@ CHECKS: Dict[str, Validator] = {
         "Reforma negativa" if v is not None and v < 0 else None
     ),
     "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
-    "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
+    # Lote viável SEM link de laudo é suspeito: ou o scraper não achou o PDF no modal
+    # lazy, ou a URL persistida é decoy e foi filtrada. Em ambos os casos o operador
+    # precisa ver o laudo antes de lance — `verificar_laudos.py` diagnostica e auto-cura.
+    "Laudo": lambda v, r: (
+        "Laudo sem link ('—') em lote viável — rodar `make verificar-laudos` pra diagnosticar"
+        if r["situacao"] == "✓ Viável" and (not v or v == "—")
+        else None
+    ),
 }
 
 
@@ -158,6 +166,13 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
                 scraped_at_str = str(lote.scraped_at)
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
+
+        # URL do laudo filtrada pelo gate de decoy — espelha SheetsExporter.
+        # Sem isso a checagem de "Laudo sem link" bate sempre porque o row não
+        # carrega a URL que o operador de fato vê na planilha.
+        laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
+        laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
+
         rows.append({
             "lote_id": av.lote_id,
             "modelo": f"{lote.marca} {lote.modelo}".strip(),
@@ -185,6 +200,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "frete": av.frete_incluso,
             "justificativa": av.justificativa,
             "url": lote.url,
+            "laudo_url": laudo_url,
             "scraped_at": scraped_at_str,
             "preco_giro": av.preco_giro,
             "viavel": viavel,

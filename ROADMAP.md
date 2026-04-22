@@ -369,6 +369,22 @@ Já registrado:
 - **Cobertura:** 8 testes novos (202 total verde). Migração SQLite validada: campo aparece tanto em DB fresco quanto em DB existente sem perda de dados.
 - **Limitações:** coluna tem largura livre — se LLM retornar justificativa muito longa (>500 chars) vai ficar feia no Google Sheets. Prompt hoje pede "uma frase", mas não enforce. Mitigável com truncagem se virar problema.
 
+### T — Verificador + auto-healer de completude de laudo ✅
+- **Branch:** `claude/great-turing-SwHem`
+- **Arquivos:**
+  - [`scripts/verificar_laudos.py`](scripts/verificar_laudos.py) — NOVO. `verificar(session, empresa_id, dry_run)` categoriza cada lote ativo (`fim_em > now` + tem AvaliacaoLote + não encerrado) em 7 estados: `ok`, `url_decoy`, `url_ausente`, `pdf_nao_baixado`, `pdf_local_invalido`, `laudo_ausente`, `laudo_nao_analisado`. Auto-heal por categoria: delega decoys pro `limpar_decoys`, apaga PDFs locais podres, derruba LaudoCache stale pra forçar retry. Exit !=0 quando sobra algo.
+  - [`tests/test_verificar_laudos.py`](tests/test_verificar_laudos.py) — NOVO. 16 testes: uma classificação por categoria + auto-heal idempotente + dry-run + guard de DB real que falha `make test` se sobrar qualquer lote ativo com laudo incompleto depois do ciclo.
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — check do "Laudo" deixou de ser no-op; agora flag de "link ausente em lote viável" aparece no audit automático do SessionEnd hook. `_build_rows` passou a carregar `laudo_url` filtrado pelo gate, espelhando `SheetsExporter`.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — 4º passo do cron diário após retry: executa verificador e loga contagem por categoria; próximo ciclo pega o que sobrou.
+  - [`Makefile`](Makefile) — alvo `make verificar-laudos`.
+  - [`tests/test_audit_columns.py`](tests/test_audit_columns.py) — `_lote()` ganhou default `laudo_pdf_url`; 2 testes novos do check de Laudo (viável sem link → violação; caro demais sem link → silencioso).
+- **Motivação:** feedback do usuário "garantir que todos carros na lista têm laudo baixado, revisado e link na planilha". Até hoje, o pipeline tinha defesas pontuais (gate de decoy no scraper, validador de PDF local, limpar_decoys, retry `--somente-laudo-pendente`), mas **ninguém** auditava holisticamente o invariante "lote ativo visível na planilha → tem PDF local válido + LaudoCache confidence≥0.6 + URL que passa no gate". Sem essa camada, regressões silenciosas (ex.: PDF podre sobrevivendo no disco, LaudoCache com confidence 0.55 preso em fallback) passavam até o operador notar manualmente.
+- **Fluxo após merge:** cron 7h/13h roda `triagem → limpar_decoys → retry → verificar_laudos`. Cada ciclo fecha qualquer gap auto-curável E reporta no log quanto sobrou. O guard de teste (`TestHygieneDBReal`) quebra `make test` se o operador esquecer de rodar o ciclo antes de um release.
+- **Limitações conhecidas:**
+  - `url_ausente` e `pdf_nao_baixado` não são resolvíveis offline — dependem do retry visitar a URL do lote de novo. Se o modal lazy não renderizar o link mesmo no retry (grupo específico do Auto Avaliar), o lote fica em loop até o leilão encerrar e sair do filtro.
+  - Heurística de `_pdf_eh_laudo_valido` lê só a 1ª página — PDF institucional com primeira página disfarçada (pouco provável) passaria. Defesa adicional já existe via `is_laudo_pdf_url` no scraping.
+  - Guard de DB real só verifica empresa `carros_uberlandia`. Multi-tenant vai precisar iterar por `Empresa` quando sair do PoC.
+
 ### S — Aba Cidades & Frete na planilha ✅
 - **Branch:** `claude/festive-tesla-6c18ae`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — novo `_write_cidades_frete_sheet(empresa_id, session)` engatado no `exportar()`. Aba `cidades_<empresa_id>` com 1 linha por município no raio operacional + frete por categoria + contagem de lotes ativos (fim_em > now) com origem naquela cidade.

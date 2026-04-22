@@ -32,7 +32,12 @@ def _lote(
     km: Optional[int] = 45000,
     lance_atual: int = 20000,
     fim_em: Optional[datetime] = None,
+    laudo_pdf_url: Optional[str] = "https://storage.googleapis.com/doc-b2b/laudo.pdf",
 ) -> Lote:
+    # raw_json default inclui laudo_pdf_url válida pra passar no gate de audit
+    # "Laudo sem link em lote viável". Testes que querem simular URL ausente
+    # podem passar `laudo_pdf_url=None`.
+    raw_json = {"detalhe": {"laudo_pdf_url": laudo_pdf_url}} if laudo_pdf_url else {"detalhe": {}}
     return Lote(
         id=lote_id,
         leilao="auto_arremate",
@@ -43,6 +48,7 @@ def _lote(
         km=km,
         lance_atual=lance_atual,
         fim_em=fim_em or (datetime.now() + timedelta(days=3)),
+        raw_json=raw_json,
         scraped_at=datetime.utcnow(),
     )
 
@@ -187,6 +193,28 @@ class TestAuditDeteccao:
             session.commit()
         violacoes = audit(engine)
         assert any("Modelo" in v for v in violacoes), f"Violacoes: {violacoes}"
+
+    def test_laudo_sem_link_em_lote_viavel_reportado(self):
+        """Lote viável (preco_max > lance_atual) com laudo_pdf_url ausente deve
+        ser flaggado — operador precisa do PDF antes de lance."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", laudo_pdf_url=None))
+            session.add(_avaliacao("L001", preco_max=30000))  # viável
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Laudo" in v for v in violacoes), f"Violacoes: {violacoes}"
+
+    def test_laudo_sem_link_em_lote_nao_viavel_silencioso(self):
+        """Lote 'caro demais' sem link é ruído aceitável — operador não vai
+        dar lance nele mesmo. Check silencioso pra não inundar o audit."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=50000, laudo_pdf_url=None))
+            session.add(_avaliacao("L001", preco_max=30000))  # não viável
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Laudo" in v for v in violacoes), f"Violacoes: {violacoes}"
 
 
 # ---------------------------------------------------------------------------

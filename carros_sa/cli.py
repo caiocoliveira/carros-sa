@@ -544,5 +544,61 @@ async def _run_triagem(
         console.print(f"[red]Erro ao exportar: {exc}[/red]")
 
 
+@app.command("audit-laudos")
+def audit_laudos_cmd(
+    empresa: str = typer.Option("carros_uberlandia", "--empresa", "-e", help="ID da empresa"),
+    stuck_dias: int = typer.Option(3, help="Dias de idade acima dos quais o lote é considerado 'stuck'"),
+    apenas_stuck: bool = typer.Option(False, help="Mostra só os stuck (ignora os recentes)"),
+) -> None:
+    """Lista lotes ativos cuja avaliação de laudo ficou travada.
+
+    Critérios: sem LaudoCache, confidence < threshold, ou laudo OK sem
+    AvaliacaoLote. Útil pra responder "estamos deixando carro nenhum
+    sem avaliar?".
+    """
+    from carros_sa.audit_laudos import listar_laudos_travados, resumo
+    from carros_sa.db import get_session, init_db
+
+    init_db()
+    with get_session() as session:
+        travados = listar_laudos_travados(session, empresa, stuck_dias=stuck_dias)
+
+    if apenas_stuck:
+        travados = [t for t in travados if t.stuck]
+
+    r = resumo(travados)
+    console.print(
+        f"[bold]Audit de laudos[/bold] empresa={empresa} stuck_dias={stuck_dias}\n"
+        f"  Total travados: {r['total']}  (stuck: {r['stuck']})\n"
+        f"  • sem_laudo_cache: {r['sem_laudo_cache']}\n"
+        f"  • confidence_baixa: {r['confidence_baixa']}\n"
+        f"  • sem_avaliacao: {r['sem_avaliacao']}\n"
+    )
+
+    if not travados:
+        console.print("[green]✓ Nenhum lote travado.[/green]")
+        return
+
+    table = Table(title=f"Lotes travados ({len(travados)})")
+    table.add_column("stuck", justify="center")
+    table.add_column("lote")
+    table.add_column("modelo")
+    table.add_column("idade (d)", justify="right")
+    table.add_column("última tent. (d)", justify="right")
+    table.add_column("conf", justify="right")
+    table.add_column("motivo")
+    for t in travados:
+        table.add_row(
+            "⚠" if t.stuck else "",
+            t.lote_id,
+            f"{t.marca} {t.modelo} {t.ano}",
+            str(t.idade_dias),
+            "?" if t.ultima_tentativa_dias is None else str(t.ultima_tentativa_dias),
+            "—" if t.confidence is None else f"{t.confidence:.2f}",
+            t.motivo,
+        )
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()

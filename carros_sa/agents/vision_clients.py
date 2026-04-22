@@ -16,11 +16,10 @@ import json
 import logging
 import os
 import re
-import time
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from carros_sa.config import get_settings
+from carros_sa.agents._llm_retry import call_with_server_retry, try_clients_cascade
 
 logger = logging.getLogger(__name__)
 
@@ -59,44 +58,26 @@ class GeminiVisionClient(VisionClient):
 
     def classify(self, image_png_bytes: bytes, prompt: str) -> dict:
         from google.genai import types
-        from google.genai.errors import ServerError
 
-        # Retry manual com backoff agressivo pra absorver 503 UNAVAILABLE
-        # (picos de demanda no Gemini Flash). Delays e códigos em config.
-        settings = get_settings()
-        delays = settings.llm_retry_delays_s
-        ultima_tentativa = len(delays) - 1
-        ultimo_erro: Optional[Exception] = None
-        for tentativa, espera in enumerate(delays):
-            if espera:
-                logger.warning(
-                    "GeminiVisionClient: retry em %ds após %s",
-                    espera, type(ultimo_erro).__name__,
-                )
-                time.sleep(espera)
-            try:
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=[
-                        types.Part.from_bytes(data=image_png_bytes, mime_type="image/png"),
-                        prompt,
-                    ],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.0,
-                    ),
-                )
-                raw = (response.text or "").strip()
-                raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-                return json.loads(raw)
-            except ServerError as e:
-                ultimo_erro = e
-                if (getattr(e, "code", None) in settings.llm_retry_http_codes
-                        and tentativa < ultima_tentativa):
-                    continue
-                raise
-        assert ultimo_erro is not None
-        raise ultimo_erro
+        def _call() -> dict:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=[
+                    types.Part.from_bytes(data=image_png_bytes, mime_type="image/png"),
+                    prompt,
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
+            )
+            raw = (response.text or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+            return json.loads(raw)
+
+        return call_with_server_retry(
+            _call, client_name="GeminiVisionClient", logger=logger,
+        )
 
     @property
     def custo_estimado_usd(self) -> float:
@@ -196,24 +177,14 @@ class FallbackVisionClient(VisionClient):
         self._ultimo_usado: Optional[str] = None
 
     def classify(self, image_png_bytes: bytes, prompt: str) -> dict:
-        ultimo_erro: Optional[Exception] = None
-        for client in self._clients:
-            nome = type(client).__name__
-            try:
-                resultado = client.classify(image_png_bytes, prompt)
-                if ultimo_erro is not None:
-                    logger.warning(
-                        "FallbackVisionClient: sucesso em %s após falha do primário (%s)",
-                        nome, type(ultimo_erro).__name__,
-                    )
-                self._ultimo_usado = nome
-                return resultado
-            except Exception as e:
-                logger.warning("FallbackVisionClient: %s falhou (%s), tentando próximo…", nome, e)
-                ultimo_erro = e
-        # Todos falharam
-        assert ultimo_erro is not None
-        raise ultimo_erro
+        resultado, nome = try_clients_cascade(
+            self._clients,
+            lambda c: c.classify(image_png_bytes, prompt),
+            logger=logger,
+            cascade_name="FallbackVisionClient",
+        )
+        self._ultimo_usado = nome
+        return resultado
 
     @property
     def custo_estimado_usd(self) -> float:

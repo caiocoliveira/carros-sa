@@ -451,6 +451,163 @@ class OrquestradorResult:
 # Pipeline por lote (async — roda dentro do event loop do orquestrador)
 # ---------------------------------------------------------------------------
 
+class _DescarteLote(Exception):
+    """Sinaliza descarte voluntário do lote (early-exit, FIPE indisponível…).
+
+    Levantada pelos estágios pra curto-circuitar o pipeline sem virar erro de
+    execução — o handler no `_pipeline_lote` converte em ResultadoLote com
+    `motivo_descarte` preenchido.
+    """
+
+    def __init__(self, motivo: str):
+        self.motivo = motivo
+        super().__init__(motivo)
+
+
+async def _estagio_detalhe(
+    lote: Lote,
+    page,
+    session: Session,
+) -> tuple[object, str, Optional[str]]:
+    """Raspa página de detalhe, persiste flags + body, devolve (flags, body, pdf_url).
+
+    Levanta `_DescarteLote` se o scraper marcar early_exit ou se a marca não
+    está no catálogo FIPE. Em ambos os casos o pipeline deve parar antes do
+    laudo (sem gastar LLM).
+    """
+    settings = get_settings()
+    await asyncio.sleep(
+        random.uniform(settings.scrape_sleep_min_s, settings.scrape_sleep_max_s)
+    )
+    body_text, pdf_url = await coletar_detalhe(page, lote.url)
+    flags = parse_detalhe(body_text, pdf_url)
+
+    # COMMIT GRANULAR: sem isso, qualquer erro subsequente (FIPE 404, laudo,
+    # Webmotors timeout) dispara rollback e apaga o detalhe raspado. Comitando
+    # aqui, o reprocessamento vira 1 request.
+    _persistir_flags_no_lote(lote, flags, session, body_text=body_text)
+    session.commit()
+
+    if flags.early_exit:
+        raise _DescarteLote(flags.early_exit)
+
+    # Marca fora do catálogo FIPE (motos, exóticos) — descartar antes do LLM.
+    from carros_sa.tools.fipe import marca_fora_do_escopo_fipe
+    if marca_fora_do_escopo_fipe(lote.marca):
+        raise _DescarteLote(f"marca_fora_fipe_moto: {lote.marca}")
+
+    return flags, body_text, pdf_url
+
+
+async def _estagio_laudo(
+    lote: Lote,
+    flags,
+    pdf_url: Optional[str],
+    page,
+    vision_client,
+) -> tuple[LaudoEstruturado, Optional[Path]]:
+    """Baixa PDF e extrai laudo com fallbacks em cascata.
+
+    Cascata: visão Gemini (PDF válido) → textual (PyMuPDF) → sem-PDF (só flags
+    do scraper). Sempre retorna um laudo; pipeline nunca fica sem.
+    """
+    pdf_dest: Optional[Path] = None
+    if pdf_url:
+        pdf_dest = _pdf_persistente_path(lote.id)
+        cookies = await page.context.cookies()
+        try:
+            await baixar_pdf(pdf_url, pdf_dest, cookies)
+            if not _pdf_eh_laudo_valido(pdf_dest):
+                pdf_dest.unlink(missing_ok=True)
+                pdf_dest = None
+        except Exception as exc:
+            logger.warning(
+                "baixar_pdf falhou p/ %s (%s: %s) — pipeline segue sem PDF",
+                lote.id, type(exc).__name__, exc,
+            )
+            pdf_dest = None
+
+    if pdf_dest is None:
+        return _laudo_sem_pdf(flags), None
+
+    try:
+        return extrair_laudo(pdf_dest, vision_client), pdf_dest
+    except Exception as exc:
+        logger.warning(
+            "extrair_laudo visual falhou p/ %s (%s: %s) — fallback textual",
+            lote.id, type(exc).__name__, exc,
+        )
+    try:
+        from carros_sa.agents.extrator_laudo import parse_laudo_textual
+        txt = parse_laudo_textual(pdf_dest)
+        return _laudo_de_textual(txt, flags), pdf_dest
+    except Exception as exc:
+        logger.warning(
+            "parse textual falhou p/ %s (%s: %s) — laudo sem PDF",
+            lote.id, type(exc).__name__, exc,
+        )
+        return _laudo_sem_pdf(flags), pdf_dest
+
+
+def _estagio_mercado(
+    lote: Lote,
+    flags,
+    laudo: LaudoEstruturado,
+    empresa: EmpresaConfig,
+    session: Session,
+):
+    """Consulta FIPE/Webmotors. Levanta `_DescarteLote` se FIPE indisponível."""
+    categoria = laudo.categoria_veiculo
+    if categoria == CategoriaVeiculo.OUTRO:
+        from carros_sa.agents.calibracao_giro import _categoria_de_modelo
+        categoria = _categoria_de_modelo(lote.modelo)
+
+    try:
+        return avaliar_mercado(
+            marca=lote.marca,
+            modelo=lote.modelo,
+            ano=lote.ano,
+            km=lote.km,
+            similares_precos=flags.similares_precos or None,
+            categoria=categoria,
+            session=session,
+            empresa_id=empresa.empresa_id,
+        )
+    except LookupError as exc:
+        # FIPE Parallelum não cobre motos (Dafra, Triumph, Harley) nem exóticos
+        # fora de linha. Sem FIPE perde a âncora — descartar é mais correto
+        # que bloquear a planilha inteira.
+        raise _DescarteLote(f"fipe_indisponivel: {exc}") from exc
+
+
+def _estagio_reforma(
+    lote: Lote,
+    laudo: LaudoEstruturado,
+    pdf_dest: Optional[Path],
+    empresa: EmpresaConfig,
+    text_llm_client,
+):
+    """Estima reforma via facade — LLM enriquecido com observações se disponível."""
+    observacoes = ""
+    if text_llm_client is not None and pdf_dest and pdf_dest.exists():
+        try:
+            from carros_sa.agents.extrator_laudo import parse_laudo_textual
+            observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
+        except Exception as exc:
+            logger.debug(
+                "observações do laudo indisponíveis p/ %s (%s): prompt sem enriquecimento",
+                lote.id, type(exc).__name__,
+            )
+    return estimar_reforma(
+        laudo, empresa,
+        llm_client=text_llm_client,
+        lote_info={
+            "marca": lote.marca, "modelo": lote.modelo, "ano": lote.ano,
+            "km": lote.km, "lance_atual": lote.lance_atual,
+        },
+        observacoes_pdf=observacoes,
+    )
+
 async def _pipeline_lote(
     lote: Lote,
     page,
@@ -485,173 +642,35 @@ async def _pipeline_lote(
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))
 
     try:
-        # 1. Detalhe (sleep anti-bot antes de cada request).
-        # Subido de (2-4s) pra (5-8s) após observar 49/55 requests caírem com
-        # HTTP 429 no baixar_pdf na triagem de 2026-04-16. Auto Avaliar tem
-        # rate-limit agressivo no download de laudos.
-        _settings = get_settings()
-        await asyncio.sleep(
-            random.uniform(_settings.scrape_sleep_min_s, _settings.scrape_sleep_max_s)
-        )
-        body_text, pdf_url = await coletar_detalhe(page, lote.url)
-        flags = parse_detalhe(body_text, pdf_url)
-
-        # 1b. Persiste flags do detalhe + preços da Tabela Auto Avaliar no Lote.
-        # COMMIT GRANULAR: sem isso, qualquer erro subsequente (ex.: FIPE 404
-        # pra moto, falha de laudo, Webmotors timeout) dispara session.rollback()
-        # e **apaga também o detalhe raspado**, forçando re-scrape desnecessário.
-        # Comitando aqui, o detalhe fica salvo e o reprocessamento vira 1-request.
-        _persistir_flags_no_lote(lote, flags, session, body_text=body_text)
-        session.commit()
-
-        # 2. Early exit
-        if flags.early_exit:
-            return ResultadoLote(lote_id=lote.id, modelo=modelo_str,
-                                 avaliado=False, motivo_descarte=flags.early_exit)
-
-        # 2b. Marca fora do catálogo FIPE (Triumph, Harley, Ducati, etc — motos).
-        # Sem FIPE não conseguimos ancorar preço. Descartamos AQUI em vez de
-        # gastar LLM no laudo + bater num LookupError lá na frente. Motivo claro
-        # na planilha, fluxo não quebra.
-        from carros_sa.tools.fipe import marca_fora_do_escopo_fipe
-        if marca_fora_do_escopo_fipe(lote.marca):
-            return ResultadoLote(
-                lote_id=lote.id, modelo=modelo_str, avaliado=False,
-                motivo_descarte=f"marca_fora_fipe_moto: {lote.marca}",
-            )
-
-        # 3. PDF + Laudo
-        # Persistimos o PDF em data/laudos_pdfs/<lote>.pdf (não em tmp_dir) —
-        # assim reprocessar_laudos.py pode re-rodar extração sem baixar de novo,
-        # e dá pra auditar manualmente o PDF depois. PDF é pequeno (~300KB) e o
-        # volume total (~600 lotes/mês × 300KB = 180MB/mês) é gerenciável.
-        laudo: LaudoEstruturado
-        pdf_dest: Optional[Path] = None
-        if pdf_url:
-            pdf_dest = _pdf_persistente_path(lote.id)
-            cookies = await page.context.cookies()
-            try:
-                await baixar_pdf(pdf_url, pdf_dest, cookies)
-                if not _pdf_eh_laudo_valido(pdf_dest):
-                    # PDF baixado não é um laudo de carro (ex.: footer institucional
-                    # pego por seletor frouxo no passado) — descarta e trata como sem PDF.
-                    pdf_dest.unlink(missing_ok=True)
-                    pdf_dest = None
-            except Exception as exc:
-                logger.warning(
-                    "baixar_pdf falhou p/ %s (%s: %s) — pipeline segue sem PDF",
-                    lote.id, type(exc).__name__, exc,
-                )
-                pdf_dest = None
-
-        if pdf_dest is not None:
-            try:
-                # Tentativa 1: extração completa (textual + visão)
-                laudo = extrair_laudo(pdf_dest, vision_client)
-            except Exception as exc:
-                # Tentativa 2: só camada textual (PDF <2 páginas ou visão falha)
-                logger.warning(
-                    "extrair_laudo visual falhou p/ %s (%s: %s) — fallback textual",
-                    lote.id, type(exc).__name__, exc,
-                )
-                try:
-                    from carros_sa.agents.extrator_laudo import parse_laudo_textual
-                    txt = parse_laudo_textual(pdf_dest)
-                    laudo = _laudo_de_textual(txt, flags)
-                except Exception as exc2:
-                    # Último recurso: sem PDF (avarias vazias + confidence 0.5)
-                    logger.warning(
-                        "parse textual falhou p/ %s (%s: %s) — laudo sem PDF",
-                        lote.id, type(exc2).__name__, exc2,
-                    )
-                    laudo = _laudo_sem_pdf(flags)
-        else:
-            laudo = _laudo_sem_pdf(flags)
-
-        # 4. Persist laudo cache
+        flags, _body, pdf_url = await _estagio_detalhe(lote, page, session)
+        laudo, pdf_dest = await _estagio_laudo(lote, flags, pdf_url, page, vision_client)
         _upsert_laudo_cache(lote.id, laudo, session)
 
-        # 5. Mercado
-        lote_raw = LoteRaw(
-            lote_id=lote.id,
-            leilao=lote.leilao,
-            url=lote.url,
-            marca=lote.marca,
-            modelo=lote.modelo,
-            ano=lote.ano,
-            km=lote.km,
-            lance_atual=lote.lance_atual,
-            fim_em=lote.fim_em,
-            origem_cidade=lote.origem_cidade,
-            origem_uf=lote.origem_uf,
-        )
-        # Categoria: prefere o que o laudo (visão Gemini) classificou; mas se voltar
-        # OUTRO (gênero indefinido), usa heurística por nome do modelo — assim o
-        # Compass vira SUV e Toro vira PICAPE, ativando a calibração correta de dias_giro.
-        categoria = laudo.categoria_veiculo
-        if categoria == CategoriaVeiculo.OUTRO:
-            from carros_sa.agents.calibracao_giro import _categoria_de_modelo
-            categoria = _categoria_de_modelo(lote.modelo)
-
-        try:
-            mercado = avaliar_mercado(
-                marca=lote.marca,
-                modelo=lote.modelo,
-                ano=lote.ano,
-                km=lote.km,
-                similares_precos=flags.similares_precos or None,
-                categoria=categoria,
-                session=session,
-                empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
-            )
-        except LookupError as exc:
-            # FIPE Parallelum não tem catálogo de motos (Dafra, Triumph, Harley…)
-            # nem modelos exóticos fora de linha. Sem FIPE o precificador perde
-            # a âncora — descartar é mais correto que falhar com exceção e
-            # bloquear a planilha inteira. Lote fica visível com motivo claro.
-            return ResultadoLote(
-                lote_id=lote.id, modelo=modelo_str, avaliado=False,
-                motivo_descarte=f"fipe_indisponivel: {exc}",
-            )
-
-        # 6. Reforma — facade única (estimar_reforma) despacha pro LLM quando
-        # text_llm_client vem setado, fallback interno pro determinístico em
-        # qualquer erro. Observações do inspetor enriquecem o prompt quando
-        # temos o PDF.
-        observacoes = ""
-        if text_llm_client is not None and pdf_url and pdf_dest and pdf_dest.exists():
-            try:
-                from carros_sa.agents.extrator_laudo import parse_laudo_textual
-                observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
-            except Exception as exc:
-                logger.debug(
-                    "observações do laudo indisponíveis p/ %s (%s): prompt sem enriquecimento",
-                    lote.id, type(exc).__name__,
-                )
-        reforma = estimar_reforma(
-            laudo, empresa,
-            llm_client=text_llm_client,
-            lote_info={
-                "marca": lote.marca, "modelo": lote.modelo, "ano": lote.ano,
-                "km": lote.km, "lance_atual": lote.lance_atual,
-            },
-            observacoes_pdf=observacoes,
-        )
-
-        # 7. Frete
+        mercado = _estagio_mercado(lote, flags, laudo, empresa, session)
+        reforma = _estagio_reforma(lote, laudo, pdf_dest, empresa, text_llm_client)
         frete = _calcular_frete(lote, empresa)
 
-        # 8. Precificar
+        lote_raw = LoteRaw(
+            lote_id=lote.id, leilao=lote.leilao, url=lote.url,
+            marca=lote.marca, modelo=lote.modelo, ano=lote.ano, km=lote.km,
+            lance_atual=lote.lance_atual, fim_em=lote.fim_em,
+            origem_cidade=lote.origem_cidade, origem_uf=lote.origem_uf,
+        )
         avaliacao = precificar(lote_raw, laudo, mercado, reforma, frete, empresa)
-
-        # 9. Persist
         _upsert_avaliacao(avaliacao, empresa.empresa_id, session)
         session.commit()
 
-        roi_pct = round(avaliacao.score_roi * 100, 1)
-        return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
-                             preco_alvo=avaliacao.preco_alvo, roi_pct=roi_pct)
+        return ResultadoLote(
+            lote_id=lote.id, modelo=modelo_str, avaliado=True,
+            preco_alvo=avaliacao.preco_alvo,
+            roi_pct=round(avaliacao.score_roi * 100, 1),
+        )
 
+    except _DescarteLote as descarte:
+        return ResultadoLote(
+            lote_id=lote.id, modelo=modelo_str,
+            avaliado=False, motivo_descarte=descarte.motivo,
+        )
     except Exception as exc:
         # Safety net: um lote ruim não pode derrubar o batch. Log estruturado
         # via logger (antes era print no stderr — causou mistério de "21 erros

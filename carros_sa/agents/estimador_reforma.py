@@ -19,12 +19,14 @@ Range min/max é o `custo_total ± incerteza_pct` da empresa.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import yaml
 
+from carros_sa.config import get_settings
 from carros_sa.models import (
     CustoReforma,
     ItemReforma,
@@ -32,6 +34,36 @@ from carros_sa.models import (
     SeveridadeAvaria,
 )
 from carros_sa.tenancy import EmpresaConfig
+
+if TYPE_CHECKING:
+    from carros_sa.agents.text_llm_clients import TextLLMClient
+
+logger = logging.getLogger(__name__)
+
+_ITEM_RESERVA = "reserva pra imprevistos (ajustes/retoques que aparecem no pátio)"
+
+
+def aplicar_piso_imprevistos(custo: CustoReforma) -> CustoReforma:
+    """Garante custo_total >= reforma_reserva_imprevistos_brl (config).
+
+    Premissa operacional: qualquer carro que passa pelo pátio gera uns R$ 1.000
+    de "coisinhas" (retoque pontual, borracha de porta, limpeza profunda de
+    estofado). Aplicado tanto no determinístico quanto no LLM pra que as duas
+    estimativas sejam comparáveis.
+    """
+    piso = get_settings().reforma_reserva_imprevistos_brl
+    if custo.custo_total >= piso:
+        return custo
+
+    faltante = piso - custo.custo_total
+    itens_novos = list(custo.itens) + [ItemReforma(descricao=_ITEM_RESERVA, custo=faltante)]
+    return CustoReforma(
+        itens=itens_novos,
+        custo_total=piso,
+        range_min=int(piso * 0.75),
+        range_max=int(piso * 1.25),
+        racional=getattr(custo, "racional", None),
+    )
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "reforma"
 
@@ -79,12 +111,12 @@ def _custo_pecas(familia: str, severidade: SeveridadeAvaria, tabela: Dict) -> in
     return int(valor)
 
 
-def estimar(
+def estimar_deterministico(
     laudo: LaudoEstruturado,
     empresa: EmpresaConfig,
     config_dir: Optional[str] = None,
 ) -> CustoReforma:
-    """Calcula CustoReforma para um laudo dado a empresa.
+    """Calcula CustoReforma para um laudo dado a empresa via tabela YAML.
 
     Pipeline:
       1. Para cada Avaria → item com custo (familia × severidade) na tabela.
@@ -131,7 +163,36 @@ def estimar(
         range_min=range_min,
         range_max=range_max,
     )
-    # Piso de imprevistos (mesma premissa usada no estimador LLM): carro não
-    # sai do pátio sem consumir ao menos uns R$ 1.000 de ajustes menores.
-    from carros_sa.agents.estimador_reforma_llm import aplicar_piso_imprevistos
     return aplicar_piso_imprevistos(custo)
+
+
+def estimar(
+    laudo: LaudoEstruturado,
+    empresa: EmpresaConfig,
+    *,
+    llm_client: "TextLLMClient | None" = None,
+    lote_info: dict | None = None,
+    observacoes_pdf: str = "",
+    config_dir: Optional[str] = None,
+) -> CustoReforma:
+    """Facade único: LLM quando disponível, determinístico caso contrário.
+
+    Se `llm_client` vier None (ou `lote_info`/`observacoes_pdf` ausentes pra
+    LLM ter contexto suficiente), delega direto pro determinístico. Com LLM,
+    tenta extrair itens específicos por carro; fallback interno pro
+    determinístico em qualquer erro.
+    """
+    if llm_client is None:
+        return estimar_deterministico(laudo, empresa, config_dir=config_dir)
+
+    # Import tardio pra não criar ciclo — o LLM module importa este.
+    from carros_sa.agents.estimador_reforma_llm import estimar_llm
+
+    return estimar_llm(
+        laudo=laudo,
+        lote_info=lote_info or {},
+        empresa=empresa,
+        llm_client=llm_client,
+        observacoes_pdf=observacoes_pdf,
+        config_dir=config_dir,
+    )

@@ -20,9 +20,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from carros_sa.agents.estimador_reforma import estimar as estimar_deterministico
+from carros_sa.agents.estimador_reforma import (
+    aplicar_piso_imprevistos,
+    estimar_deterministico,
+)
 from carros_sa.agents.text_llm_clients import TextLLMClient
-from carros_sa.config import get_settings
 from carros_sa.models import (
     CustoReforma,
     ItemReforma,
@@ -31,31 +33,6 @@ from carros_sa.models import (
 from carros_sa.tenancy import EmpresaConfig
 
 logger = logging.getLogger(__name__)
-
-_ITEM_RESERVA = "reserva pra imprevistos (ajustes/retoques que aparecem no pátio)"
-
-
-def aplicar_piso_imprevistos(custo: "CustoReforma") -> "CustoReforma":
-    """Garante custo_total >= reforma_reserva_imprevistos_brl (config).
-
-    Premissa operacional: qualquer carro que passa pelo pátio gera uns R$ 1.000
-    de "coisinhas" (retoque de pintura pontual, borracha de porta, limpeza
-    profunda de estofado). Aplicado tanto no determinístico quanto no LLM pra
-    que as estimativas sejam comparáveis.
-    """
-    piso = get_settings().reforma_reserva_imprevistos_brl
-    if custo.custo_total >= piso:
-        return custo
-
-    faltante = piso - custo.custo_total
-    itens_novos = list(custo.itens) + [ItemReforma(descricao=_ITEM_RESERVA, custo=faltante)]
-    return CustoReforma(
-        itens=itens_novos,
-        custo_total=piso,
-        range_min=int(piso * 0.75),
-        range_max=int(piso * 1.25),
-        racional=getattr(custo, "racional", None),
-    )
 
 
 _PROMPT_TEMPLATE = """Você é um perito em reforma de veículos pós-leilão no Brasil.

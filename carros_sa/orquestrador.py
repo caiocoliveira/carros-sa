@@ -30,7 +30,6 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.avaliador_mercado import avaliar as avaliar_mercado
 from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
-from carros_sa.agents.estimador_reforma_llm import estimar_llm as estimar_reforma_llm
 from carros_sa.agents.extrator_laudo import extrair_laudo
 from carros_sa.config import get_settings
 from carros_sa.errors import (
@@ -615,33 +614,29 @@ async def _pipeline_lote(
                 motivo_descarte=f"fipe_indisponivel: {exc}",
             )
 
-        # 6. Reforma — LLM quando disponível (itens específicos por carro),
-        # fallback interno pro determinístico se LLM falha/JSON ruim. Sem LLM
-        # configurado, determinístico direto.
-        if text_llm_client is not None:
-            # Observações do inspetor enriquecem o prompt quando temos o PDF.
-            observacoes = ""
-            if pdf_url and pdf_dest.exists():
-                try:
-                    from carros_sa.agents.extrator_laudo import parse_laudo_textual
-                    observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
-                except Exception as exc:
-                    logger.debug(
-                        "observações do laudo indisponíveis p/ %s (%s): prompt sem enriquecimento",
-                        lote.id, type(exc).__name__,
-                    )
-            reforma = estimar_reforma_llm(
-                laudo=laudo,
-                lote_info={
-                    "marca": lote.marca, "modelo": lote.modelo, "ano": lote.ano,
-                    "km": lote.km, "lance_atual": lote.lance_atual,
-                },
-                empresa=empresa,
-                llm_client=text_llm_client,
-                observacoes_pdf=observacoes,
-            )
-        else:
-            reforma = estimar_reforma(laudo, empresa)
+        # 6. Reforma — facade única (estimar_reforma) despacha pro LLM quando
+        # text_llm_client vem setado, fallback interno pro determinístico em
+        # qualquer erro. Observações do inspetor enriquecem o prompt quando
+        # temos o PDF.
+        observacoes = ""
+        if text_llm_client is not None and pdf_url and pdf_dest and pdf_dest.exists():
+            try:
+                from carros_sa.agents.extrator_laudo import parse_laudo_textual
+                observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
+            except Exception as exc:
+                logger.debug(
+                    "observações do laudo indisponíveis p/ %s (%s): prompt sem enriquecimento",
+                    lote.id, type(exc).__name__,
+                )
+        reforma = estimar_reforma(
+            laudo, empresa,
+            llm_client=text_llm_client,
+            lote_info={
+                "marca": lote.marca, "modelo": lote.modelo, "ano": lote.ano,
+                "km": lote.km, "lance_atual": lote.lance_atual,
+            },
+            observacoes_pdf=observacoes,
+        )
 
         # 7. Frete
         frete = _calcular_frete(lote, empresa)

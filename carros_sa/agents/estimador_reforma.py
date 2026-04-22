@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -91,7 +91,7 @@ def _familia_de(parte: str) -> str:
 
 
 @lru_cache(maxsize=32)
-def carregar_tabela(empresa_id: str, config_dir: Optional[str] = None) -> Dict:
+def carregar_tabela(empresa_id: str, config_dir: str | None = None) -> dict:
     """Lê e cacheia a tabela de reforma da empresa."""
     base = Path(config_dir) if config_dir else CONFIG_DIR
     path = base / f"{empresa_id}.yaml"
@@ -101,7 +101,7 @@ def carregar_tabela(empresa_id: str, config_dir: Optional[str] = None) -> Dict:
         return yaml.safe_load(f)
 
 
-def _custo_pecas(familia: str, severidade: SeveridadeAvaria, tabela: Dict) -> int:
+def _custo_pecas(familia: str, severidade: SeveridadeAvaria, tabela: dict) -> int:
     """Lookup (familia, severidade) com fallback no bloco `default`."""
     bloco = tabela.get("pecas", {}).get(familia) or tabela.get("default", {})
     valor = bloco.get(severidade.value)
@@ -114,7 +114,7 @@ def _custo_pecas(familia: str, severidade: SeveridadeAvaria, tabela: Dict) -> in
 def estimar_deterministico(
     laudo: LaudoEstruturado,
     empresa: EmpresaConfig,
-    config_dir: Optional[str] = None,
+    config_dir: str | None = None,
 ) -> CustoReforma:
     """Calcula CustoReforma para um laudo dado a empresa via tabela YAML.
 
@@ -173,7 +173,7 @@ def estimar(
     llm_client: "TextLLMClient | None" = None,
     lote_info: dict | None = None,
     observacoes_pdf: str = "",
-    config_dir: Optional[str] = None,
+    config_dir: str | None = None,
 ) -> CustoReforma:
     """Facade único: LLM quando disponível, determinístico caso contrário.
 

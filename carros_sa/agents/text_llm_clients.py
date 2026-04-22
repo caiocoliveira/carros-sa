@@ -15,7 +15,6 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import List, Optional
 
 from carros_sa.agents._llm_retry import call_with_server_retry, try_clients_cascade
 
@@ -45,7 +44,7 @@ class GeminiTextClient(TextLLMClient):
     Lê GEMINI_API_KEY do ambiente. Retry manual 0s/15s/45s pra 503 UNAVAILABLE.
     """
 
-    def __init__(self, model: str = "gemini-2.5-flash", api_key: Optional[str] = None):
+    def __init__(self, model: str = "gemini-2.5-flash", api_key: str | None = None):
         from google import genai
 
         key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -86,7 +85,7 @@ class GeminiTextClient(TextLLMClient):
 class AnthropicTextClient(TextLLMClient):
     """Haiku 4.5 via `anthropic` SDK — text-only."""
 
-    def __init__(self, model: str = "claude-haiku-4-5", api_key: Optional[str] = None):
+    def __init__(self, model: str = "claude-haiku-4-5", api_key: str | None = None):
         from anthropic import Anthropic
 
         self._client = Anthropic(api_key=api_key) if api_key else Anthropic()
@@ -114,12 +113,12 @@ class AnthropicTextClient(TextLLMClient):
 class FallbackTextLLMClient(TextLLMClient):
     """Tenta cada client em ordem; primeiro sucesso vence."""
 
-    def __init__(self, clients: List[TextLLMClient]):
+    def __init__(self, clients: list[TextLLMClient]):
         if not clients:
             raise ValueError("FallbackTextLLMClient precisa de pelo menos 1 client")
         self._clients = clients
         self._custo = max(c.custo_estimado_usd for c in clients)
-        self._ultimo_usado: Optional[str] = None
+        self._ultimo_usado: str | None = None
 
     def generate_json(self, prompt: str) -> dict:
         resultado, nome = try_clients_cascade(
@@ -136,7 +135,7 @@ class FallbackTextLLMClient(TextLLMClient):
         return self._custo
 
     @property
-    def ultimo_usado(self) -> Optional[str]:
+    def ultimo_usado(self) -> str | None:
         return self._ultimo_usado
 
 
@@ -157,7 +156,7 @@ def build_default_text_client() -> TextLLMClient:
         return AnthropicTextClient()
 
     if provider in ("", "auto"):
-        clients: List[TextLLMClient] = []
+        clients: list[TextLLMClient] = []
         if os.environ.get("GEMINI_API_KEY"):
             clients.append(GeminiTextClient())
         if os.environ.get("ANTHROPIC_API_KEY"):

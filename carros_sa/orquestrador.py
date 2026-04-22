@@ -24,7 +24,6 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 from sqlmodel import Session, select
 
@@ -115,7 +114,7 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
     destino_cidade = empresa.patio.cidade
 
     # 1. Tentativa preferencial: distância real via haversine sobre o dataset IBGE
-    distancia_km: Optional[int] = None
+    distancia_km: int | None = None
     if origem_cidade and origem_uf:
         origem_m = buscar_municipio(origem_cidade, origem_uf)
         destino_m = buscar_municipio(destino_cidade, destino_uf)
@@ -278,7 +277,7 @@ def _persistir_flags_no_lote(
     lote: Lote,
     flags,
     session: Session,
-    body_text: Optional[str] = None,
+    body_text: str | None = None,
 ) -> None:
     """Salva o resultado do parse_detalhe em `lote.raw_json["detalhe"]` e promove
     preço-referência Auto Avaliar + % FIPE para colunas first-class do Lote.
@@ -321,7 +320,7 @@ def _persistir_flags_no_lote(
 
 
 def _upsert_lote(
-    lote_raw: LoteRaw, session: Session, *, loja: Optional[str] = None
+    lote_raw: LoteRaw, session: Session, *, loja: str | None = None
 ) -> Lote:
     """Persiste ou atualiza Lote no SQLite. Retorna o objeto persistido.
 
@@ -430,10 +429,10 @@ class ResultadoLote:
     lote_id: str
     modelo: str
     avaliado: bool
-    motivo_descarte: Optional[str] = None
-    preco_alvo: Optional[int] = None
-    roi_pct: Optional[float] = None
-    erro: Optional[str] = None
+    motivo_descarte: str | None = None
+    preco_alvo: int | None = None
+    roi_pct: float | None = None
+    erro: str | None = None
 
 
 @dataclass
@@ -444,7 +443,7 @@ class OrquestradorResult:
     n_avaliados: int = 0
     n_descartados: int = 0
     n_erros: int = 0
-    lotes: List[ResultadoLote] = field(default_factory=list)
+    lotes: list[ResultadoLote] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +467,7 @@ async def _estagio_detalhe(
     lote: Lote,
     page,
     session: Session,
-) -> tuple[object, str, Optional[str]]:
+) -> tuple[object, str, str | None]:
     """Raspa página de detalhe, persiste flags + body, devolve (flags, body, pdf_url).
 
     Levanta `_DescarteLote` se o scraper marcar early_exit ou se a marca não
@@ -502,16 +501,16 @@ async def _estagio_detalhe(
 async def _estagio_laudo(
     lote: Lote,
     flags,
-    pdf_url: Optional[str],
+    pdf_url: str | None,
     page,
     vision_client,
-) -> tuple[LaudoEstruturado, Optional[Path]]:
+) -> tuple[LaudoEstruturado, Path | None]:
     """Baixa PDF e extrai laudo com fallbacks em cascata.
 
     Cascata: visão Gemini (PDF válido) → textual (PyMuPDF) → sem-PDF (só flags
     do scraper). Sempre retorna um laudo; pipeline nunca fica sem.
     """
-    pdf_dest: Optional[Path] = None
+    pdf_dest: Path | None = None
     if pdf_url:
         pdf_dest = _pdf_persistente_path(lote.id)
         cookies = await page.context.cookies()
@@ -583,7 +582,7 @@ def _estagio_mercado(
 def _estagio_reforma(
     lote: Lote,
     laudo: LaudoEstruturado,
-    pdf_dest: Optional[Path],
+    pdf_dest: Path | None,
     empresa: EmpresaConfig,
     text_llm_client,
 ):
@@ -722,7 +721,7 @@ async def orquestrar(
 
     # 2. Ingesta: parse + upsert Lote
     agora = datetime.now()
-    lotes_ids_novos: List[str] = []
+    lotes_ids_novos: list[str] = []
     for card in cards:
         try:
             lote_raw = parse_card_lines(card["lines"], card["loteId"], card["href"])

@@ -17,7 +17,6 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import List, Optional
 
 from carros_sa.agents._llm_retry import call_with_server_retry, try_clients_cascade
 
@@ -47,7 +46,7 @@ class GeminiVisionClient(VisionClient):
     Lê GEMINI_API_KEY do ambiente. Modelo default: gemini-2.0-flash (rápido + grátis no free tier).
     """
 
-    def __init__(self, model: str = "gemini-2.5-flash", api_key: Optional[str] = None):
+    def __init__(self, model: str = "gemini-2.5-flash", api_key: str | None = None):
         from google import genai  # import preguiçoso
 
         key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -91,7 +90,7 @@ class GeminiVisionClient(VisionClient):
 class AnthropicVisionClient(VisionClient):
     """Haiku 4.5 via `anthropic` SDK. Lê ANTHROPIC_API_KEY do ambiente."""
 
-    def __init__(self, model: str = "claude-haiku-4-5", api_key: Optional[str] = None):
+    def __init__(self, model: str = "claude-haiku-4-5", api_key: str | None = None):
         from anthropic import Anthropic
 
         self._client = Anthropic(api_key=api_key) if api_key else Anthropic()
@@ -168,13 +167,13 @@ class FallbackVisionClient(VisionClient):
     Logs mostram qual client conseguiu, pra acompanhar custo real em produção.
     """
 
-    def __init__(self, clients: List[VisionClient]):
+    def __init__(self, clients: list[VisionClient]):
         if not clients:
             raise ValueError("FallbackVisionClient precisa de pelo menos 1 client")
         self._clients = clients
         # Custo estimado = max entre os possíveis (pior caso — todos caíram menos o último)
         self._custo = max(c.custo_estimado_usd for c in clients)
-        self._ultimo_usado: Optional[str] = None
+        self._ultimo_usado: str | None = None
 
     def classify(self, image_png_bytes: bytes, prompt: str) -> dict:
         resultado, nome = try_clients_cascade(
@@ -191,7 +190,7 @@ class FallbackVisionClient(VisionClient):
         return self._custo
 
     @property
-    def ultimo_usado(self) -> Optional[str]:
+    def ultimo_usado(self) -> str | None:
         """Nome da última implementação que respondeu com sucesso."""
         return self._ultimo_usado
 
@@ -225,7 +224,7 @@ def build_default_client() -> VisionClient:
         return OllamaVisionClient()
 
     if provider in ("", "auto"):
-        clients: List[VisionClient] = []
+        clients: list[VisionClient] = []
         if os.environ.get("GEMINI_API_KEY"):
             clients.append(GeminiVisionClient())
         if os.environ.get("ANTHROPIC_API_KEY"):

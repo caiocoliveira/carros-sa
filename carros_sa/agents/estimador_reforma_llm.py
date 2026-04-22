@@ -18,7 +18,6 @@ determinístico. O pipeline nunca fica sem custo.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from carros_sa.agents.estimador_reforma import (
     aplicar_piso_imprevistos,
@@ -194,7 +193,7 @@ def estimar_llm(
     empresa: EmpresaConfig,
     llm_client: TextLLMClient,
     observacoes_pdf: str = "",
-    config_dir: Optional[str] = None,
+    config_dir: str | None = None,
 ) -> CustoReforma:
     """Estima CustoReforma via LLM; cai no determinístico em qualquer falha.
 

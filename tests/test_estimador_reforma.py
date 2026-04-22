@@ -134,7 +134,8 @@ def test_laudo_limpo_aplica_piso_de_imprevistos():
     item de peça, nenhum adicional de motor/estrutural. Premissa operacional:
     qualquer carro consome uns R$ 1k de ajustes menores no pátio mesmo quando
     o laudo vem limpo."""
-    from carros_sa.agents.estimador_reforma_llm import MINIMO_RESERVA_IMPREVISTOS
+    from carros_sa.config import get_settings
+    MINIMO_RESERVA_IMPREVISTOS = get_settings().reforma_reserva_imprevistos_brl
     laudo = _laudo_sintetico([])
     custo = estimar(laudo, carregar_empresa("carros_uberlandia"))
     assert custo.custo_total == MINIMO_RESERVA_IMPREVISTOS
@@ -173,7 +174,8 @@ def test_motor_nao_ok_com_estrutural_nao_dobra_adicional():
 
 def test_avaria_nenhuma_e_ignorada():
     """Avaria com severidade NENHUMA não vira item; só o piso de imprevistos fica."""
-    from carros_sa.agents.estimador_reforma_llm import MINIMO_RESERVA_IMPREVISTOS
+    from carros_sa.config import get_settings
+    MINIMO_RESERVA_IMPREVISTOS = get_settings().reforma_reserva_imprevistos_brl
     laudo = _laudo_sintetico(
         [Avaria(parte="porta_dianteira_esquerda", severidade=SeveridadeAvaria.NENHUMA)],
     )

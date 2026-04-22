@@ -22,6 +22,7 @@ from typing import Optional
 
 from carros_sa.agents.estimador_reforma import estimar as estimar_deterministico
 from carros_sa.agents.text_llm_clients import TextLLMClient
+from carros_sa.config import get_settings
 from carros_sa.models import (
     CustoReforma,
     ItemReforma,
@@ -31,33 +32,28 @@ from carros_sa.tenancy import EmpresaConfig
 
 logger = logging.getLogger(__name__)
 
-# Piso fixo de imprevistos. Premissa operacional: qualquer carro que passa pelo
-# nosso pátio gera uns R$ 1.000 de "coisinhas" que só aparecem quando você tem
-# o carro em mãos (retoque de pintura pontual, troca de borracha de porta,
-# limpeza profunda de estofado com mancha, pequenos ajustes). Aplicado tanto no
-# determinístico quanto no LLM pra que as duas estimativas sejam comparáveis.
-MINIMO_RESERVA_IMPREVISTOS = 1000
 _ITEM_RESERVA = "reserva pra imprevistos (ajustes/retoques que aparecem no pátio)"
 
 
 def aplicar_piso_imprevistos(custo: "CustoReforma") -> "CustoReforma":
-    """Garante custo_total >= MINIMO_RESERVA_IMPREVISTOS.
+    """Garante custo_total >= reforma_reserva_imprevistos_brl (config).
 
-    Se o custo já passa do piso, não faz nada. Caso contrário, adiciona (ou
-    eleva) o item "reserva pra imprevistos" até bater o piso. Mantém o range
-    em ±25% do novo custo_total.
+    Premissa operacional: qualquer carro que passa pelo pátio gera uns R$ 1.000
+    de "coisinhas" (retoque de pintura pontual, borracha de porta, limpeza
+    profunda de estofado). Aplicado tanto no determinístico quanto no LLM pra
+    que as estimativas sejam comparáveis.
     """
-    if custo.custo_total >= MINIMO_RESERVA_IMPREVISTOS:
+    piso = get_settings().reforma_reserva_imprevistos_brl
+    if custo.custo_total >= piso:
         return custo
 
-    faltante = MINIMO_RESERVA_IMPREVISTOS - custo.custo_total
+    faltante = piso - custo.custo_total
     itens_novos = list(custo.itens) + [ItemReforma(descricao=_ITEM_RESERVA, custo=faltante)]
-    custo_total = MINIMO_RESERVA_IMPREVISTOS
     return CustoReforma(
         itens=itens_novos,
-        custo_total=custo_total,
-        range_min=int(custo_total * 0.75),
-        range_max=int(custo_total * 1.25),
+        custo_total=piso,
+        range_min=int(piso * 0.75),
+        range_max=int(piso * 1.25),
         racional=getattr(custo, "racional", None),
     )
 
@@ -162,7 +158,7 @@ def _parse_resposta(raw: dict) -> CustoReforma:
     - `itens` pode ser lista vazia (carro sem avarias → 0 reparos).
     - `custo_total` é recomputado como soma dos itens (LLM às vezes erra a aritmética).
     - `range_min/range_max` — se ausentes/ruins, deriva como custo_total ± 25%.
-    - Piso `MINIMO_RESERVA_IMPREVISTOS` aplicado via `aplicar_piso_imprevistos`.
+    - Piso de imprevistos (config) aplicado via `aplicar_piso_imprevistos`.
     Levanta ValueError se a resposta for estruturalmente inutilizável
     (shape inválido).
     """

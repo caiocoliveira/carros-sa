@@ -20,6 +20,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
+from carros_sa.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,9 +62,12 @@ class GeminiVisionClient(VisionClient):
         from google.genai.errors import ServerError
 
         # Retry manual com backoff agressivo pra absorver 503 UNAVAILABLE
-        # (picos de demanda no Gemini Flash). 3 tentativas: 0s, 15s, 45s.
+        # (picos de demanda no Gemini Flash). Delays e códigos em config.
+        settings = get_settings()
+        delays = settings.llm_retry_delays_s
+        ultima_tentativa = len(delays) - 1
         ultimo_erro: Optional[Exception] = None
-        for tentativa, espera in enumerate([0, 15, 45]):
+        for tentativa, espera in enumerate(delays):
             if espera:
                 logger.warning(
                     "GeminiVisionClient: retry em %ds após %s",
@@ -86,8 +91,8 @@ class GeminiVisionClient(VisionClient):
                 return json.loads(raw)
             except ServerError as e:
                 ultimo_erro = e
-                # 503 / 429 / 500 — vale a pena tentar de novo
-                if getattr(e, "code", None) in (429, 500, 502, 503, 504) and tentativa < 2:
+                if (getattr(e, "code", None) in settings.llm_retry_http_codes
+                        and tentativa < ultima_tentativa):
                     continue
                 raise
         assert ultimo_erro is not None

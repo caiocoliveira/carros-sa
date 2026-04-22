@@ -31,6 +31,7 @@ from carros_sa.agents.avaliador_mercado import avaliar as avaliar_mercado
 from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
 from carros_sa.agents.estimador_reforma_llm import estimar_llm as estimar_reforma_llm
 from carros_sa.agents.extrator_laudo import extrair_laudo
+from carros_sa.config import get_settings
 from carros_sa.models import (
     AvaliacaoLote,
     CategoriaVeiculo,
@@ -52,18 +53,11 @@ from carros_sa.scraping.scraper_autoavaliar import (
 )
 from carros_sa.tenancy import EmpresaConfig, carregar_empresa
 
-# UFs adjacentes a MG (para heurística de frete)
-_UFS_ADJACENTES_MG = {"SP", "RJ", "ES", "BA", "GO", "MS", "DF"}
-
-# Diretório permanente de PDFs de laudo. Fora de tmp_dir pra permitir reprocessamento
-# offline (sem re-baixar, sem re-autenticar) via `scripts/reprocessar_laudos.py`.
-_PDF_STORAGE_DIR = Path(__file__).resolve().parent.parent / "data" / "laudos_pdfs"
-
-
 def _pdf_persistente_path(lote_id: str) -> Path:
     """Path onde o PDF do laudo é salvo — um por lote_id."""
-    _PDF_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    return _PDF_STORAGE_DIR / f"{lote_id}.pdf"
+    storage_dir = get_settings().pdf_storage_dir
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    return storage_dir / f"{lote_id}.pdf"
 
 
 def _pdf_eh_laudo_valido(pdf_path: Path) -> bool:
@@ -74,7 +68,8 @@ def _pdf_eh_laudo_valido(pdf_path: Path) -> bool:
     contaminou a base inteira. Esta checagem bate no conteúdo textual do PDF
     procurando marcadores típicos de laudo de inspeção veicular.
     """
-    if not pdf_path.exists() or pdf_path.stat().st_size < 5_000:
+    settings = get_settings()
+    if not pdf_path.exists() or pdf_path.stat().st_size < settings.pdf_min_bytes:
         return False
     try:
         import fitz  # PyMuPDF, já é dep do extrator de laudo
@@ -84,13 +79,9 @@ def _pdf_eh_laudo_valido(pdf_path: Path) -> bool:
             txt = (pdf[0].get_text() or "").upper()
     except Exception:
         return False
-    # Marcadores positivos — qualquer um bate
-    positivos = ("LAUDO", "INSPEÇÃO", "INSPECAO", "AVALIAÇÃO", "AVALIACAO", "VEÍCULO", "VEICULO", "CHASSI", "PLACA")
-    if not any(m in txt for m in positivos):
+    if not any(m in txt for m in settings.pdf_markers_positivos):
         return False
-    # Marcadores negativos — se aparece, NÃO é laudo
-    negativos = ("TRANSPARÊNCIA SALARIAL", "TRANSPARENCIA SALARIAL", "IGUALDADE SALARIAL", "RELATÓRIO DE TRANSPARÊNCIA")
-    if any(m in txt for m in negativos):
+    if any(m in txt for m in settings.pdf_markers_negativos):
         return False
     return True
 
@@ -127,12 +118,14 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
 
     # 2. Fallback: heurística de UF (como era antes)
     if distancia_km is None:
+        settings = get_settings()
         if not origem_uf or origem_uf == destino_uf:
-            distancia_km = 150
-        elif origem_uf in _UFS_ADJACENTES_MG or destino_uf in _UFS_ADJACENTES_MG:
-            distancia_km = 400
+            distancia_km = settings.frete_km_mesma_uf
+        elif (origem_uf in settings.ufs_adjacentes_mg
+              or destino_uf in settings.ufs_adjacentes_mg):
+            distancia_km = settings.frete_km_uf_adjacente
         else:
-            distancia_km = 700
+            distancia_km = settings.frete_km_uf_distante
 
     # Categoria do veículo — usa OUTRO se não tiver laudo ainda
     categoria = CategoriaVeiculo.OUTRO
@@ -301,9 +294,8 @@ def _persistir_flags_no_lote(
     raw = dict(lote.raw_json or {})
     raw["detalhe"] = _flags_to_dict(flags)
     if body_text:
-        # Trunca pra 8KB — suficiente pra diagnosticar parser sem inflar SQLite.
-        # Típico body_text de página Auto Avaliar: 20-50KB.
-        raw["body_text_sample"] = body_text[:8000]
+        # Trunca pra diagnosticar parser sem inflar SQLite (body típico 20-50KB).
+        raw["body_text_sample"] = body_text[: get_settings().body_text_sample_bytes]
     lote.raw_json = raw
 
     if flags.preco_referencia_aa is not None:
@@ -479,7 +471,8 @@ async def _pipeline_lote(
         .where(AvaliacaoLote.lote_id == lote.id)
     ).first()
     laudo_atual = session.get(LaudoCache, lote.id)
-    laudo_ok = laudo_atual is not None and (laudo_atual.confidence or 0) >= 0.6
+    threshold = get_settings().laudo_confidence_ok_threshold
+    laudo_ok = laudo_atual is not None and (laudo_atual.confidence or 0) >= threshold
     if ja_avaliado and laudo_ok:
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=ja_avaliado.preco_alvo,
@@ -490,7 +483,10 @@ async def _pipeline_lote(
         # Subido de (2-4s) pra (5-8s) após observar 49/55 requests caírem com
         # HTTP 429 no baixar_pdf na triagem de 2026-04-16. Auto Avaliar tem
         # rate-limit agressivo no download de laudos.
-        await asyncio.sleep(random.uniform(5.0, 8.0))
+        _settings = get_settings()
+        await asyncio.sleep(
+            random.uniform(_settings.scrape_sleep_min_s, _settings.scrape_sleep_max_s)
+        )
         body_text, pdf_url = await coletar_detalhe(page, lote.url)
         flags = parse_detalhe(body_text, pdf_url)
 

@@ -18,6 +18,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
+from carros_sa.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,8 +59,11 @@ class GeminiTextClient(TextLLMClient):
         from google.genai import types
         from google.genai.errors import ServerError
 
+        settings = get_settings()
+        delays = settings.llm_retry_delays_s
+        ultima_tentativa = len(delays) - 1
         ultimo_erro: Optional[Exception] = None
-        for tentativa, espera in enumerate([0, 15, 45]):
+        for tentativa, espera in enumerate(delays):
             if espera:
                 logger.warning(
                     "GeminiTextClient: retry em %ds após %s",
@@ -79,7 +84,8 @@ class GeminiTextClient(TextLLMClient):
                 return json.loads(raw)
             except ServerError as e:
                 ultimo_erro = e
-                if getattr(e, "code", None) in (429, 500, 502, 503, 504) and tentativa < 2:
+                if (getattr(e, "code", None) in settings.llm_retry_http_codes
+                        and tentativa < ultima_tentativa):
                     continue
                 raise
         assert ultimo_erro is not None

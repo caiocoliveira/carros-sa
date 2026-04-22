@@ -72,17 +72,47 @@ def _col_letter(idx_0based: int) -> str:
             return letters
 
 
-def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
+def _calcular_roi_no_maximo(av: AvaliacaoLote, custo_op_fixo: int = 0) -> float:
     """ROI garantido se ganhar o lote exatamente pelo lance máximo.
 
     = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    onde capital_total = preco_max + reforma + frete + taxas + custo_op
+
+    `custo_op_fixo` vem da config da empresa (tenancy). Não estava em
+    `AvaliacaoLote`, então o chamador injeta — fallback 0 preserva testes
+    antigos que não instanciam empresa, mas em produção o valor real é
+    ~R$ 2.523 (Uberlândia) / R$ 650 (SP) e sua ausência inflava o ROI
+    anualizado em ~5-10pp.
     """
     if av.preco_max <= 0:
         return 0.0
-    capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
+    capital = (
+        av.preco_max + av.reforma_estimada + av.frete_incluso
+        + av.taxas_leilao + max(custo_op_fixo, 0)
+    )
     lucro = av.preco_giro - capital
     return round(lucro / max(capital, 1) * 100, 1)
+
+
+def _lucro_absoluto_no_alvo(av: AvaliacaoLote) -> int:
+    """Lucro esperado (R$) se ganharmos pelo preco_alvo (caso médio).
+
+    Derivado de `score_roi`, que no precificador vale
+    `(preco_giro - capital_alvo) / capital_alvo`. Invertendo:
+        capital_alvo = preco_giro / (1 + score_roi)
+        lucro_alvo   = preco_giro - capital_alvo
+
+    Antes o exportador usava `score_roi * preco_alvo`, que não é o lucro
+    real — `preco_alvo` é o que se paga pelo carro, o capital TOTAL inclui
+    reforma/frete/taxas/custo_op. A fórmula derivada aqui casa com a
+    definição do ROI sem precisar reconstruir as componentes a partir
+    da empresa, e funciona mesmo quando a empresa muda de config entre
+    avaliação e export.
+    """
+    if av.preco_giro <= 0 or av.score_roi <= -1:
+        return 0
+    capital = av.preco_giro / (1.0 + av.score_roi)
+    return max(int(round(av.preco_giro - capital)), 0)
 
 
 class SheetsExporter:
@@ -101,7 +131,18 @@ class SheetsExporter:
 
     def exportar(self, empresa_id: str, session: Session) -> int:
         """Lê SQLite, escreve aba <empresa_id> + aba de cidades + aba Glossário. Retorna n linhas exportadas."""
-        rows = self._query(empresa_id, session)
+        # Carrega empresa uma vez pra derivar custo_op_fixo — necessário pro
+        # ROI no máximo incluir o custo operacional da empresa (Uberlândia
+        # R$2.523 / SP R$650). Sem isso a planilha mostrava ROI inflado.
+        # Silencioso quando YAML não existe (testes mockam o gspread sem
+        # provisionar config); cai pra 0 e o cálculo continua consistente
+        # com o comportamento legado naquele contexto.
+        try:
+            empresa = carregar_empresa(empresa_id)
+            custo_op = empresa.custo_op_fixo
+        except FileNotFoundError:
+            custo_op = 0
+        rows = self._query(empresa_id, session, custo_op_fixo=custo_op)
         # Filtro duro: lote encerrado (timer vencido OU badge ARREMATADO) é
         # ruído — operador não pode mais dar lance. Antes empurrávamos pro
         # final; agora removemos completamente.
@@ -121,7 +162,7 @@ class SheetsExporter:
         self._write_glossario_sheet()
         return len(rows_sorted)
 
-    def _query(self, empresa_id: str, session: Session) -> List[dict]:
+    def _query(self, empresa_id: str, session: Session, custo_op_fixo: int = 0) -> List[dict]:
         """JOIN lote + avaliacao_lote + laudo (LEFT JOIN — laudo pode não existir)."""
         avaliacoes = session.exec(
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
@@ -156,13 +197,17 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
-            roi_max = _calcular_roi_no_maximo(av)
+            roi_max = _calcular_roi_no_maximo(av, custo_op_fixo=custo_op_fixo)
             roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
             # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
-            # score_roi × preco_alvo (lucro no caso médio do bid).
+            # "esse lote rende R$X/mês enquanto no pátio". Derivamos o
+            # lucro absoluto do score_roi+preco_giro (ver
+            # `_lucro_absoluto_no_alvo`) — antes usávamos `score_roi *
+            # preco_alvo` que subestimava porque score_roi é normalizado
+            # pelo capital TOTAL (preco_alvo + reforma + frete + custo_op
+            # + taxas), não só pelo preco_alvo.
             lucro_mes = lucro_reais_por_mes(
-                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
+                _lucro_absoluto_no_alvo(av), av.dias_giro_estimado,
             )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -456,19 +501,19 @@ class SheetsExporter:
             [
                 "Lance Máximo (R$)",
                 "Precificador",
-                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo.",
+                "(preco_giro − reforma − frete − custo_op − margem_min×giro − taxa_fixa) ÷ (1 + taxa_pct). Equação resolve circularidade da taxa cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo. Auditoria sinaliza quando Lance Máximo > FIPE×1.05 (suspeito: preco_giro inflado por f_km ou similares).",
                 "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
             ],
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d). lucro_absoluto = preco_giro − capital_alvo, com capital_alvo derivado de score_roi (capital_alvo = preco_giro ÷ (1+score_roi)). Bate com a definição do ROI no precificador — antes usávamos score_roi×preco_alvo, que subestimava porque preco_alvo ignora reforma/frete/custo_op/taxas.",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
+                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas + custo_op. O custo_op vem da config da empresa (Uberlândia R$2.523 / SP R$650) e sem ele a planilha apresentava ROI inflado em 5-10pp.",
                 "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
             ],
             [

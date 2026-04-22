@@ -146,6 +146,40 @@ def test_fator_liquidez_mercado_vazio_e_rapido(gol_2015_mercado):
     assert f == pytest.approx(1.0, abs=0.01)
 
 
+def test_margem_aplicada_capada_em_95_pct(
+    gol_2015_lote, gol_2015_mercado, gol_2015_reforma,
+):
+    """Laudo ruim + mercado saturado pode explodir margem = base × fator_risco × fator_liquidez.
+
+    Uberlândia (base=0.25 × fator_risco≤2.0 × fator_liquidez≤1.8) ficaria a
+    0.90 — sem cap, preco_alvo zeraria e score_roi ficaria absurdo (>500%).
+    Cap de 0.95 garante capital_alvo estritamente positivo e evita ROI
+    anualizado esdrúxulo quando custo_op é pequeno.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    # Laudo péssimo → fator_risco = 2.0
+    laudo_ruim = LaudoEstruturado(
+        avarias=[],
+        severidade_geral=SeveridadeAvaria.ESTRUTURAL,
+        motor_ok=False,
+        documentacao=StatusDocumentacao.PENDENCIA_GRAVE,
+        categoria_veiculo=CategoriaVeiculo.HATCH,
+        confidence=0.5,
+    )
+    # Mercado saturado e lento → fator_liquidez = 1.8
+    mercado_saturado = gol_2015_mercado.model_copy(update={
+        "n_anuncios_competidores": 200, "dias_giro_estimado": 150,
+    })
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    av = precificar(gol_2015_lote, laudo_ruim, mercado_saturado, gol_2015_reforma, frete, empresa)
+
+    # Margem não estoura o teto mesmo no cenário pior
+    assert av.margem_aplicada <= 0.95 + 1e-9
+    # score_roi permanece em patamar interpretável (não explode)
+    assert av.score_roi < 20.0
+
+
 # =============================================================================
 # Gol 2015 — Uberlândia (pátio local, frete = 0)
 # =============================================================================

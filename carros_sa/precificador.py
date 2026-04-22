@@ -123,9 +123,16 @@ def precificar(
     fator_risco = calcular_fator_risco(laudo, empresa.fator_risco_bounds)
     fator_liquidez = calcular_fator_liquidez(mercado, empresa.fator_liquidez_bounds)
 
-    # 3. Margem — respeita o piso absoluto da empresa
+    # 3. Margem — respeita o piso absoluto da empresa e trava em 95% no topo.
+    # Sem o teto, base=0.25 × fator_risco=2.0 × fator_liquidez=1.8 chegava
+    # a 0.90 — margem quase total que zera o preco_alvo e explode o
+    # score_roi pra valores absurdos (>500%) quando custo_op é pequeno.
+    # 0.95 preserva >90% como sinal de "laudo péssimo + mercado saturado"
+    # mas mantém capital_alvo positivo pra o denominador do ROI.
     margem_calculada = empresa.margem.base * fator_risco * fator_liquidez
-    margem_aplicada = max(margem_calculada, empresa.margem.minima_absoluta)
+    margem_aplicada = max(
+        min(margem_calculada, 0.95), empresa.margem.minima_absoluta,
+    )
 
     # 4. Custos fixos (exceto taxas, calculadas abaixo sobre o lance vencedor)
     frete_incluso = frete.frete_estimado

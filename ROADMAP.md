@@ -369,6 +369,25 @@ Já registrado:
 - **Cobertura:** 8 testes novos (202 total verde). Migração SQLite validada: campo aparece tanto em DB fresco quanto em DB existente sem perda de dados.
 - **Limitações:** coluna tem largura livre — se LLM retornar justificativa muito longa (>500 chars) vai ficar feia no Google Sheets. Prompt hoje pede "uma frase", mas não enforce. Mitigável com truncagem se virar problema.
 
+### T — Fix ROI/Lucro/mês + cap de margem + guard de Lance Máximo>FIPE ✅
+- **Branch:** `claude/sleepy-wright-eOCZL`
+- **Arquivos:**
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `_calcular_roi_no_maximo` aceita `custo_op_fixo` (antes ignorava custo_op da empresa = ROI inflado ~5-10pp). Novo `_lucro_absoluto_no_alvo` deriva lucro absoluto como `preco_giro − preco_giro/(1+score_roi)` em vez de `score_roi × preco_alvo` (antigo subestimava porque `preco_alvo` ignora reforma/frete/taxas/custo_op). `exportar` carrega `EmpresaConfig` uma vez e injeta `custo_op_fixo` em `_query`.
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — mesma propagação de `custo_op_fixo` via `carregar_empresa(av.empresa_id)` (lru_cache mantém barato em batch). Nova invariante: alerta quando `Lance Máximo > FIPE × 1.05` — sinal de preco_giro inflado (f_km extrapolado, similares contaminados por varejo, etc.).
+  - [`carros_sa/precificador.py`](carros_sa/precificador.py) — `margem_aplicada` travada em `[minima_absoluta, 0.95]` (antes 0.25×2.0×1.8 = 0.90 em Uberlândia, sem cap → preco_alvo=0 e score_roi explodia).
+  - [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — 4 testes novos (`TestCalcularRoiNoMaximo::test_custo_op_reduz_roi_no_maximo`, `TestLucroAbsolutoNoAlvo` × 3).
+  - [`tests/test_precificador.py`](tests/test_precificador.py) — `test_margem_aplicada_capada_em_95_pct`.
+  - [`tests/test_audit_columns.py`](tests/test_audit_columns.py) — `test_lance_maximo_acima_da_fipe_reportado` + contraprova em FIPE limpa.
+- **Diagnóstico:** Usuário pediu revisão de coerência das colunas da planilha (2026-04-22). Três bugs encontrados:
+  1. **ROI anualizado inflado** — `_calcular_roi_no_maximo` somava `preco_max + reforma + frete + taxas` mas **esquecia `custo_op_fixo`** (R$ 2.523 em Uberlândia). Glossário e docstring *declaravam* que o custo_op fazia parte do capital; só a implementação estava errada.
+  2. **Lucro/mês subestimado** — `lucro = score_roi × preco_alvo`. Mas `score_roi = (preco_giro − capital_alvo) / capital_alvo` e `capital_alvo > preco_alvo`, então o lucro real é `score_roi × capital_alvo = preco_giro − capital_alvo`. Subestimava 10-20%.
+  3. **Margem sem teto** — fator_risco (≤2.0) × fator_liquidez (≤1.8) × base (0.25) = 0.90. Sem cap, preco_alvo zerava e score_roi ficava >500% em lotes ruins, produzindo ROI anualizado absurdo na planilha.
+- **Cobertura:** 318/318 testes (antes 311). Gold do Polo Track continua casando (`test_taxa_leilao_fixa_auto_avaliar_polo_track_real` intocado).
+- **Limitações conhecidas:**
+  - `AvaliacaoLote` ainda não persiste custo_op nem taxa_pct — o export/audit derivam direto de `EmpresaConfig`. Se a config da empresa mudar entre a avaliação e o export, o ROI apresentado pode divergir do que o precificador "pensava". Suficiente pra o MVP; se virar problema, migrar pra persistir na avaliação.
+  - Invariante `Lance Máximo > FIPE` só dispara quando `av.fipe` foi populada (pré-workstream K pode ter NULL). Registros antigos não são auditados contra essa regra.
+  - Cap de margem em 0.95 é conservador — se empresa calibrar base mais agressiva no futuro, revisitar. Hoje base=0.25 (Uber) / 0.30 (SP) dá folga grande.
+
 ### S — Aba Cidades & Frete na planilha ✅
 - **Branch:** `claude/festive-tesla-6c18ae`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — novo `_write_cidades_frete_sheet(empresa_id, session)` engatado no `exportar()`. Aba `cidades_<empresa_id>` com 1 linha por município no raio operacional + frete por categoria + contagem de lotes ativos (fim_em > now) com origem naquela cidade.

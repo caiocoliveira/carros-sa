@@ -113,3 +113,45 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.
 - Listagem real de Uberlândia/MG: `data/scrapes/2026-04-14_uberlandia_listagem.json` (10 lotes variados).
 - Fixture de resposta Gemini: `tests/fixtures/21854782_visual_gemini.json`.
+
+## Aprendizados operacionais (atualizar sempre que descobrir um padrão)
+
+### Revisões de coerência entre colunas da planilha
+Quando o usuário pedir "verifique se as colunas fazem sentido", cruzar SEMPRE
+essas invariantes econômicas (qualquer violação é bug ou sinal de dado ruim):
+
+1. **`Lance Máximo` ≤ `FIPE`** em 95%+ dos casos. Lance Máximo > FIPE×1.05
+   significa preco_giro inflado — investigar `f_km`, `similares_precos` (podem
+   estar pegando varejo privado), ou mediana Webmotors irreal.
+2. **`Giro FIPE` ≈ `FIPE`** com tolerância de ±10%. O campo `preco_giro_fipe`
+   é **mal-nomeado**: na verdade é `webmotors_mediana × f_km`, não baseado em
+   FIPE pura. Divergência grande pode indicar: (a) f_km extrapolado, (b)
+   similares_precos contaminando (AA mostra OUTROS lotes em leilão em "Talvez
+   se interesse por" — preço atacado, não varejo), (c) mercado realmente
+   ilíquido. Quando `similares_precos` está vazio, mediana = FIPE×0.97 — aí
+   Giro FIPE fica próximo mesmo.
+3. **`Lucro/mês` deve casar com `ROI anualizado`**. Ambos são derivados do
+   mesmo lucro absoluto (`preco_giro − capital_alvo`). Divergência indica bug
+   de fórmula — já aconteceu 2x (score_roi × preco_alvo ignora reforma/frete).
+4. **`ROI anualizado` entre 5% e 150%** é a faixa realista. Valores absurdos
+   (<0% ou >500%) são sinal de: (a) dias_giro=1, (b) margem saturando sem cap,
+   (c) capital_total sem custo_op. Sempre checar qual.
+
+### Workflow de auditoria
+`make audit` roda `carros_sa.tools.audit` que espelha `SheetsExporter._query`
+com invariantes declarativas por coluna. Ao fixar um bug de ranking, considerar
+adicionar invariante em `CHECKS` pra prevenir regressão — testes unitários
+cobrem o código; audit cobre os DADOS finais.
+
+### Padrões de fixes recorrentes
+- **Docstring/glossário diz X, código faz Y**: sempre que encontrar, o código
+  está errado (glossário é contrato com operador). Não "corrija" a doc.
+- **Normalização de ROI**: score_roi é SEMPRE `lucro/capital_total`, não
+  `lucro/preco_alvo`. Se for derivar lucro absoluto de score_roi, usar
+  `capital = preco_giro/(1+score_roi)` e `lucro = preco_giro − capital`.
+- **Caps/bounds em formulas compostas**: multiplicação de fatores bounded
+  (ex.: margem = base × fator_risco × fator_liquidez) pode extrapolar pra
+  [0,1] sem cap. Sempre clampar o resultado final, não só os fatores.
+- **Mudança de schema é opcional quando dá pra recarregar**: preferir
+  `carregar_empresa(empresa_id)` no export/audit a adicionar campo em
+  `AvaliacaoLote` (modelo.py é imutável sem discussão). lru_cache torna barato.

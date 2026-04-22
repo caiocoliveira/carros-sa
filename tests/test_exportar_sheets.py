@@ -20,6 +20,7 @@ from carros_sa.tools.sheets import (
     SheetsExporter,
     _calcular_roi_no_maximo,
     _col_letter,
+    _lucro_absoluto_no_alvo,
 )
 
 
@@ -127,6 +128,60 @@ class TestCalcularRoiNoMaximo:
         av = _avaliacao()
         av.preco_max = 0
         assert _calcular_roi_no_maximo(av) == 0.0
+
+    def test_custo_op_reduz_roi_no_maximo(self):
+        """custo_op_fixo da empresa entra no capital total — sem ele, ROI inflado.
+
+        Gold Uberlândia: custo_op_fixo=2.523 + taxas_leilao_fixa=999. Passar
+        o custo_op faz capital subir, lucro cair, ROI cair. Regressão pro
+        bug onde sheets.py omitia o custo_op da fórmula (o ROI anualizado
+        saía ~5-10pp inflado).
+        """
+        av = _avaliacao(preco_giro=35000, preco_max=25000)
+        av.reforma_estimada = 3000
+        av.frete_incluso = 1500
+        av.taxas_leilao = 999
+        roi_sem = _calcular_roi_no_maximo(av, custo_op_fixo=0)
+        roi_com = _calcular_roi_no_maximo(av, custo_op_fixo=2523)
+        assert roi_com < roi_sem, (
+            f"ROI com custo_op ({roi_com}) precisa ser < ROI sem custo_op ({roi_sem})"
+        )
+        # capital c/custo_op = 25000+3000+1500+999+2523 = 33022
+        # lucro = 35000 - 33022 = 1978 → ROI = 1978/33022 ≈ 6.0%
+        assert 5.0 < roi_com < 7.0
+
+
+class TestLucroAbsolutoNoAlvo:
+    """Derivação do lucro absoluto a partir de score_roi + preco_giro.
+
+    Antes o exportador usava `score_roi * preco_alvo` como proxy do lucro,
+    mas score_roi é normalizado pelo capital TOTAL (preco_alvo + reforma
+    + frete + custo_op + taxas), não só preco_alvo. Resultado: lucro_mes
+    subestimado em ~10-20%.
+    """
+
+    def test_lucro_deriva_de_score_roi(self):
+        """score_roi=0.3 e preco_giro=35000 → capital=35000/1.3≈26923 → lucro≈8077."""
+        av = _avaliacao(preco_giro=35000, score_roi=0.3, preco_max=25000)
+        lucro = _lucro_absoluto_no_alvo(av)
+        assert 7900 < lucro < 8200  # 35000 - 35000/1.3
+
+    def test_lucro_zero_quando_score_roi_negativo_forte(self):
+        """score_roi ≤ -1 (capital maior que preco_giro) → lucro 0, sem crash."""
+        av = _avaliacao(preco_giro=35000, score_roi=-1.5)
+        assert _lucro_absoluto_no_alvo(av) == 0
+
+    def test_lucro_maior_que_score_roi_vezes_preco_alvo(self):
+        """Regressão do bug: lucro real > score_roi*preco_alvo (bug antigo).
+
+        capital_alvo > preco_alvo (por construção), então
+        lucro = score_roi * capital > score_roi * preco_alvo.
+        """
+        av = _avaliacao(preco_giro=35000, score_roi=0.3, preco_max=25000)
+        av.preco_alvo = 20000
+        lucro_correto = _lucro_absoluto_no_alvo(av)
+        lucro_bug = int(av.score_roi * av.preco_alvo)  # fórmula antiga
+        assert lucro_correto > lucro_bug
 
 
 class TestSheetsExporterQuery:

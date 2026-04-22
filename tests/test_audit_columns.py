@@ -188,6 +188,45 @@ class TestAuditDeteccao:
         violacoes = audit(engine)
         assert any("Modelo" in v for v in violacoes), f"Violacoes: {violacoes}"
 
+    def test_lance_maximo_acima_da_fipe_reportado(self):
+        """Lance Máximo > FIPE×1.05 é economicamente suspeito.
+
+        Operação típica de atacado paga abaixo de FIPE (mediana -15% a -25%
+        na prática). Topar acima da FIPE significa que alguma componente do
+        preco_giro está inflada (ex.: f_km extrapolado ou similares_precos
+        capturando varejo privado em vez de atacado). Audit sinaliza pra o
+        operador revisar o `justificativa` antes de dar lance real.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            # FIPE = 30k, Lance Máximo = 40k → 133% da FIPE, claramente suspeito
+            session.add(_avaliacao(
+                "L001", fipe=30_000, preco_giro=45_000, preco_max=40_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Lance Máximo" in v and "FIPE" in v for v in violacoes), (
+            f"Esperava violação de Lance Máximo>FIPE em {violacoes}"
+        )
+
+    def test_lance_maximo_igual_a_fipe_nao_reporta(self):
+        """Limiar é FIPE×1.05 — valores na zona de tolerância não disparam.
+
+        Evita ruído em lotes onde arredondamento de centavos ou categorias
+        de luxo legitimamente ficam próximos à FIPE.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            # FIPE = 30k, Lance Máximo = 30k → OK
+            session.add(_avaliacao(
+                "L001", fipe=30_000, preco_giro=30_000, preco_max=30_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("FIPE" in v for v in violacoes), f"Não deveria alertar: {violacoes}"
+
 
 # ---------------------------------------------------------------------------
 # Agregação por coluna (várias linhas → uma única violação com contagem)

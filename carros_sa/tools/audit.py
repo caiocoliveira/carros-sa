@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.tenancy import carregar_empresa
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -64,7 +65,18 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
-        else None
+        else (
+            # Lance Máximo > FIPE é economicamente suspeito: estaríamos topando
+            # pagar mais que o teto de varejo numa operação de atacado. Só faz
+            # sentido em nicho/colecionável; em carro de ranking diário costuma
+            # ser sintoma de preco_giro inflado (ex.: f_km acima do teto ou
+            # similares contaminados por preços de varejo privado).
+            "Lance Máximo > FIPE — preco_giro pode estar inflado (verifique f_km / similares)"
+            if (
+                v is not None and isinstance(v, (int, float))
+                and r.get("fipe") and v > r["fipe"] * 1.05
+            ) else None
+        )
     ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"
@@ -129,7 +141,14 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        roi_max = _calcular_roi_no_maximo(av)
+        # Carrega empresa via cache pra derivar custo_op_fixo (lru_cache em
+        # carregar_empresa mantém a busca barata mesmo em batch). Fallback
+        # silencioso pra 0 quando YAML não existe — mesma semântica do export.
+        try:
+            custo_op_fixo = carregar_empresa(av.empresa_id).custo_op_fixo
+        except FileNotFoundError:
+            custo_op_fixo = 0
+        roi_max = _calcular_roi_no_maximo(av, custo_op_fixo=custo_op_fixo)
         roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;

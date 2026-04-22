@@ -18,6 +18,7 @@ mas nesse MVP roda sequencial para simplicidade.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import tempfile
 from dataclasses import dataclass, field
@@ -32,6 +33,12 @@ from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
 from carros_sa.agents.estimador_reforma_llm import estimar_llm as estimar_reforma_llm
 from carros_sa.agents.extrator_laudo import extrair_laudo
 from carros_sa.config import get_settings
+from carros_sa.errors import (
+    FipeIndisponivel,
+    LaudoExtractionError,
+    PDFDownloadError,
+    PDFInvalidoError,
+)
 from carros_sa.models import (
     AvaliacaoLote,
     CategoriaVeiculo,
@@ -53,6 +60,9 @@ from carros_sa.scraping.scraper_autoavaliar import (
 )
 from carros_sa.tenancy import EmpresaConfig, carregar_empresa
 
+logger = logging.getLogger(__name__)
+
+
 def _pdf_persistente_path(lote_id: str) -> Path:
     """Path onde o PDF do laudo é salvo — um por lote_id."""
     storage_dir = get_settings().pdf_storage_dir
@@ -71,13 +81,14 @@ def _pdf_eh_laudo_valido(pdf_path: Path) -> bool:
     settings = get_settings()
     if not pdf_path.exists() or pdf_path.stat().st_size < settings.pdf_min_bytes:
         return False
+    import fitz  # PyMuPDF, já é dep do extrator de laudo
     try:
-        import fitz  # PyMuPDF, já é dep do extrator de laudo
         with fitz.open(str(pdf_path)) as pdf:
             if pdf.page_count == 0:
                 return False
             txt = (pdf[0].get_text() or "").upper()
-    except Exception:
+    except (fitz.FileDataError, OSError) as exc:
+        logger.warning("PDF corrompido ou inacessível %s: %s", pdf_path, exc)
         return False
     if not any(m in txt for m in settings.pdf_markers_positivos):
         return False
@@ -127,21 +138,17 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
         else:
             distancia_km = settings.frete_km_uf_distante
 
-    # Categoria do veículo — usa OUTRO se não tiver laudo ainda
+    # Categoria do veículo — heurística por nome do modelo; OUTRO se não casar.
     categoria = CategoriaVeiculo.OUTRO
-    try:
-        # Tenta inferir da marca/modelo (heurística simples)
-        modelo_lower = (lote.modelo or "").lower()
-        if any(k in modelo_lower for k in ("hilux", "s10", "saveiro", "strada", "ranger")):
-            categoria = CategoriaVeiculo.PICAPE
-        elif any(k in modelo_lower for k in ("compass", "hr-v", "tracker", "creta", "haval", "evoque")):
-            categoria = CategoriaVeiculo.SUV
-        elif any(k in modelo_lower for k in ("onix", "hb20", "gol", "fiesta", "polo", "ka ")):
-            categoria = CategoriaVeiculo.HATCH
-        elif any(k in modelo_lower for k in ("cruze", "corolla", "civic", "jetta")):
-            categoria = CategoriaVeiculo.SEDAN
-    except Exception:
-        pass
+    modelo_lower = (lote.modelo or "").lower()
+    if any(k in modelo_lower for k in ("hilux", "s10", "saveiro", "strada", "ranger")):
+        categoria = CategoriaVeiculo.PICAPE
+    elif any(k in modelo_lower for k in ("compass", "hr-v", "tracker", "creta", "haval", "evoque")):
+        categoria = CategoriaVeiculo.SUV
+    elif any(k in modelo_lower for k in ("onix", "hb20", "gol", "fiesta", "polo", "ka ")):
+        categoria = CategoriaVeiculo.HATCH
+    elif any(k in modelo_lower for k in ("cruze", "corolla", "civic", "jetta")):
+        categoria = CategoriaVeiculo.SEDAN
 
     frete = empresa.frete_para(distancia_km, categoria)
 
@@ -531,21 +538,33 @@ async def _pipeline_lote(
                     # pego por seletor frouxo no passado) — descarta e trata como sem PDF.
                     pdf_dest.unlink(missing_ok=True)
                     pdf_dest = None
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "baixar_pdf falhou p/ %s (%s: %s) — pipeline segue sem PDF",
+                    lote.id, type(exc).__name__, exc,
+                )
                 pdf_dest = None
 
         if pdf_dest is not None:
             try:
                 # Tentativa 1: extração completa (textual + visão)
                 laudo = extrair_laudo(pdf_dest, vision_client)
-            except Exception:
-                # Tentativa 2: só camada textual (quando PDF tem <2 páginas ou visão falha)
+            except Exception as exc:
+                # Tentativa 2: só camada textual (PDF <2 páginas ou visão falha)
+                logger.warning(
+                    "extrair_laudo visual falhou p/ %s (%s: %s) — fallback textual",
+                    lote.id, type(exc).__name__, exc,
+                )
                 try:
                     from carros_sa.agents.extrator_laudo import parse_laudo_textual
                     txt = parse_laudo_textual(pdf_dest)
                     laudo = _laudo_de_textual(txt, flags)
-                except Exception:
-                    # Último recurso: sem PDF
+                except Exception as exc2:
+                    # Último recurso: sem PDF (avarias vazias + confidence 0.5)
+                    logger.warning(
+                        "parse textual falhou p/ %s (%s: %s) — laudo sem PDF",
+                        lote.id, type(exc2).__name__, exc2,
+                    )
                     laudo = _laudo_sem_pdf(flags)
         else:
             laudo = _laudo_sem_pdf(flags)
@@ -606,8 +625,11 @@ async def _pipeline_lote(
                 try:
                     from carros_sa.agents.extrator_laudo import parse_laudo_textual
                     observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
-                except Exception:
-                    observacoes = ""
+                except Exception as exc:
+                    logger.debug(
+                        "observações do laudo indisponíveis p/ %s (%s): prompt sem enriquecimento",
+                        lote.id, type(exc).__name__,
+                    )
             reforma = estimar_reforma_llm(
                 laudo=laudo,
                 lote_info={
@@ -636,15 +658,13 @@ async def _pipeline_lote(
                              preco_alvo=avaliacao.preco_alvo, roi_pct=roi_pct)
 
     except Exception as exc:
-        # Log estruturado pra debug: tipo da exceção + mensagem. Imprime antes
-        # do rollback pra garantir que o usuário veja qual lote falhou e por quê
-        # (sem esse print, o erro ficava só no ResultadoLote.erro, invisível
-        # durante o run — causou misterio de "21 erros silenciosos" em 2026-04-16).
-        import sys
-        print(
-            f"[pipeline_lote] ERRO em {lote.id} ({modelo_str}): "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr, flush=True,
+        # Safety net: um lote ruim não pode derrubar o batch. Log estruturado
+        # via logger (antes era print no stderr — causou mistério de "21 erros
+        # silenciosos" em 2026-04-16 quando o logger não tinha sido configurado).
+        logger.error(
+            "pipeline_lote ERRO em %s (%s): %s: %s",
+            lote.id, modelo_str, type(exc).__name__, exc,
+            exc_info=True,
         )
         session.rollback()
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str,
@@ -697,8 +717,12 @@ async def orquestrar(
             _upsert_lote(lote_raw, session, loja=loja)
             if not existente:
                 lotes_ids_novos.append(lote_raw.lote_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Um card com schema inesperado não pode derrubar a ingesta toda.
+            logger.warning(
+                "ingesta: card %s ignorado (%s: %s)",
+                card.get("loteId", "?"), type(exc).__name__, exc,
+            )
     session.commit()
     result.n_novos = len(lotes_ids_novos)
 

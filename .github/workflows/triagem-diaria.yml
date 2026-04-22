@@ -1,0 +1,73 @@
+name: triagem-diaria
+
+# Roda o pipeline `make triagem` + scripts de limpeza/retry 1x/dia às 7h BRT (10h UTC).
+# Estado persistido em Cloudflare R2 via scripts/sync_state.py.
+# Setup completo: docs/github-actions-setup.md
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  triagem:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: triagem
+      cancel-in-progress: false
+
+    env:
+      AUTOAVALIAR_EMAIL: ${{ secrets.AUTOAVALIAR_EMAIL }}
+      AUTOAVALIAR_PASSWORD: ${{ secrets.AUTOAVALIAR_PASSWORD }}
+      AUTOAVALIAR_COOKIES_PATH: ${{ github.workspace }}/autoavaliar_cookies.json
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+      GOOGLE_SERVICE_ACCOUNT_PATH: ${{ github.workspace }}/gcp-sa.json
+      CARROS_SA_DB: ${{ github.workspace }}/carros_sa.db
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+
+      - name: Create venv + install deps
+        run: |
+          uv venv --python 3.12 .venv
+          VIRTUAL_ENV="$PWD/.venv" uv pip install -e ".[dev,cloud]"
+
+      - name: Install Playwright Chromium
+        run: .venv/bin/playwright install --with-deps chromium
+
+      - name: Write GCP service account JSON
+        run: |
+          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > "$GOOGLE_SERVICE_ACCOUNT_PATH"
+
+      - name: Pull state from R2
+        run: PYTHONPATH=. .venv/bin/python scripts/sync_state.py pull
+
+      - name: Run triagem pipeline
+        run: |
+          set -eo pipefail
+          PYTHONPATH=. .venv/bin/python scripts/triagem_diaria.py --empresa carros_uberlandia
+          PYTHONPATH=. .venv/bin/python scripts/limpar_decoys_laudo.py
+          PYTHONPATH=. .venv/bin/python scripts/reprocessar_lotes_do_db.py --somente-ativos --somente-laudo-pendente
+
+      - name: Push state to R2
+        if: success()
+        run: PYTHONPATH=. .venv/bin/python scripts/sync_state.py push
+
+      - name: Upload SQLite snapshot artifact (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: carros-sa-db-${{ github.run_id }}
+          path: ${{ github.workspace }}/carros_sa.db
+          retention-days: 14
+          if-no-files-found: ignore

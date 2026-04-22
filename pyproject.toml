@@ -32,6 +32,9 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
 ]
+cloud = [
+    "boto3>=1.35",
+]
 
 [project.scripts]
 carros-sa = "carros_sa.cli:app"

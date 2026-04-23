@@ -18,7 +18,19 @@ from enum import Enum
 
 from sqlmodel import Session, select
 
+from carros_sa.metrics import (
+    categoria_de_modelo as _categoria_de_modelo_impl,
+    lucro_reais_por_mes as _lucro_reais_por_mes_impl,
+    roi_anualizado as _roi_anualizado_impl,
+)
 from carros_sa.models import Arrematado, CategoriaVeiculo, Lote
+
+# Re-exports de `carros_sa.metrics` pra backward compat — callers antigos
+# faziam `from carros_sa.agents.calibracao_giro import _categoria_de_modelo,
+# roi_anualizado, lucro_reais_por_mes`. A fonte da verdade agora é `metrics.py`.
+_categoria_de_modelo = _categoria_de_modelo_impl
+lucro_reais_por_mes = _lucro_reais_por_mes_impl
+roi_anualizado = _roi_anualizado_impl
 
 # TTL do cache — 1h é mais que suficiente pra batch run; calibração nova fica
 # disponível na próxima invocação humana.
@@ -58,49 +70,6 @@ _cache: dict[
     tuple[str, CategoriaVeiculo, FaixaIdade | None],
     tuple[int, datetime],
 ] = {}
-
-def _categoria_de_modelo(modelo: str) -> CategoriaVeiculo:
-    """Inferência grosseira por substring no nome do modelo.
-
-    Mantém alinhado com [orquestrador._calcular_frete](../orquestrador.py)
-    pra que histórico e novos lotes caiam na mesma bucket. Lista expandida
-    após rodagens reais — incluindo marcas chinesas (Tiggo/Haval), lançamentos
-    Fiat recentes (Fastback/Pulse/Cronos), SUVs compactos e picapes menos
-    comuns (Oroch/Maverick/Montana/Triton).
-    """
-    m = (modelo or "").lower()
-    if any(k in m for k in (
-        "hilux", "s10", "saveiro", "strada", "ranger", "frontier", "amarok", "toro",
-        "l200", "oroch", "maverick", "montana", "courier", "triton", "dakota",
-        "f-250", "f-1000", "d-20", "hoggar", "f-100",
-    )):
-        return CategoriaVeiculo.PICAPE
-    if any(k in m for k in (
-        "compass", "hr-v", "tracker", "creta", "haval", "evoque", "spin", "renegade",
-        "pajero", "freelander", "750i", "activ", "longitude", "sport", "duster", "ecosport",
-        # Lançamentos Fiat recentes: Pulse (SUV) e Fastback (SUV coupé)
-        "pulse", "fastback",
-        # Chineses + SUVs recentes
-        "tiggo", "tucson", "cherokee", "commander", "territory", "santa fe", "trailblazer",
-        "kicks", "captur", "t-cross", "corolla cross", "wr-v", "outlander", "sportage",
-        # Premium SUVs
-        "x1", "x3", "x5", "x6", "q3", "q5", "q7", "glk", "gla", "glb",
-    )):
-        return CategoriaVeiculo.SUV
-    if any(k in m for k in (
-        "onix", "hb20", "gol", "fiesta", "polo", "ka ", "march", "sandero", "uno", "mobi",
-        "argo", "biz", "bizz", "kwid", "208", "c3", "up", "palio", "punto",
-        "i30", "picanto", "soul", "jazz", "yaris", "bravo", "etios", "astra", "celta",
-    )):
-        return CategoriaVeiculo.HATCH
-    if any(k in m for k in (
-        "cruze", "corolla", "civic", "jetta", "voyage", "virtus", "logan", "prisma",
-        "versa", "fluence", "focus sedan", "ka sedan", "j5", "j5i", "cobalt",
-        "city", "cronos", "grand siena", "hb20s", "onix plus", "sentra", "linea",
-        "megane", "vectra", "astra sedan", "lancer", "yaris sedan",
-    )):
-        return CategoriaVeiculo.SEDAN
-    return CategoriaVeiculo.OUTRO
 
 def _calibrar_nivel(
     empresa_id: str,
@@ -182,41 +151,7 @@ def calibrar_dias_giro(
 
     return fallback
 
+
 def invalidar_cache() -> None:
     """Limpa o cache — útil em testes e quando importou novos arrematados."""
     _cache.clear()
-
-def lucro_reais_por_mes(
-    lucro_absoluto_reais: int,
-    dias_giro: int | None,
-) -> int:
-    """Converte lucro esperado (R$) em R$/mês, respeitando o tempo de venda.
-
-    Útil como métrica intuitiva pro operador: "esse lote rende R$X/mês
-    enquanto tá no pátio". Permite comparar lotes com capitais e prazos
-    muito diferentes na mesma unidade.
-
-    Floor de 30 dias (mesma lógica do roi_anualizado) evita números absurdos.
-    """
-    if lucro_absoluto_reais <= 0:
-        return 0
-    dias = 90 if dias_giro is None else max(dias_giro, 30)
-    # (lucro / dias) * 30 = lucro mensal esperado
-    return int(round(lucro_absoluto_reais * 30.0 / dias))
-
-def roi_anualizado(score_roi: float, dias_giro: int | None) -> float:
-    """Anualiza o ROI absoluto pelo tempo esperado de venda.
-
-    Distinção semântica:
-      - `dias_giro is None` → estimativa ausente. Usa fallback 90 dias (4x ao ano,
-        anualização conservadora).
-      - `dias_giro` numérico (até 0) → estimativa presente. Aplica floor de 30
-        dias pra evitar que carros com previsão "absurdo baixo" inflem o ROI.
-    """
-    if score_roi is None:
-        return 0.0
-    if dias_giro is None:
-        dias = 90
-    else:
-        dias = max(dias_giro, 30)
-    return score_roi * (365.0 / dias)

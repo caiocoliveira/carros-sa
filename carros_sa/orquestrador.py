@@ -554,8 +554,8 @@ def _estagio_mercado(
     """Consulta FIPE/Webmotors. Levanta `_DescarteLote` se FIPE indisponível."""
     categoria = laudo.categoria_veiculo
     if categoria == CategoriaVeiculo.OUTRO:
-        from carros_sa.agents.calibracao_giro import _categoria_de_modelo
-        categoria = _categoria_de_modelo(lote.modelo)
+        from carros_sa.metrics import categoria_de_modelo
+        categoria = categoria_de_modelo(lote.modelo)
 
     try:
         return avaliar_mercado(

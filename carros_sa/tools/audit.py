@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from sqlmodel import Session, select
 
-from carros_sa.agents.calibracao_giro import roi_anualizado
+from carros_sa.metrics import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
@@ -131,9 +131,9 @@ def _build_rows(session: Session, sample_size: int) -> list[dict[str, Any]]:
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
         popularidade = "—"
         try:
-            from carros_sa.agents.calibracao_giro import _categoria_de_modelo
+            from carros_sa.metrics import categoria_de_modelo
             from carros_sa.tools.popularidade import bucket_modelo
-            cat = _categoria_de_modelo(lote.modelo)
+            cat = categoria_de_modelo(lote.modelo)
             popularidade = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano).value
         except (KeyError, AttributeError, ValueError):
             # Dataset de popularidade pode não cobrir modelo — auditoria não pode quebrar

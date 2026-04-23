@@ -149,9 +149,7 @@ class SheetsExporter:
 
             viavel = av.preco_max > (lote.lance_atual or 0)
 
-            from carros_sa.agents.calibracao_giro import (
-                lucro_reais_por_mes, roi_anualizado,
-            )
+            from carros_sa.metrics import lucro_reais_por_mes, roi_anualizado
             roi_max = _calcular_roi_no_maximo(av)
             roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
             # Lucro esperado / mês — métrica intuitiva pro operador:

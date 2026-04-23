@@ -85,7 +85,7 @@ def top(
     """
     from sqlmodel import select
 
-    from carros_sa.agents.calibracao_giro import lucro_reais_por_mes, roi_anualizado
+    from carros_sa.metrics import lucro_reais_por_mes, roi_anualizado
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, Lote
 
@@ -134,7 +134,7 @@ def top(
     rows = enriquecidas[:n]
 
     # Inferência de popularidade on-demand pra cada lote do top (barato, sem rede)
-    from carros_sa.agents.calibracao_giro import _categoria_de_modelo
+    from carros_sa.metrics import categoria_de_modelo as _categoria_de_modelo
     from carros_sa.tools.popularidade import bucket_modelo
 
     sufixo = "ROI absoluto" if por_absoluto else "ROI anualizado"

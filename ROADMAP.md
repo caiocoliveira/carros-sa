@@ -235,6 +235,22 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Guard do DB real faz `dry_run` mas não auto-corrige durante o `pytest` — exige intervenção (`make limpar-decoys`). Intencional: teste não deve mutar estado de produção silenciosamente.
   - Se um novo padrão de decoy aparecer no Auto Avaliar e o `is_laudo_pdf_url()` aceitar incorretamente, ambos scraper E limpeza deixam passar. Defesa secundária fica com `_pdf_eh_laudo_valido()` no orquestrador (inspeciona o PDF baixado).
 
+### R.2 — Guard 'todo carro na planilha tem laudo baixado + revisado + linkado' ✅
+- **Branch:** `claude/great-turing-6MUIL`
+- **Arquivos:**
+  - [`carros_sa/tools/lista_laudo_audit.py`](carros_sa/tools/lista_laudo_audit.py) — NOVO. `auditar_lista_laudos(session, empresa_id)` cruza `AvaliacaoLote` × `LaudoCache` × arquivo PDF persistente × `is_laudo_pdf_url()`. Retorna `ResultadoAuditoria` com 4 causas-raiz (`URL_AUSENTE`, `URL_DECOY`, `PDF_NAO_BAIXADO`, `LAUDO_NAO_REVISADO`) ordenadas por gate primário.
+  - [`scripts/auditar_lista_laudos.py`](scripts/auditar_lista_laudos.py) — NOVO. CLI Typer com `--empresa`, `--max-listar`, `--quiet`. Imprime tabela agregada por causa + dica de resolução, lista os primeiros N gaps individualmente. Exit code != 0 quando há gaps (cron-friendly).
+  - [`tests/test_lista_laudo_guard.py`](tests/test_lista_laudo_guard.py) — NOVO. 13 testes funcionais (1 por causa, ordem de causa raiz, espelhamento de filtros do export, agregação) + hygiene check de DB real espelhando `test_decoy_laudo_guard.py`.
+  - [`Makefile`](Makefile) — alvo `make auditar-lista-laudos`.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — cron diário agora encadeia 4 passos: `triagem → limpar_decoys → retry-laudo-pendente → auditar_lista_laudos --quiet`. Termômetro pós-cura no log; `--quiet` evita poluição no caminho feliz.
+- **Motivação:** Usuário (2026-04-23) pediu garantia "todos carros na lista têm laudo baixado + revisado + link na planilha; se não, identificar razão e resolver pra nunca mais acontecer". O cron já rodava cura (decoy + retry), mas sem termômetro pós-cura ninguém sabia se ainda sobravam gaps. Pior: se o pipeline silenciosamente regredisse (ex.: scraper deixar passar padrão novo de decoy, vision client mudar comportamento), só apareceria como "LAUDO NÃO ANALISADO" no Sheets — usuário só descobriria abrindo a planilha.
+- **Como funciona:** O auditor espelha exatamente os filtros do `SheetsExporter._query` + `exportar` (lote sem `fim_em` ou encerrado por badge/timer não conta). Pra cada lote ativo, checa em ordem: (1) `raw_json.detalhe.laudo_pdf_url` presente → (2) URL passa em `is_laudo_pdf_url()` → (3) `data/laudos_pdfs/<lote>.pdf` existe → (4) `LaudoCache.confidence >= 0.6`. Reporta SÓ a primeira causa por lote (ordem de causa raiz: resolver URL destrava o resto em cascata; reportar sintomas derivados infla o output).
+- **Cobertura:** 13 testes novos. Suíte completa **324 passando** (+ 3 skipped — incluindo o hygiene check de DB real, que ativa só com `carros_sa.db` presente).
+- **Limitações conhecidas:**
+  - Auditor NÃO auto-corrige — ele só identifica. A cura é responsabilidade do cron (`limpar_decoys` + `reprocessar_lotes_do_db --somente-laudo-pendente`). Se o cron está parado, o auditor só pinta vermelho mais alto.
+  - `URL_AUSENTE` é o gap mais difícil de fechar automaticamente: se o scraper não acha `laudo_pdf_url` no DOM (modal lento, layout diferente, status "SEM LAUDO"), retry visita a URL de novo mas pode falhar do mesmo jeito. Mitigação atual: relatório aponta a quantidade pra operador investigar manualmente. Próximo passo (não neste workstream): retry com `wait_for_selector` mais paciente + fallback pra clicar no botão "Ver laudo".
+  - Hygiene check só roda pra `carros_uberlandia` (única empresa em produção). Multi-tenant precisa expandir o teste.
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

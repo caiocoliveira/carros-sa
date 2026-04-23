@@ -31,8 +31,10 @@ class AppSettings(BaseSettings):
     )
 
     # ----- Armazenamento -----
+    # NOTA: o path do SQLite vive em `carros_sa/db.py` via env CARROS_SA_DB,
+    # não aqui — evita divergência de fonte da verdade. Mantido esse módulo
+    # pra comportamento (sleep, retry, thresholds).
     pdf_storage_dir: Path = _PROJECT_ROOT / "data" / "laudos_pdfs"
-    db_path: Path = _PROJECT_ROOT / "carros_sa.db"
 
     # ----- Scraping / anti-bot -----
     # Sleep entre requests da Auto Avaliar. Subido de 2-4s → 5-8s após 49/55

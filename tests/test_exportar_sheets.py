@@ -284,6 +284,68 @@ class TestSheetsExporterQuery:
         assert "LAUDO NÃO ANALISADO" not in data_row[HEADER.index("Situação")]
         assert data_row[HEADER.index("Reforma (R$)")] == 3000
 
+    def test_exportar_horizonte_exibicao_corta_lotes_muito_futuros(self):
+        """Quando `horizonte_exibicao_dias=N` é passado, lotes com fim > agora+N dias
+        ficam fora da planilha. Regressão do feedback 2026-04-23: a gente
+        passou a coletar o pipeline inteiro (sem cortar no scraper), então o
+        exporter é quem define a janela que o usuário enxerga."""
+        engine = _engine_mem()
+        agora = datetime.now()
+        with Session(engine) as session:
+            session.add(_lote("L_HOJE", fim_em=agora + timedelta(hours=4)))
+            session.add(_lote("L_DAQUI_15D", fim_em=agora + timedelta(days=15)))
+            session.add(_lote("L_DAQUI_45D", fim_em=agora + timedelta(days=45)))
+            session.add(_avaliacao("L_HOJE"))
+            session.add(_avaliacao("L_DAQUI_15D"))
+            session.add(_avaliacao("L_DAQUI_45D"))
+            session.add(_laudo("L_HOJE"))
+            session.add(_laudo("L_DAQUI_15D"))
+            session.add(_laudo("L_DAQUI_45D"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar(
+                    "uberlandia_mg", session, horizonte_exibicao_dias=30,
+                )
+
+        # L_HOJE e L_DAQUI_15D passam; L_DAQUI_45D fora da janela.
+        assert n == 2
+
+    def test_exportar_horizonte_exibicao_none_mantem_tudo(self):
+        """`horizonte_exibicao_dias=None` (default) NÃO filtra por janela — só
+        os filtros antigos (fim_em=None, encerrado) continuam ativos."""
+        engine = _engine_mem()
+        agora = datetime.now()
+        with Session(engine) as session:
+            session.add(_lote("L_HOJE", fim_em=agora + timedelta(hours=4)))
+            session.add(_lote("L_LONGE", fim_em=agora + timedelta(days=90)))
+            session.add(_avaliacao("L_HOJE"))
+            session.add(_avaliacao("L_LONGE"))
+            session.add(_laudo("L_HOJE"))
+            session.add(_laudo("L_LONGE"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar("uberlandia_mg", session)
+
+        assert n == 2
+
     def test_exportar_sem_avaliacoes_retorna_zero(self):
         """Empresa sem avaliações deve retornar 0 sem erros."""
         engine = _engine_mem()

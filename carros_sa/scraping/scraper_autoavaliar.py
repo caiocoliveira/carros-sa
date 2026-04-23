@@ -275,7 +275,7 @@ async def garantir_autenticado(page, email: str, password: str) -> None:
 # Coleta de listagem
 # ---------------------------------------------------------------------------
 
-_MAX_PAGINAS = 20  # teto defensivo pro range de `?p=N`
+_MAX_PAGINAS = 50  # teto defensivo pro range de `?p=N`
 
 
 _CONTA_PAGINAS_JS = """
@@ -292,7 +292,7 @@ async def _coletar_listagem_cidade(
     page,
     cidade: str,
     uf: str,
-    horizonte_dias: int,
+    horizonte_dias: Optional[int] = None,
 ) -> list:
     """Coleta cards de UMA cidade, iterando TODAS as páginas via `?p=N`.
 
@@ -300,6 +300,13 @@ async def _coletar_listagem_cidade(
     links da paginação como `<a class="button" data-page="N">`. A gente lê
     `max(data-page)` na primeira página e itera até lá, limitando a
     `_MAX_PAGINAS` pra não rodar loop runaway se o DOM mudar.
+
+    `horizonte_dias` é um filtro opcional pós-agregação: se setado, descarta
+    cards cujo timer aponte pra fim > agora + N dias. Default `None` = coleta
+    TUDO que aparece na listagem — a janela de exibição é decidida no
+    exporter (ver `SheetsExporter.exportar(horizonte_exibicao_dias=...)`).
+    Separar coleta de exibição evita que bumps de horizonte precisem de
+    re-scrape: o DB passa a guardar o pipeline cheio de leilões futuros.
     """
     base_url = (
         f"{LISTAGEM_URL}?location={uf.lower()}&cities={quote(cidade.lower())}"
@@ -310,12 +317,19 @@ async def _coletar_listagem_cidade(
     await page.goto(base_url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(2000)
 
-    total_paginas = await page.evaluate(_CONTA_PAGINAS_JS)
+    total_paginas_raw = await page.evaluate(_CONTA_PAGINAS_JS)
     try:
-        total_paginas = int(total_paginas)
+        total_paginas_detectado = int(total_paginas_raw)
     except (TypeError, ValueError):
-        total_paginas = 1
-    total_paginas = max(1, min(total_paginas, _MAX_PAGINAS))
+        total_paginas_detectado = 1
+    if total_paginas_detectado > _MAX_PAGINAS:
+        # Sinal pro operador de que pode estar faltando inventário — se
+        # acontecer sempre com a mesma cidade, vale subir `_MAX_PAGINAS`.
+        print(
+            f"[scraper] aviso: {cidade}/{uf} reporta {total_paginas_detectado} "
+            f"páginas, coletando só as {_MAX_PAGINAS} primeiras"
+        )
+    total_paginas = max(1, min(total_paginas_detectado, _MAX_PAGINAS))
 
     vistos: set = set()
     agregado: list = []
@@ -336,7 +350,11 @@ async def _coletar_listagem_cidade(
         await page.wait_for_timeout(1500)
         await _coleta_pagina_atual()
 
-    # Filtra por horizonte DEPOIS de agregar todas as páginas
+    if horizonte_dias is None:
+        return agregado
+
+    # Filtra por horizonte DEPOIS de agregar todas as páginas (opt-in: só quando
+    # o caller quer limitar explicitamente; o pipeline default deixa passar)
     agora = datetime.now()
     limite = agora + timedelta(days=horizonte_dias)
     resultado = []
@@ -355,7 +373,7 @@ async def _coletar_listagem_cidade(
 async def coletar_listagem(
     page,
     empresa: EmpresaConfig,
-    horizonte_dias: int = 7,
+    horizonte_dias: Optional[int] = None,
 ) -> list[dict]:
     """
     Coleta cards do Auto Avaliar iterando pelas cidades do raio operacional da empresa.

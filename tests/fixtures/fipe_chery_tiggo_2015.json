@@ -1,0 +1,52 @@
+{
+  "/cars/brands": [
+    {"code": "245", "name": "Caoa Chery"},
+    {"code": "161", "name": "Caoa Chery/Chery"},
+    {"code": "21", "name": "Ford"}
+  ],
+  "/cars/brands/161/models": [
+    {"code": "8339", "name": "Tiggo 2 ACT 1.5 16V Flex Aut.5p"},
+    {"code": "6661", "name": "Tiggo 2.0 16V Aut. 5p"},
+    {"code": "5021", "name": "Tiggo 2.0 16V Mec. 5p"},
+    {"code": "8571", "name": "Tiggo 5X T 1.5 16V Turbo Flex Aut."},
+    {"code": "8586", "name": "Tiggo 7 T 1.5 16V Turbo Flex Aut."}
+  ],
+  "/cars/brands/245/models": [
+    {"code": "9532", "name": "Tiggo 3X Plus 1.0 Turbo Flex Aut."},
+    {"code": "9749", "name": "Tiggo 5X PRO 1.5 Turbo Flex Aut."},
+    {"code": "9681", "name": "Tiggo 7 Pro 1.6 Turbo 16V Aut."},
+    {"code": "11198", "name": "Tiggo 8 PRO 1.6 TGDi Aut."}
+  ],
+  "/cars/brands/161/models/6661/years": [
+    {"code": "2015-1", "name": "2015 Gasolina"},
+    {"code": "2014-1", "name": "2014 Gasolina"},
+    {"code": "2013-1", "name": "2013 Gasolina"}
+  ],
+  "/cars/brands/245/models/9681/years": [
+    {"code": "2024-1", "name": "2024 Gasolina"},
+    {"code": "2023-1", "name": "2023 Gasolina"},
+    {"code": "2022-1", "name": "2022 Gasolina"}
+  ],
+  "/cars/brands/161/models/6661/years/2015-1": {
+    "price": "R$ 41.512,00",
+    "brand": "Caoa Chery/Chery",
+    "model": "Tiggo 2.0 16V Aut. 5p",
+    "modelYear": 2015,
+    "fuel": "Gasolina",
+    "codeFipe": "073009-2",
+    "referenceMonth": "abril de 2026",
+    "vehicleType": 1,
+    "fuelAcronym": "G"
+  },
+  "/cars/brands/245/models/9681/years/2022-1": {
+    "price": "R$ 114.296,00",
+    "brand": "Caoa Chery",
+    "model": "Tiggo 7 Pro 1.6 Turbo 16V Aut.",
+    "modelYear": 2022,
+    "fuel": "Gasolina",
+    "codeFipe": "073032-7",
+    "referenceMonth": "abril de 2026",
+    "vehicleType": 1,
+    "fuelAcronym": "G"
+  }
+}

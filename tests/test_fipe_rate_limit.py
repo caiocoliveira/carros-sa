@@ -1,8 +1,8 @@
 """Tests pra retry/backoff/throttle do FipeClient contra rate limit 429.
 
 Motivação: em 2026-04-16 a triagem produziu 21 erros por HTTP 429 da Parallelum
-após ~50 lotes. O pipeline bate ~4 requests por lote em `/carros/marcas`,
-`/modelos`, `/anos`, `/valor`. Sem retry+throttle+cache persistente da lista
+após ~50 lotes. O pipeline bate ~4 requests por lote em `/cars/brands`,
+`/models`, `/years`, valor. Sem retry+throttle+cache persistente da lista
 de marcas, o serviço bloqueia em questão de segundos.
 """
 
@@ -63,7 +63,7 @@ def test_fipe_429_é_retentado_com_backoff(monkeypatch):
 
     fake = _FakeHttpx([
         _FakeResp(429),
-        _FakeResp(200, json_data=[{"codigo": "21", "nome": "Fiat"}]),
+        _FakeResp(200, json_data=[{"code": "21", "name": "Fiat"}]),
     ])
     c = FipeClient(
         http_client=fake,  # type: ignore[arg-type]
@@ -71,9 +71,9 @@ def test_fipe_429_é_retentado_com_backoff(monkeypatch):
         marcas_disk_cache_path=None,
     )
 
-    data = c._get("/carros/marcas")
+    data = c._get("/cars/brands")
 
-    assert data == [{"codigo": "21", "nome": "Fiat"}]
+    assert data == [{"code": "21", "name": "Fiat"}]
     assert len(fake.calls) == 2          # 1 falha + 1 sucesso
     assert any(s >= 1.0 for s in sleeps)  # teve pelo menos 1 backoff
 
@@ -92,7 +92,7 @@ def test_fipe_429_respeita_retry_after(monkeypatch):
         sleep_between_requests=0,
         marcas_disk_cache_path=None,
     )
-    c._get("/carros/marcas")
+    c._get("/cars/brands")
     assert 5.0 in sleeps
 
 
@@ -107,7 +107,7 @@ def test_fipe_429_desistir_apos_max_retries(monkeypatch):
         marcas_disk_cache_path=None,
     )
     with pytest.raises(httpx.HTTPStatusError):
-        c._get("/carros/marcas")
+        c._get("/cars/brands")
     assert len(fake.calls) == 3
 
 
@@ -115,7 +115,7 @@ def test_fipe_cache_disco_evita_refetch_de_marcas(tmp_path, monkeypatch):
     """/carros/marcas é cacheado em disco → 2º FipeClient não bate na rede."""
     monkeypatch.setattr(time, "sleep", lambda s: None)
     cache_file = tmp_path / "marcas.json"
-    payload = [{"codigo": "21", "nome": "Fiat"}, {"codigo": "59", "nome": "Ford"}]
+    payload = [{"code": "21", "name": "Fiat"}, {"code": "59", "name": "Ford"}]
 
     fake1 = _FakeHttpx([_FakeResp(200, json_data=payload)])
     c1 = FipeClient(
@@ -123,7 +123,7 @@ def test_fipe_cache_disco_evita_refetch_de_marcas(tmp_path, monkeypatch):
         sleep_between_requests=0,
         marcas_disk_cache_path=cache_file,
     )
-    c1._get("/carros/marcas")
+    c1._get("/cars/brands")
     assert cache_file.exists()
     with cache_file.open() as f:
         assert json.load(f) == payload
@@ -135,7 +135,7 @@ def test_fipe_cache_disco_evita_refetch_de_marcas(tmp_path, monkeypatch):
         sleep_between_requests=0,
         marcas_disk_cache_path=cache_file,
     )
-    data = c2._get("/carros/marcas")
+    data = c2._get("/cars/brands")
     assert data == payload
     assert fake2.calls == []   # nenhuma chamada real de rede
 
@@ -145,19 +145,19 @@ def test_fipe_cache_disco_expirado_refaz_fetch(tmp_path, monkeypatch):
     import os
     monkeypatch.setattr(time, "sleep", lambda s: None)
     cache_file = tmp_path / "marcas.json"
-    cache_file.write_text('[{"codigo":"1","nome":"Old"}]')
+    cache_file.write_text('[{"code":"1","name":"Old"}]')
     # Envelhece o arquivo pra ~60 dias atrás (TTL é 30 dias)
     old_ts = time.time() - 60 * 24 * 3600
     os.utime(cache_file, (old_ts, old_ts))
 
-    novo_payload = [{"codigo": "99", "nome": "Novo"}]
+    novo_payload = [{"code": "99", "name": "Novo"}]
     fake = _FakeHttpx([_FakeResp(200, json_data=novo_payload)])
     c = FipeClient(
         http_client=fake,  # type: ignore[arg-type]
         sleep_between_requests=0,
         marcas_disk_cache_path=cache_file,
     )
-    data = c._get("/carros/marcas")
+    data = c._get("/cars/brands")
     assert data == novo_payload
     assert len(fake.calls) == 1
 
@@ -181,16 +181,16 @@ def test_fipe_throttle_espaça_requests(monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: next(fake_clock))
 
     fake = _FakeHttpx([
-        _FakeResp(200, json_data=[{"codigo": "21", "nome": "Fiat"}]),
-        _FakeResp(200, json_data={"modelos": []}),
+        _FakeResp(200, json_data=[{"code": "21", "name": "Fiat"}]),
+        _FakeResp(200, json_data=[]),
     ])
     c = FipeClient(
         http_client=fake,  # type: ignore[arg-type]
         sleep_between_requests=0.5,
         marcas_disk_cache_path=None,
     )
-    c._get("/carros/marcas")
-    c._get("/carros/marcas/21/modelos")
+    c._get("/cars/brands")
+    c._get("/cars/brands/21/models")
 
     # Pelo menos um sleep de ~0.5s foi chamado (throttle entre os requests)
     assert any(abs(s - 0.5) < 0.01 for s in sleeps)

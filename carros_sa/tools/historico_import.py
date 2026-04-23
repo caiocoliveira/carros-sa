@@ -155,7 +155,7 @@ def parse_csv(path: Path) -> Tuple[List[HistoricoRow], List[Tuple[int, str]]]:
                     observacoes=(raw.get("observacoes") or "").strip(),
                 )
                 rows.append(row)
-            except Exception as exc:
+            except (ValueError, TypeError, KeyError) as exc:
                 erros.append((i, str(exc)))
 
     return rows, erros
@@ -287,7 +287,10 @@ def importar_historico(
                 else:
                     result.atualizados += 1
         except Exception as exc:
-            result.erros.append((i, str(exc)))
+            # Erros de persistência (SQLAlchemy IntegrityError, ValueError de
+            # parse, KeyError de campo) são reportados por linha em result.erros
+            # sem abortar o batch. Usuário vê resumo ao final.
+            result.erros.append((i, f"{type(exc).__name__}: {exc}"))
 
     session.commit()
     return result

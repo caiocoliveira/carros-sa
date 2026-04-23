@@ -17,16 +17,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 from urllib.parse import quote
 
 import httpx
 
 from carros_sa.tenancy import EmpresaConfig
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://b2b.autoavaliar.com.br"
 LOGIN_URL = f"{BASE_URL}/login"
@@ -163,19 +165,20 @@ def _cookies_path() -> Path:
     return Path(os.environ.get("AUTOAVALIAR_COOKIES_PATH", str(default)))
 
 
-def _salvar_cookies(cookies: list[dict], path: Optional[Path] = None) -> None:
+def _salvar_cookies(cookies: list[dict], path: Path | None = None) -> None:
     p = path or _cookies_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cookies, ensure_ascii=False, indent=2))
 
 
-def _carregar_cookies(path: Optional[Path] = None) -> Optional[list[dict]]:
+def _carregar_cookies(path: Path | None = None) -> list[dict] | None:
     p = path or _cookies_path()
     if not p.exists():
         return None
     try:
         return json.loads(p.read_text())
-    except Exception:
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("cookies %s ilegível (%s: %s) — relogin forçado", p, type(exc).__name__, exc)
         return None
 
 
@@ -255,7 +258,8 @@ async def sessao_valida(page) -> bool:
             and "logout" not in url
             and "dados-invalidos" not in url
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug("sessao_valida: %s: %s → sessão considerada inválida", type(exc).__name__, exc)
         return False
 
 
@@ -368,8 +372,12 @@ async def coletar_listagem(
     """
     try:
         municipios = empresa.cidades_de_busca()
-    except Exception:
-        # Fallback: só o pátio (comportamento legado) se o dataset não estiver disponível
+    except Exception as exc:
+        # Fallback: só o pátio se o dataset geo não estiver disponível
+        logger.warning(
+            "cidades_de_busca falhou (%s: %s) — fallback pro pátio",
+            type(exc).__name__, exc,
+        )
         municipios = []
 
     # Se o dataset geo não retornou nada, caímos pra busca só da cidade do pátio
@@ -383,8 +391,12 @@ async def coletar_listagem(
     for m in municipios:
         try:
             cards = await _coletar_listagem_cidade(page, m.nome, m.uf, horizonte_dias)
-        except Exception:
-            continue   # 1 cidade falhou → segue pras outras
+        except Exception as exc:
+            logger.warning(
+                "coleta de %s/%s falhou (%s: %s) — segue pra próxima cidade",
+                m.nome, m.uf, type(exc).__name__, exc,
+            )
+            continue
         for card in cards:
             lote_id = card.get("loteId")
             if lote_id and lote_id not in vistos:
@@ -400,7 +412,7 @@ async def coletar_listagem(
 # Coleta de detalhe
 # ---------------------------------------------------------------------------
 
-async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
+async def coletar_detalhe(page, url: str) -> tuple[str, str | None]:
     """
     Abre página de detalhe de um lote.
     Retorna (body_text, laudo_pdf_url).
@@ -426,7 +438,7 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
 
     body_text: str = await page.evaluate("() => document.body.innerText")
 
-    async def _extrair_valido() -> Optional[str]:
+    async def _extrair_valido() -> str | None:
         u = await page.evaluate(_EXTRACT_PDF_URL_JS)
         return u if (u and is_laudo_pdf_url(u)) else None
 
@@ -447,8 +459,11 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
             if not clicou and tentativa >= 1:
                 # Sem botão novo pra clicar e 2 tentativas já passaram — desiste.
                 break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "modal_laudo passada %d falhou (%s): %s",
+                tentativa + 2, type(exc).__name__, exc,
+            )
 
     return body_text, None
 
@@ -460,7 +475,7 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
 async def baixar_pdf(
     url: str,
     dest: Path,
-    cookies: Optional[list[dict]] = None,
+    cookies: list[dict] | None = None,
     max_retries: int = 3,
 ) -> Path:
     """Baixa PDF do laudo via httpx com retry-após-429.
@@ -479,7 +494,7 @@ async def baixar_pdf(
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     delays = [15, 30, 60]  # segundos entre retries 1→2→3
-    ultima_exc: Optional[Exception] = None
+    ultima_exc: Exception | None = None
 
     for tentativa in range(max_retries + 1):
         try:

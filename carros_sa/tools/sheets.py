@@ -148,7 +148,7 @@ class SheetsExporter:
 
             try:
                 fim_em_str = lote.fim_em.strftime("%d/%m/%Y %H:%M")
-            except Exception:
+            except (AttributeError, ValueError):
                 fim_em_str = str(lote.fim_em)
 
             viavel = av.preco_max > (lote.lance_atual or 0)
@@ -215,9 +215,10 @@ class SheetsExporter:
         sh = gc.open_by_key(self._spreadsheet_id)
 
         # Abre ou cria a aba com nome = empresa_id
+        import gspread
         try:
             ws = sh.worksheet(empresa_id)
-        except Exception:
+        except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=empresa_id, rows=500, cols=len(HEADER))
 
         ts = datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -379,9 +380,10 @@ class SheetsExporter:
         gc = self._client()
         sh = gc.open_by_key(self._spreadsheet_id)
         aba_nome = f"cidades_{empresa_id}"
+        import gspread
         try:
             ws = sh.worksheet(aba_nome)
-        except Exception:
+        except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=aba_nome, rows=max(len(sheet_rows) + 10, 100), cols=len(header))
 
         ws.clear()
@@ -398,9 +400,10 @@ class SheetsExporter:
         gc = self._client()
         sh = gc.open_by_key(self._spreadsheet_id)
         aba_nome = "Glossário"
+        import gspread
         try:
             ws = sh.worksheet(aba_nome)
-        except Exception:
+        except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=aba_nome, rows=60, cols=4)
 
         glossario = [

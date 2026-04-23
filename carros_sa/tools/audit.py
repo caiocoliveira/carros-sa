@@ -140,21 +140,22 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             from carros_sa.tools.popularidade import bucket_modelo
             cat = _categoria_de_modelo(lote.modelo)
             popularidade = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano).value
-        except Exception:
+        except (KeyError, AttributeError, ValueError):
+            # Dataset de popularidade pode não cobrir modelo — auditoria não pode quebrar
             pass
 
         fim_em_str = "—"
         if lote.fim_em is not None:
             try:
                 fim_em_str = lote.fim_em.strftime("%d/%m/%Y %H:%M")
-            except Exception:
+            except (AttributeError, ValueError):
                 fim_em_str = str(lote.fim_em)
 
         scraped_at_str = "—"
         if lote.scraped_at is not None:
             try:
                 scraped_at_str = lote.scraped_at.strftime("%d/%m/%Y %H:%M")
-            except Exception:
+            except (AttributeError, ValueError):
                 scraped_at_str = str(lote.scraped_at)
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None

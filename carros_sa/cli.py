@@ -248,7 +248,8 @@ def ingest(
         try:
             lote = parse_card_lines(entry["lines"], entry["loteId"], entry["href"])
             parsed.append((lote, extrair_loja_do_card(entry["lines"])))
-        except Exception:
+        except (KeyError, ValueError, TypeError) as exc:
+            console.print(f"[yellow]  ⚠ card ignorado ({type(exc).__name__}: {exc})[/yellow]")
             falhas += 1
 
     with get_session() as session:

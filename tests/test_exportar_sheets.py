@@ -773,9 +773,11 @@ class TestCidadesFreteSheet:
     def _separa_chamadas(self, mock_sh):
         """Devolve (mock_ws_empresa, mock_ws_cidades, mock_ws_glossario) na ordem em que foram criados."""
         # `worksheet(...)` levanta porque a aba ainda não existe → cai no add_worksheet,
-        # que retorna a sequência de mocks dada.
+        # que retorna a sequência de mocks dada. Usa WorksheetNotFound (erro real
+        # do gspread) em vez de Exception genérica — aproxima o mock do produção.
+        import gspread
         criados = [MagicMock(), MagicMock(), MagicMock()]
-        mock_sh.worksheet.side_effect = Exception("não existe")
+        mock_sh.worksheet.side_effect = gspread.WorksheetNotFound("não existe")
         mock_sh.add_worksheet.side_effect = criados
         return criados
 

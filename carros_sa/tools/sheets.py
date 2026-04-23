@@ -33,6 +33,7 @@ HEADER = [
     "Cidade",
     "Fim do Leilão",
     "KM",
+    "FIPE (R$)",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
     "Lucro/mês (R$)",
@@ -53,6 +54,7 @@ _NUMBER_DECIMAL_1 = {"numberFormat": {"type": "NUMBER", "pattern": "0.0"}}
 
 COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
+    "FIPE (R$)": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
     "Lucro/mês (R$)": _NUMBER_INTEIRO,
@@ -196,6 +198,7 @@ class SheetsExporter:
                 "cidade": lote.origem_cidade or "—",
                 "fim_em": fim_em_str,
                 "km": lote.km,
+                "fipe": av.fipe,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
                 "roi_anualizado": round(roi_anual, 1),
@@ -279,6 +282,7 @@ class SheetsExporter:
                 r["cidade"],
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
+                r["fipe"] if r["fipe"] else "—",
                 r["lance_atual"],
                 preco_max_cell,
                 lucro_mes_cell,
@@ -446,6 +450,12 @@ class SheetsExporter:
                 "Auto Avaliar",
                 "Número parseado da página de detalhe (specs)",
                 "Sanity check rápido de desgaste (KM alto = revenda mais difícil)",
+            ],
+            [
+                "FIPE (R$)",
+                "API FIPE (Parallelum)",
+                "Valor FIPE bruto do (marca, modelo, ano) no momento da avaliação. Sem ajustes — é a âncora de varejo crua pra comparação humana.",
+                "Teto de sanidade: Lance Máximo NUNCA deve ficar acima da FIPE — se ficar, algo deu errado (bug, modelo raro, FIPE desatualizada). Permite conferir num olhar se o lance-alvo faz sentido ou se o sistema está otimista demais.",
             ],
             [
                 "Lance Atual (R$)",

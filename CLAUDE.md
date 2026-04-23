@@ -113,3 +113,20 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.
 - Listagem real de Uberlândia/MG: `data/scrapes/2026-04-14_uberlandia_listagem.json` (10 lotes variados).
 - Fixture de resposta Gemini: `tests/fixtures/21854782_visual_gemini.json`.
+
+## Checklist de revisão de código (auto-review periódico)
+
+Quando o usuário pedir "revisa o código" ou "encontra bugs", seguir nessa ordem:
+
+1. **Rodar o test suite antes de qualquer edição** — precisa de baseline pra saber o que é regressão. Se faltar dep local, instalar mínimo via pip (venv do projeto pode estar em diretório que não existe no ambiente atual).
+2. **Docstring vs implementação**: procurar drift. Nomes enganosos (ex.: `preco_giro_fipe` calculado de `webmotors_mediana`) são pista forte de que a intenção diverge do código — ou docstring desatualizado, ou bug.
+3. **Sanity bounds quando eles são esperados**: se o domínio tem "teto" humano (FIPE como teto de lance, reforma ≥ 0, ROI ≤ X%), checar se o código respeita. A pergunta "faz sentido que X seja maior que Y?" do usuário vira CHECK no código.
+4. **Sinal faltante ≠ sinal neutro ≠ sinal ótimo**: cada `None`/`0`/vazio tem semântica própria. Tratar "não sei" como "mercado perfeito" vira viés positivo (faz o sistema recomendar com confiança indevida). Valida caso a caso antes de achatar.
+5. **Guards em objetos optional**: `x.exists()`, `x.attr`, `x[0]` exigem `x is not None` quando `x` é atribuído em branches (ex.: `pdf_dest = None` no `except`). Linter passa, runtime crasha.
+6. **Toda correção precisa de teste de regressão** — caso contrário volta no próximo refactor.
+7. **Atualizar glossário da planilha + audit quando muda coluna** — o glossário documenta pro usuário, o audit detecta regressões futuras. Esquecer um dos dois = dívida técnica silenciosa.
+
+## Aprendizados acumulados
+
+- A planilha enxuta (14 → 15 colunas em 2026-04-23) agora inclui FIPE explícita — usuário precisa comparar Lance Máximo com FIPE pra sanity check antes de dar lance. Sem isso, qualquer bug de ancoragem de preço vira lance ruim invisível.
+- Quando for adicionar coluna nova à planilha: `HEADER` + `COLUMN_FORMATS` + `_query` (dict) + `_write_sheet` (lista) + `_write_glossario_sheet` + `audit.CHECKS` + `audit.COLUMN_EXTRACTORS`. São 6 lugares — testes de regressão cobrem 2 deles.

@@ -58,12 +58,23 @@ CHECKS: Dict[str, Validator] = {
     "KM": lambda v, r: (
         "KM absurdo (>800k ou <0)" if v is not None and (v > 800_000 or v < 0) else None
     ),
+    "FIPE (R$)": lambda v, r: (
+        "FIPE não-positivo — consulta Parallelum quebrou ou modelo fora do catálogo"
+        if v is not None and v != "—" and isinstance(v, (int, float)) and v <= 0
+        else None
+    ),
     "Lance Atual (R$)": lambda v, r: (
         "Lance atual negativo" if v is not None and v < 0 else None
     ),
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
+        # Sanidade adicional: Lance Máximo NÃO pode exceder a FIPE do lote.
+        # Após fix do bound FIPE (2026-04-23), o precificador garante isso;
+        # esta checagem pega regressões ou lotes antigos com fipe/preco_giro
+        # descalibrados.
+        else "Lance Máximo excede a FIPE do lote — fora do bound de sanidade"
+        if r.get("fipe") and isinstance(v, (int, float)) and v > r["fipe"]
         else None
     ),
     "ROI anualizado (%)": lambda v, r: (
@@ -93,6 +104,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Cidade": lambda r: r["cidade"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
+    "FIPE (R$)": lambda r: r.get("fipe") or "—",
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],

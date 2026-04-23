@@ -505,3 +505,68 @@ class TestLaudoSemPdfComFlags:
         laudo = _laudo_sem_pdf(None)
         assert laudo.severidade_geral == SeveridadeAvaria.NENHUMA
         assert laudo.confidence == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Regressão — pdf_dest None no caminho LLM não pode crashar o pipeline
+# ---------------------------------------------------------------------------
+
+class TestPipelinePdfDestNoneComTextLLM:
+    def test_download_pdf_falha_mas_text_llm_ativo_nao_crasha(self):
+        """Cenário do bug: pdf_url presente no detalhe → baixar_pdf crasha →
+        pdf_dest vira None. Se text_llm_client está ativo, o orquestrador
+        ainda tenta ler observações do PDF — antes do fix, `pdf_dest.exists()`
+        explodia com AttributeError e o pipeline do lote caía toda vez.
+        """
+        import asyncio
+        import pathlib
+
+        engine = _engine()
+        session = Session(engine)
+        lote = _lote("L900", uf="MG")
+        session.add(lote)
+        session.commit()
+
+        empresa = _empresa()
+
+        body_text = "body\nSTATUS DO LAUDO\nAprovado"
+        pdf_url = "https://b2b.autoavaliar.com.br/laudo_x.pdf"
+
+        mock_page = AsyncMock()
+        mock_page.context.cookies = AsyncMock(return_value=[])
+        vision_client = MagicMock()
+
+        fake_text_llm = MagicMock()
+
+        # Reforma LLM fixa (não deve ser afetada pelo caminho sem PDF)
+        reforma_fake = _custo_reforma()
+
+        with patch("carros_sa.orquestrador.coletar_detalhe", new_callable=AsyncMock) as mock_det, \
+             patch("carros_sa.orquestrador.baixar_pdf", new_callable=AsyncMock) as mock_baixar, \
+             patch("carros_sa.orquestrador.avaliar_mercado") as mock_av, \
+             patch("carros_sa.orquestrador.estimar_reforma_llm") as mock_est_llm:
+            mock_det.return_value = (body_text, pdf_url)
+            # Download falha → pdf_dest deve virar None
+            mock_baixar.side_effect = RuntimeError("HTTP 500 no laudo")
+            mock_av.return_value = _sinal_mercado()
+            mock_est_llm.return_value = reforma_fake
+
+            loop = asyncio.new_event_loop()
+            try:
+                res = loop.run_until_complete(
+                    _pipeline_lote(
+                        lote, mock_page, vision_client, empresa, session,
+                        pathlib.Path("/tmp"),
+                        text_llm_client=fake_text_llm,
+                    )
+                )
+            finally:
+                loop.close()
+
+        # Não deve ter erro — o pipeline precisa tolerar pdf_dest=None mesmo
+        # com text_llm_client ativo. Antes do fix: AttributeError 'NoneType'.
+        assert res.erro is None, f"Pipeline crashou: {res.erro}"
+        # Estimar reforma LLM foi chamado com observacoes vazias (sem PDF)
+        mock_est_llm.assert_called_once()
+        _, kwargs = mock_est_llm.call_args
+        assert kwargs.get("observacoes_pdf", "") == ""

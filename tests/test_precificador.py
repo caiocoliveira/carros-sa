@@ -597,3 +597,90 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
     # preço-alvo sobe com f_km > 1
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
     assert "f_km=1.15" in av_com_ajuste.justificativa
+
+
+# =============================================================================
+# Regressão — FIPE como teto de sanidade da âncora de mercado
+# =============================================================================
+
+def test_preco_giro_fipe_tem_teto_na_tabela_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """Quando `webmotors_mediana` (vinda dos similares do AA) ultrapassa a FIPE,
+    a âncora precisa ser cortada pela FIPE. Sem esse bound, preco_max podia
+    ficar ACIMA da FIPE — cenário absurdo em que compramos no leilão por mais
+    do que conseguimos revender no varejo.
+
+    Observação empírica (2026-04-23): similares do AA misturam versões
+    diferentes do modelo (mais novas, equipadas) e inflam a mediana.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    # webmotors_mediana (35k) >> FIPE (28k) — cenário do bug.
+    mercado_inflado = SinalMercado(
+        fipe=28_000,
+        webmotors_mediana=35_000,   # similares mais novos/equipados
+        webmotors_p25=33_000,
+        n_anuncios_competidores=10,
+        dias_giro_estimado=40,
+    )
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_inflado, gol_2015_reforma, frete, empresa)
+
+    # preco_giro fica capado na FIPE, não na mediana inflada
+    assert av.preco_giro_fipe == 28_000
+    assert av.preco_giro == 28_000
+    # E preco_max necessariamente ≤ FIPE (deduzimos custos; nunca somamos)
+    assert av.preco_max <= mercado_inflado.fipe
+
+
+def test_preco_giro_fipe_usa_mediana_quando_menor_que_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
+):
+    """Caso comum: mediana < FIPE. Comportamento conservador inalterado — usa
+    a mediana (que é menor) como âncora.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+    # fixture: FIPE=28k, webmotors_mediana=25k → âncora = 25k (mediana conservadora)
+    assert av.preco_giro_fipe == 25_000
+
+
+# =============================================================================
+# Regressão — n=0 não pode virar liquidez ótima (sinal faltante ≠ vazio)
+# =============================================================================
+
+def test_fator_liquidez_sem_similares_mas_com_giro_medio_nao_vira_otimo(
+    gol_2015_mercado,
+):
+    """n=0 é normalmente 'sem similares do AA', não 'mercado vazio'. Usamos
+    só `dias_giro_estimado` como proxy — se o giro é médio, a liquidez fica
+    no meio da escala, não no mínimo (antes do fix, virava mínimo porque
+    peso_competicao era 0 e puxava a média pra zero).
+    """
+    mercado = gol_2015_mercado.model_copy(update={
+        "n_anuncios_competidores": 0,
+        "dias_giro_estimado": 45,  # meio da escala
+    })
+    f = calcular_fator_liquidez(mercado, (1.0, 1.8))
+    # peso_giro = 45/90 = 0.5 → fator = 1.0 + 0.8 * 0.5 = 1.4
+    assert f == pytest.approx(1.4, abs=0.05)
+    # Antes do fix, o mesmo cenário retornava ~1.2 (peso_competicao=0 puxava
+    # a média pra baixo) — valor mínimo quando na verdade não temos informação.
+    assert f > 1.2
+
+
+def test_fator_liquidez_sem_similares_e_giro_rapido_respeita_giro(
+    gol_2015_mercado,
+):
+    """Giro curtíssimo (15d) sozinho ainda puxa a liquidez pra baixo mesmo
+    quando n=0 — o giro é sinal válido por si só (vem de priors + calibração).
+    """
+    mercado = gol_2015_mercado.model_copy(update={
+        "n_anuncios_competidores": 0,
+        "dias_giro_estimado": 15,
+    })
+    f = calcular_fator_liquidez(mercado, (1.0, 1.8))
+    # peso = 15/90 ≈ 0.167 → fator = 1.0 + 0.8 * 0.167 ≈ 1.13
+    assert 1.10 < f < 1.20

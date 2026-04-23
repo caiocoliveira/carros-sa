@@ -1,9 +1,10 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
-    preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
+Fórmula:
+    ancora_mercado   = min(FIPE, webmotors_mediana)           # teto pela FIPE
+    preco_giro_fipe  = ancora_mercado * f_km
+    preco_giro_aa    = min(auto_avaliar_ref, webmotors_mediana) * f_km  # só se AA
+    preco_giro       = min(preco_giro_fipe, preco_giro_aa)    # consolidado
     margem_min       = margem_base * fator_risco * fator_liquidez
     preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
 
@@ -11,8 +12,11 @@ Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
 Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
-- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
+- FIPE é sempre disponível (API pública) e funciona como TETO de sanidade:
+  não faz sentido comprar em leilão por um valor que implique preço-alvo maior
+  que o FIPE — não conseguimos revender no varejo acima disso. Usamos a FIPE
+  direta como cap superior da âncora de mercado.
+- Tabela Auto Avaliar só está disponível quando o lote (ou um histórico do
   mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
   costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
   de giro consolidado.
@@ -71,17 +75,29 @@ def calcular_fator_risco(laudo: LaudoEstruturado, bounds: tuple[float, float]) -
 
 
 def calcular_fator_liquidez(mercado: SinalMercado, bounds: tuple[float, float]) -> float:
-    """Pouca competição + giro rápido = fator baixo (margem menor já basta)."""
+    """Pouca competição + giro rápido = fator baixo (margem menor já basta).
+
+    `n_anuncios_competidores=0` NÃO significa "mercado vazio / liquidez ótima":
+    na prática é "não temos similares do AA pra esse modelo". Tratar como ótimo
+    vira viés positivo — reduz a margem exigida justamente nos lotes onde
+    sabemos MENOS. Quando n=0, usamos só `dias_giro_estimado` como proxy (ele
+    já vem calibrado por categoria/idade/popularidade, então carrega sinal
+    mesmo sem similares).
+    """
     lo, hi = bounds
     n = mercado.n_anuncios_competidores
     giro = mercado.dias_giro_estimado
 
-    # Normaliza: 0 anúncios = liquidez ótima (0); 100+ = saturado (1)
-    peso_competicao = min(n / 100.0, 1.0)
     # 0 dias = ótimo; 90+ dias = péssimo
     peso_giro = min(giro / 90.0, 1.0)
 
-    peso = (peso_competicao + peso_giro) / 2.0
+    if n == 0:
+        # Sem similares → só o giro decide. Evita amplificar otimismo injustificado.
+        peso = peso_giro
+    else:
+        # Normaliza: poucos anúncios = líquido (peso baixo); 100+ = saturado (1).
+        peso_competicao = min(n / 100.0, 1.0)
+        peso = (peso_competicao + peso_giro) / 2.0
     return lo + (hi - lo) * peso
 
 
@@ -108,8 +124,16 @@ def precificar(
     #    Auto Avaliar ref: preço de referência da própria plataforma quando disponível.
     #    fator_km calibra a âncora pela km do lote vs km mediana do mercado:
     #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
+    #
+    #    Teto pela FIPE: quando `webmotors_mediana` vem dos "similares" do AA
+    #    (carros parecidos da página de detalhe), o mix pode incluir versões
+    #    mais novas/equipadas e inflar a mediana acima do FIPE. Isso acabava
+    #    permitindo que `preco_max` ficasse ACIMA do FIPE — cenário em que não
+    #    conseguimos revender no varejo e perdemos dinheiro. Aplicamos `min`
+    #    com o FIPE pra cortar esse viés e garantir sanity humana.
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
-    preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
+    ancora_mercado = min(mercado.fipe, mercado.webmotors_mediana)
+    preco_giro_fipe = int(round(ancora_mercado * f_km))
     preco_giro_aa: Optional[int] = None
     if mercado.auto_avaliar_ref is not None:
         preco_giro_aa = int(round(

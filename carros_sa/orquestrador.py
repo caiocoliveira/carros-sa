@@ -45,12 +45,8 @@ from carros_sa.models import (
     LaudoEstruturado,
 )
 from carros_sa.precificador import precificar
+from carros_sa.scraping.base import AutoAvaliarScraper, Scraper
 from carros_sa.scraping.parsers import extrair_loja_do_card, parse_card_lines, parse_detalhe
-from carros_sa.scraping.scraper_autoavaliar import (
-    baixar_pdf,
-    coletar_detalhe,
-    coletar_listagem,
-)
 from carros_sa.tenancy import EmpresaConfig, carregar_empresa
 
 logger = logging.getLogger(__name__)
@@ -465,6 +461,7 @@ async def _estagio_detalhe(
     lote: Lote,
     page,
     session: Session,
+    scraper: Scraper,
 ) -> tuple[object, str, str | None]:
     """Raspa página de detalhe, persiste flags + body, devolve (flags, body, pdf_url).
 
@@ -476,7 +473,7 @@ async def _estagio_detalhe(
     await asyncio.sleep(
         random.uniform(settings.scrape_sleep_min_s, settings.scrape_sleep_max_s)
     )
-    body_text, pdf_url = await coletar_detalhe(page, lote.url)
+    body_text, pdf_url = await scraper.coletar_detalhe(page, lote.url)
     flags = parse_detalhe(body_text, pdf_url)
 
     # COMMIT GRANULAR: sem isso, qualquer erro subsequente (FIPE 404, laudo,
@@ -502,6 +499,7 @@ async def _estagio_laudo(
     pdf_url: str | None,
     page,
     vision_client,
+    scraper: Scraper,
 ) -> tuple[LaudoEstruturado, Path | None]:
     """Baixa PDF e extrai laudo com fallbacks em cascata.
 
@@ -513,7 +511,7 @@ async def _estagio_laudo(
         pdf_dest = _pdf_persistente_path(lote.id)
         cookies = await page.context.cookies()
         try:
-            await baixar_pdf(pdf_url, pdf_dest, cookies)
+            await scraper.baixar_pdf(pdf_url, pdf_dest, cookies)
             if not _pdf_eh_laudo_valido(pdf_dest):
                 pdf_dest.unlink(missing_ok=True)
                 pdf_dest = None
@@ -617,8 +615,15 @@ async def _pipeline_lote(
     session: Session,
     tmp_dir: Path,
     text_llm_client=None,
+    scraper: Scraper | None = None,
 ) -> ResultadoLote:
-    """Roda pipeline completo para um lote. Retorna ResultadoLote."""
+    """Roda pipeline completo para um lote. Retorna ResultadoLote.
+
+    `scraper` permite injetar implementação alternativa (Webmotors, mock de
+    teste). None → AutoAvaliarScraper default.
+    """
+    if scraper is None:
+        scraper = AutoAvaliarScraper()
 
     modelo_str = f"{lote.marca} {lote.modelo} {lote.ano}"
 
@@ -643,8 +648,10 @@ async def _pipeline_lote(
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))
 
     try:
-        flags, _body, pdf_url = await _estagio_detalhe(lote, page, session)
-        laudo, pdf_dest = await _estagio_laudo(lote, flags, pdf_url, page, vision_client)
+        flags, _body, pdf_url = await _estagio_detalhe(lote, page, session, scraper)
+        laudo, pdf_dest = await _estagio_laudo(
+            lote, flags, pdf_url, page, vision_client, scraper,
+        )
         _upsert_laudo_cache(lote.id, laudo, session)
 
         mercado = _estagio_mercado(lote, flags, laudo, empresa, session)
@@ -700,6 +707,7 @@ async def orquestrar(
     vision_client,
     horizonte_dias: int = 7,
     text_llm_client=None,
+    scraper: Scraper | None = None,
 ) -> OrquestradorResult:
     """
     Coleta listagem, ingere lotes novos e roda pipeline de avaliação.
@@ -710,6 +718,7 @@ async def orquestrar(
         page: Playwright Page já autenticada
         vision_client: VisionClient instanciado (Gemini, Anthropic, Ollama)
         horizonte_dias: só lotes com fim em <= N dias
+        scraper: implementação do Scraper protocol; None → AutoAvaliarScraper
 
     Returns:
         OrquestradorResult com contagens e detalhes por lote.
@@ -717,11 +726,14 @@ async def orquestrar(
     from carros_sa.db import init_db
     init_db()
 
+    if scraper is None:
+        scraper = AutoAvaliarScraper()
+
     empresa = carregar_empresa(empresa_id)
     result = OrquestradorResult(empresa_id=empresa_id)
 
     # 1. Coleta listagem
-    cards = await coletar_listagem(page, empresa, horizonte_dias)
+    cards = await scraper.coletar_listagem(page, empresa, horizonte_dias)
     result.n_coletados = len(cards)
 
     # 2. Ingesta: parse + upsert Lote
@@ -763,6 +775,7 @@ async def orquestrar(
         res = await _pipeline_lote(
             lote, page, vision_client, empresa, session, tmp_dir,
             text_llm_client=text_llm_client,
+            scraper=scraper,
         )
         result.lotes.append(res)
         if res.erro:

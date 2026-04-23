@@ -74,6 +74,19 @@ def _lote(lote_id: str = "L001", uf: str = "MG") -> Lote:
     )
 
 
+def _make_scraper(detalhe=("", None), listagem=None, baixar=None):
+    """MockScraper que implementa o Protocol Scraper via AsyncMock.
+
+    `detalhe` é `(body_text, pdf_url)` devolvido por coletar_detalhe.
+    `listagem`/`baixar` têm defaults vazios — sobrescreva se o teste precisa.
+    """
+    m = MagicMock()
+    m.coletar_detalhe = AsyncMock(return_value=detalhe)
+    m.coletar_listagem = AsyncMock(return_value=listagem or [])
+    m.baixar_pdf = AsyncMock(return_value=baixar)
+    return m
+
+
 def _laudo_estruturado(severidade: SeveridadeAvaria = SeveridadeAvaria.LEVE) -> LaudoEstruturado:
     return LaudoEstruturado(
         avarias=[Avaria(parte="porta_dianteira_esquerda", severidade=severidade)],
@@ -191,24 +204,21 @@ class TestPipelineLote:
         empresa = _empresa()
 
         mock_page = AsyncMock()
-        mock_loop = MagicMock()
-
-        # coletar_detalhe retorna body com lote reprovado estrutural
-        body_com_reprovado = "REPROVADO ESTRUTURAL\nSTATUS DO LAUDO\nReprovado"
-        mock_loop.run_until_complete.return_value = (body_com_reprovado, None)
-
         vision_client = MagicMock()
 
-        with patch("carros_sa.orquestrador.coletar_detalhe", new_callable=AsyncMock) as mock_det, \
-             patch("carros_sa.orquestrador.extrair_laudo") as mock_laudo:
-            mock_det.return_value = (body_com_reprovado, None)
-            mock_loop.run_until_complete.side_effect = lambda coro: (body_com_reprovado, None)
+        body_com_reprovado = "REPROVADO ESTRUTURAL\nSTATUS DO LAUDO\nReprovado"
+        mock_scraper = _make_scraper(detalhe=(body_com_reprovado, None))
 
+        with patch("carros_sa.orquestrador.extrair_laudo") as mock_laudo:
             import asyncio
             loop = asyncio.new_event_loop()
             try:
                 res = loop.run_until_complete(
-                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+                    _pipeline_lote(
+                        lote, mock_page, vision_client, empresa, session,
+                        __import__("pathlib").Path("/tmp"),
+                        scraper=mock_scraper,
+                    )
                 )
             finally:
                 loop.close()
@@ -262,15 +272,18 @@ class TestPipelineLote:
 
         mock_page = AsyncMock()
         vision_client = MagicMock()
+        mock_scraper = _make_scraper(detalhe=("", None))
 
         import asyncio
         loop = asyncio.new_event_loop()
         try:
-            with patch("carros_sa.orquestrador.coletar_detalhe", new_callable=AsyncMock) as mock_det:
-                res = loop.run_until_complete(
-                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+            res = loop.run_until_complete(
+                _pipeline_lote(
+                    lote, mock_page, vision_client, empresa, session,
+                    __import__("pathlib").Path("/tmp"), scraper=mock_scraper,
                 )
-                mock_det.assert_not_called()
+            )
+            mock_scraper.coletar_detalhe.assert_not_called()
         finally:
             loop.close()
 
@@ -295,20 +308,19 @@ class TestPipelineLote:
 
         mock_page = AsyncMock()
         vision_client = MagicMock()
+        mock_scraper = _make_scraper(detalhe=("", None))
 
         import asyncio
         loop = asyncio.new_event_loop()
         try:
-            with patch(
-                "carros_sa.orquestrador.coletar_detalhe",
-                new_callable=AsyncMock,
-                return_value=("", None),
-            ) as mock_det:
-                loop.run_until_complete(
-                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+            loop.run_until_complete(
+                _pipeline_lote(
+                    lote, mock_page, vision_client, empresa, session,
+                    __import__("pathlib").Path("/tmp"), scraper=mock_scraper,
                 )
-                # coletar_detalhe DEVE ter sido chamado — a essência do fix.
-                mock_det.assert_called_once()
+            )
+            # coletar_detalhe DEVE ter sido chamado — a essência do fix.
+            mock_scraper.coletar_detalhe.assert_called_once()
         finally:
             loop.close()
 
@@ -324,19 +336,18 @@ class TestPipelineLote:
 
         mock_page = AsyncMock()
         vision_client = MagicMock()
+        mock_scraper = _make_scraper(detalhe=("", None))
 
         import asyncio
         loop = asyncio.new_event_loop()
         try:
-            with patch(
-                "carros_sa.orquestrador.coletar_detalhe",
-                new_callable=AsyncMock,
-                return_value=("", None),
-            ) as mock_det:
-                loop.run_until_complete(
-                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+            loop.run_until_complete(
+                _pipeline_lote(
+                    lote, mock_page, vision_client, empresa, session,
+                    __import__("pathlib").Path("/tmp"), scraper=mock_scraper,
                 )
-                mock_det.assert_called_once()
+            )
+            mock_scraper.coletar_detalhe.assert_called_once()
         finally:
             loop.close()
 

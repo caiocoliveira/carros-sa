@@ -2,12 +2,12 @@
 
 Motivação: hoje só temos Auto Avaliar (510 linhas em scraper_autoavaliar.py) e
 implementar Webmotors significaria descobrir por tentativa e erro quais
-funções o orquestrador chama. Este Protocol documenta o contrato mínimo.
+funções o orquestrador chama. Este Protocol documenta o contrato mínimo e é
+CONSUMIDO pelo `orquestrador.orquestrar()` — não é só documentação.
 
 Nota: é um `typing.Protocol` (duck typing), não uma ABC — quem já satisfaz a
-assinatura (ex.: módulo `scraper_autoavaliar` usado via wrapper) não precisa
-herdar. Também não obrigamos ninguém a migrar ainda; o orquestrador segue
-usando as funções soltas.
+assinatura (ex.: o `AutoAvaliarScraper` ou um `MockScraper` em testes) não
+precisa herdar.
 """
 
 from __future__ import annotations

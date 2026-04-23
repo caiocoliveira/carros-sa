@@ -112,7 +112,12 @@ def test_retry_repetindo_ate_sucesso(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_retry_codigo_nao_retryable_reerga_imediato(monkeypatch: pytest.MonkeyPatch):
-    """HTTP 401 (não-retryable) não entra no backoff — propaga direto."""
+    """Código não-retryable (fora do config.llm_retry_http_codes) propaga direto.
+
+    HTTP 501 (Not Implemented) é ServerError mas NÃO está na lista default
+    de retry (429, 500, 502, 503, 504). Modelo realista — 501 vem quando
+    a API fica sem capacidade permanente, não faz sentido tentar de novo.
+    """
     monkeypatch.setattr("google.genai.errors.ServerError", _FakeServerError, raising=False)
     monkeypatch.setattr("time.sleep", lambda *_: None)
 
@@ -120,7 +125,7 @@ def test_retry_codigo_nao_retryable_reerga_imediato(monkeypatch: pytest.MonkeyPa
 
     def call():
         chamadas["n"] += 1
-        raise _FakeServerError(code=401, msg="unauthorized")
+        raise _FakeServerError(code=501, msg="not implemented")
 
     with pytest.raises(_FakeServerError):
         call_with_server_retry(call, client_name="TestClient", logger=LOGGER)

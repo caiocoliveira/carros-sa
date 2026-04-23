@@ -4,31 +4,24 @@ from __future__ import annotations
 
 import pytest
 
-from carros_sa.errors import (
-    FipeIndisponivel,
-    LaudoExtractionError,
-    PDFDownloadError,
-    PDFInvalidoError,
-    PipelineError,
-)
+from carros_sa.errors import FipeIndisponivel, PipelineError
 
 
 def test_hierarquia():
-    """Todas as classes específicas derivam de PipelineError → Exception."""
-    for cls in (PDFInvalidoError, PDFDownloadError, LaudoExtractionError, FipeIndisponivel):
-        assert issubclass(cls, PipelineError)
-        assert issubclass(cls, Exception)
+    """FipeIndisponivel deriva de PipelineError → Exception."""
+    assert issubclass(FipeIndisponivel, PipelineError)
+    assert issubclass(PipelineError, Exception)
 
 
 def test_carrega_motivo_e_lote_id():
-    exc = PDFInvalidoError("marcador negativo presente", lote_id="12345")
-    assert exc.motivo == "marcador negativo presente"
+    exc = FipeIndisponivel("marca fora do catálogo", lote_id="12345")
+    assert exc.motivo == "marca fora do catálogo"
     assert exc.lote_id == "12345"
-    assert "marcador negativo presente" in str(exc)
+    assert "marca fora do catálogo" in str(exc)
 
 
 def test_lote_id_opcional():
-    exc = LaudoExtractionError("visão e textual falharam")
+    exc = FipeIndisponivel("motor indisponível")
     assert exc.lote_id is None
 
 

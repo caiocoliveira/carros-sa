@@ -412,6 +412,44 @@ class TestPersistencia:
             assert persistido is not None
             assert persistido.marca == "Ford"
 
+    def test_upsert_lote_preserva_scraped_at_em_rescrape(self):
+        """Regressão: `scraped_at` é data da PRIMEIRA aparição do lote. Um
+        re-scrape não pode "rejuvenescer" o lote — audit de laudos stuck
+        depende disso pra medir idade real."""
+        import time
+        from datetime import datetime
+        from carros_sa.models import LoteRaw
+
+        engine = _engine()
+        with Session(engine) as session:
+            lote_raw = LoteRaw(
+                lote_id="L_RESCRAPE",
+                leilao="autoavaliar",
+                url="https://b2b.autoavaliar.com.br/avaliacoes/g/L_RESCRAPE/fiesta",
+                marca="Ford", modelo="Fiesta", ano=2013, km=45000,
+                lance_atual=20000, origem_cidade="Uberlândia", origem_uf="MG",
+            )
+            _upsert_lote(lote_raw, session)
+            session.commit()
+            scraped_at_original = session.get(Lote, "L_RESCRAPE").scraped_at
+
+            # Re-scrape depois de um instante — simula 2ª passagem do orquestrador
+            time.sleep(0.01)
+            lote_raw_novo = LoteRaw(
+                lote_id="L_RESCRAPE",
+                leilao="autoavaliar",
+                url="https://b2b.autoavaliar.com.br/avaliacoes/g/L_RESCRAPE/fiesta",
+                marca="Ford", modelo="Fiesta", ano=2013, km=45000,
+                lance_atual=22000,  # preço subiu no leilão
+                origem_cidade="Uberlândia", origem_uf="MG",
+            )
+            _upsert_lote(lote_raw_novo, session)
+            session.commit()
+
+            atual = session.get(Lote, "L_RESCRAPE")
+            assert atual.lance_atual == 22000  # dados atualizaram
+            assert atual.scraped_at == scraped_at_original  # mas scraped_at NÃO
+
     def test_upsert_avaliacao_nova(self):
         engine = _engine()
         with Session(engine) as session:

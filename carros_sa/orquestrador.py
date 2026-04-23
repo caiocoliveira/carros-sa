@@ -31,6 +31,7 @@ from carros_sa.agents.avaliador_mercado import avaliar as avaliar_mercado
 from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
 from carros_sa.agents.extrator_laudo import extrair_laudo
 from carros_sa.config import get_settings
+from carros_sa.errors import FipeIndisponivel
 from carros_sa.models import (
     AvaliacaoLote,
     CategoriaVeiculo,
@@ -327,6 +328,10 @@ def _upsert_lote(
     elif existente and isinstance(existente.raw_json, dict) and existente.raw_json.get("loja"):
         # Preserva loja de coleta anterior quando a atual não trouxe o dado.
         raw_json["loja"] = existente.raw_json["loja"]
+    # scraped_at = quando o lote ENTROU na base pela 1ª vez. Preservamos em
+    # re-scrapes pra que o audit consiga medir idade real do lote (lote que
+    # tá stuck há 5 dias não pode "rejuvenescer" porque a gente re-raspou ontem).
+    scraped_at = existente.scraped_at if existente else datetime.utcnow()
     row = Lote(
         id=lote_raw.lote_id,
         leilao=lote_raw.leilao,
@@ -340,7 +345,7 @@ def _upsert_lote(
         origem_cidade=lote_raw.origem_cidade,
         origem_uf=lote_raw.origem_uf,
         raw_json=raw_json,
-        scraped_at=datetime.utcnow(),
+        scraped_at=scraped_at,
     )
     if existente:
         for k, v in row.model_dump(exclude={"id"}).items():
@@ -568,8 +573,12 @@ def _estagio_mercado(
     except LookupError as exc:
         # FIPE Parallelum não cobre motos (Dafra, Triumph, Harley) nem exóticos
         # fora de linha. Sem FIPE perde a âncora — descartar é mais correto
-        # que bloquear a planilha inteira.
-        raise _DescarteLote(f"fipe_indisponivel: {exc}") from exc
+        # que bloquear a planilha inteira. `FipeIndisponivel` permite que
+        # callers externos (scripts, monitoring) distingam essa causa de outros
+        # descartes via isinstance.
+        raise FipeIndisponivel(
+            f"fipe_indisponivel: {exc}", lote_id=lote.id,
+        ) from exc
 
 
 def _estagio_reforma(
@@ -658,7 +667,10 @@ async def _pipeline_lote(
             roi_pct=round(avaliacao.score_roi * 100, 1),
         )
 
-    except _DescarteLote as descarte:
+    except (_DescarteLote, FipeIndisponivel) as descarte:
+        # `FipeIndisponivel` é um `PipelineError` que callers externos podem
+        # capturar isolado. Aqui tratamos junto com `_DescarteLote` porque
+        # ambos significam "lote sai do ranking com motivo conhecido".
         return ResultadoLote(
             lote_id=lote.id, modelo=modelo_str,
             avaliado=False, motivo_descarte=descarte.motivo,

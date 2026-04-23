@@ -31,12 +31,6 @@ from carros_sa.agents.avaliador_mercado import avaliar as avaliar_mercado
 from carros_sa.agents.estimador_reforma import estimar as estimar_reforma
 from carros_sa.agents.extrator_laudo import extrair_laudo
 from carros_sa.config import get_settings
-from carros_sa.errors import (
-    FipeIndisponivel,
-    LaudoExtractionError,
-    PDFDownloadError,
-    PDFInvalidoError,
-)
 from carros_sa.models import (
     AvaliacaoLote,
     CategoriaVeiculo,
@@ -230,7 +224,6 @@ def _laudo_sem_pdf(flags=None) -> LaudoEstruturado:
     Confidence 0.5 neutro, 0.55 se detectou sinal estrutural (sinal mais forte
     que "não sei" mas sem cobertura visual, ainda abaixo de PDF).
     """
-    from carros_sa.models import Avaria
 
     avarias: list = []
     severidade_geral = SeveridadeAvaria.NENHUMA
@@ -720,7 +713,6 @@ async def orquestrar(
     result.n_coletados = len(cards)
 
     # 2. Ingesta: parse + upsert Lote
-    agora = datetime.now()
     lotes_ids_novos: list[str] = []
     for card in cards:
         try:

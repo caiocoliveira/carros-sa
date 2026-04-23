@@ -15,11 +15,9 @@ Estratégia anti-bot:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import random
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote

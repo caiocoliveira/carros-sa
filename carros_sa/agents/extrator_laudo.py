@@ -15,10 +15,7 @@ Dado global (cacheado por hash do PDF): um laudo serve N empresas.
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -381,7 +378,6 @@ def extrair_laudo(
 
     txt = parse_laudo_textual(pdf_path)
     visual: dict | None = None
-    visao_falhou = False
     try:
         visual = extrair_laudo_visual(pdf_path, vision_client)
     except Exception as exc:
@@ -393,7 +389,6 @@ def extrair_laudo(
             "extrair_laudo_visual falhou em %s (%s: %s) — caindo pra textual",
             pdf_path.name, type(exc).__name__, exc,
         )
-        visao_falhou = True
 
     # Avarias: começam do visual (fonte primária) + enriquecem do textual
     avarias: list = []

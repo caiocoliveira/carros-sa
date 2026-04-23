@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from carros_sa.models import CategoriaVeiculo, LoteRaw
+from carros_sa.models import LoteRaw
 
 # =============================================================================
 # Listagem (cards)

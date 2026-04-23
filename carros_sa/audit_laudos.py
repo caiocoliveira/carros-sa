@@ -76,9 +76,9 @@ def listar_laudos_travados(
 
     # Pula lotes sintéticos do importador histórico — não têm URL real.
     lotes = [
-        l for l in session.exec(select(Lote)).all()
-        if l.leilao != "historico_offline"
-        and (l.fim_em is None or l.fim_em >= agora)
+        lote for lote in session.exec(select(Lote)).all()
+        if lote.leilao != "historico_offline"
+        and (lote.fim_em is None or lote.fim_em >= agora)
     ]
 
     travados: list[LaudoTravado] = []

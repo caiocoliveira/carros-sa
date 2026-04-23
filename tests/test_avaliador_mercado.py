@@ -24,6 +24,7 @@ from carros_sa.models import CategoriaVeiculo, ModeloFipeCache
 from carros_sa.tools.fipe import FipeClient, _parse_valor
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "fipe_fiesta_2013.json"
+FIXTURE_CHERY = Path(__file__).resolve().parent / "fixtures" / "fipe_chery_tiggo_2015.json"
 
 
 class FakeFipeClient(FipeClient):
@@ -136,6 +137,39 @@ def test_cache_persistente_evita_segunda_chamada(fipe_responses, in_memory_sessi
     rows = in_memory_session.exec(select(ModeloFipeCache)).all()
     assert len(rows) == 1
     assert rows[0].valor == 30876
+
+
+def test_chery_tiggo_2015_nao_cai_em_marca_errada(in_memory_session):
+    """Regressão do bug que motivou a migração pra v2 em 2026-04-23.
+
+    A FIPE tem DUAS marcas Chery: "Caoa Chery" (245, só modelos novos) e
+    "Caoa Chery/Chery" (161, catálogo completo legacy + atual). Query "Chery"
+    empata o token `chery` nas duas. O código v1 antigo usava `>` estrito no
+    scoring, ficava com a primeira iterada (245), e o Tiggo 2.0 2015 acabava
+    matchando um Tiggo 7 novo ~R$ 114k em vez do valor real ~R$ 41k.
+
+    Esse teste garante que mesmo com a 245 aparecendo primeiro na lista de
+    marcas, `consultar` tenta AMBAS as candidatas e fica com a do melhor match
+    de modelo (Tiggo 2.0 → 4 tokens na 161, Tiggo 7 Pro → 2 tokens na 245).
+    """
+    fipe_responses = json.loads(FIXTURE_CHERY.read_text())
+    fake = FakeFipeClient(fipe_responses)
+
+    sinal = avaliar(
+        marca="Chery",
+        modelo="Tiggo 2.0 16V GASOLINA 4P AUTOMATICO",
+        ano=2015,
+        km=120000,
+        similares_precos=None,
+        categoria=CategoriaVeiculo.SUV,
+        fipe_client=fake,
+        session=in_memory_session,
+    )
+
+    assert sinal.fipe == 41512, (
+        f"Esperava FIPE do Tiggo 2.0 2015 (R$ 41.512), veio R$ {sinal.fipe}. "
+        f"Se veio ~114k, bateu de novo no bug de marca errada."
+    )
 
 
 def test_fallback_sem_similares(fipe_responses, in_memory_session):

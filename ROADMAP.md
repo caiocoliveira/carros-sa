@@ -35,8 +35,9 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 ### A — AvaliadorMercado ✅
 - **Branch:** `feat/avaliador-mercado`
 - **Arquivos:** [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py), [`carros_sa/tools/fipe.py`](carros_sa/tools/fipe.py)
-- **Cobertura:** 4 testes em [`tests/test_avaliador_mercado.py`](tests/test_avaliador_mercado.py) com fixture FIPE real ([`tests/fixtures/fipe_fiesta_2013.json`](tests/fixtures/fipe_fiesta_2013.json)) — Fiesta 2013 FIPE R$ 30.876 + similares reais do lote 21854782, cache persistente em `modelo_fipe_cache` e fallback FIPE-only.
+- **Cobertura:** 5 testes em [`tests/test_avaliador_mercado.py`](tests/test_avaliador_mercado.py) com fixtures FIPE reais ([`fipe_fiesta_2013.json`](tests/fixtures/fipe_fiesta_2013.json) + [`fipe_chery_tiggo_2015.json`](tests/fixtures/fipe_chery_tiggo_2015.json)) — Fiesta 2013 FIPE R$ 30.876 + similares reais do lote 21854782, regressão Tiggo 2.0 2015 (bug de marca duplicada), cache persistente em `modelo_fipe_cache` e fallback FIPE-only.
 - **Pendente:** trocar fonte de mediana/p25 por Webmotors quando workstream B chegar (contrato `SinalMercado` já preparado).
+- **2026-04-23 — migração FIPE v1 → v2:** `parallelum.com.br/fipe/api/v1` começou a retornar 503 intermitente + tinha bug de scoring na marca Chery (duas entradas "Caoa Chery" e "Caoa Chery/Chery" empatavam, primeira iterada ganhava, Tiggo 2.0 2015 matchava Tiggo 7 novo com valor ~2.7x errado — R$ 114k em vez de R$ 41.512). Cliente agora usa `fipe.parallelum.com.br/api/v2` (endpoints em inglês, campos `code`/`name`/`price`) e `consultar` testa TODAS as marcas empatadas escolhendo a do melhor match de modelo. Cache em disco migrado pra `fipe_brands_v2.json` (cache v1 antigo é ignorado automaticamente). API pública (`FipeClient.consultar`, `marca_fora_do_escopo_fipe`) inalterada — chamadores não precisam mudar.
 
 ### B — Webmotors Scraper ✅
 - **Branch:** `feat/avaliador-mercado` (worktree `amazing-saha`)

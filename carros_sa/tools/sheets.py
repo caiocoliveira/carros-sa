@@ -17,7 +17,6 @@ Setup one-time:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
 
 from sqlmodel import Session, select
 
@@ -60,7 +59,6 @@ COLUMN_FORMATS = {
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
 }
 
-
 def _col_letter(idx_0based: int) -> str:
     """Converte índice 0-based em letra de coluna estilo Sheets (A, B, ..., Z, AA, AB, ...)."""
     letters = ""
@@ -70,7 +68,6 @@ def _col_letter(idx_0based: int) -> str:
         idx = idx // 26 - 1
         if idx < 0:
             return letters
-
 
 def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
     """ROI garantido se ganhar o lote exatamente pelo lance máximo.
@@ -83,7 +80,6 @@ def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
     capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
     lucro = av.preco_giro - capital
     return round(lucro / max(capital, 1) * 100, 1)
-
 
 class SheetsExporter:
     """Exporta avaliações do SQLite para uma aba no Google Sheets."""
@@ -121,14 +117,14 @@ class SheetsExporter:
         self._write_glossario_sheet()
         return len(rows_sorted)
 
-    def _query(self, empresa_id: str, session: Session) -> List[dict]:
+    def _query(self, empresa_id: str, session: Session) -> list[dict]:
         """JOIN lote + avaliacao_lote + laudo (LEFT JOIN — laudo pode não existir)."""
         avaliacoes = session.exec(
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
         ).all()
 
         agora = datetime.now()
-        rows: List[dict] = []
+        rows: list[dict] = []
         for av in avaliacoes:
             lote = session.get(Lote, av.lote_id)
             if lote is None:
@@ -144,7 +140,7 @@ class SheetsExporter:
             if lote.fim_em is None:
                 continue
 
-            laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)
+            laudo: LaudoCache | None = session.get(LaudoCache, av.lote_id)
 
             try:
                 fim_em_str = lote.fim_em.strftime("%d/%m/%Y %H:%M")
@@ -209,7 +205,7 @@ class SheetsExporter:
             })
         return rows
 
-    def _write_sheet(self, empresa_id: str, rows: List[dict]) -> None:
+    def _write_sheet(self, empresa_id: str, rows: list[dict]) -> None:
         """Abre/cria aba, limpa, escreve timestamp global + header + rows."""
         gc = self._client()
         sh = gc.open_by_key(self._spreadsheet_id)

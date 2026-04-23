@@ -15,8 +15,6 @@ Quando qualquer entrada é ausente (km do lote ou mediana do mercado), devolve
 
 from __future__ import annotations
 
-from typing import Optional
-
 # Sensibilidade: 30% do delta relativo vira ajuste de preço.
 # Ex.: lote com km 50% acima da mediana → -15% no preço (antes do clamp).
 # Calibrado para ficar dentro dos bounds [0.75, 1.15] na faixa realista
@@ -26,10 +24,9 @@ _SENSIBILIDADE = 0.30
 _FATOR_MIN = 0.75
 _FATOR_MAX = 1.15
 
-
 def fator_km(
-    km_lote: Optional[int],
-    km_mediana_mercado: Optional[int],
+    km_lote: int | None,
+    km_mediana_mercado: int | None,
 ) -> float:
     """Multiplicador para calibrar a âncora de venda pela km do lote.
 

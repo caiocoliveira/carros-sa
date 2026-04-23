@@ -22,7 +22,6 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import fitz  # PyMuPDF
 
@@ -40,19 +39,18 @@ from carros_sa.models import (
 
 @dataclass
 class LaudoTextual:
-    placa: Optional[str]
-    chassi: Optional[str]
-    motor_numero: Optional[str]
-    km_laudo: Optional[int]
-    licenciado: Optional[bool]
-    roubo_furto_ativo: Optional[bool]
-    comunicado_venda: Optional[bool]
-    chassi_original: Optional[bool]
-    motor_original: Optional[bool]
-    odometro_legivel: Optional[bool]
+    placa: str | None
+    chassi: str | None
+    motor_numero: str | None
+    km_laudo: int | None
+    licenciado: bool | None
+    roubo_furto_ativo: bool | None
+    comunicado_venda: bool | None
+    chassi_original: bool | None
+    motor_original: bool | None
+    odometro_legivel: bool | None
     observacoes: str
     texto_bruto: str
-
 
 _CHASSI_RE = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
 _PLACA_RE = re.compile(r"\b([A-Z]{3}[\d][A-Z0-9][\d]{2})\b")  # formato antigo + Mercosul
@@ -62,7 +60,6 @@ _KM_CONTEXTO_RE = re.compile(
     r"(?:CONSTATOU-SE QUE:?|Od[oô]metro:?|Odômetro do Veículo:?)\s*\n?\s*([\d]{1,3}\.[\d]{3}(?:\.[\d]{3})?)",
     re.IGNORECASE,
 )
-
 
 def parse_laudo_textual(pdf_path: Path) -> LaudoTextual:
     doc = fitz.open(str(pdf_path))
@@ -136,7 +133,6 @@ def parse_laudo_textual(pdf_path: Path) -> LaudoTextual:
         texto_bruto=texto,
     )
 
-
 # =============================================================================
 # Camada 2 — Extrator de avarias a partir do bloco "Observações" (texto livre)
 # =============================================================================
@@ -153,8 +149,7 @@ _RE_VERBO_REPARO = re.compile(
     re.IGNORECASE,
 )
 
-
-def _normaliza_lado(s: str) -> Optional[str]:
+def _normaliza_lado(s: str) -> str | None:
     if not s:
         return None
     t = s.lower()
@@ -164,8 +159,7 @@ def _normaliza_lado(s: str) -> Optional[str]:
         return "direita"
     return None
 
-
-def _normaliza_posicao(s: str) -> Optional[str]:
+def _normaliza_posicao(s: str) -> str | None:
     if not s:
         return None
     t = s.lower()
@@ -174,7 +168,6 @@ def _normaliza_posicao(s: str) -> Optional[str]:
     if "traseir" in t:
         return "traseira"
     return None
-
 
 def _nomes_coluna(sentenca: str) -> list:
     """Detecta colunas mencionadas ('B e C', 'B', 'A, B e C', etc) + lado comum."""
@@ -192,7 +185,6 @@ def _nomes_coluna(sentenca: str) -> list:
             base = f"coluna_{letra.lower()}"
             resultado.append(f"{base}_{lado}" if lado else base)
     return resultado
-
 
 def _nomes_peca_com_posicao_lado(sentenca: str, alvo: str, aliases: list) -> list:
     """Para peças tipo longarina/paralama/porta que podem ter posição+lado
@@ -216,7 +208,6 @@ def _nomes_peca_com_posicao_lado(sentenca: str, alvo: str, aliases: list) -> lis
         resultado.append(nome)
     return resultado
 
-
 def _nomes_capo(sentenca: str) -> list:
     """Capô / tampa do motor."""
     if re.search(r"cap[ôo]\b|tampa\s+do\s+motor", sentenca, re.IGNORECASE):
@@ -225,12 +216,10 @@ def _nomes_capo(sentenca: str) -> list:
         return ["capo_tampa_motor"]
     return []
 
-
 def _nomes_teto(sentenca: str) -> list:
     if re.search(r"\bteto\b", sentenca, re.IGNORECASE):
         return ["teto"]
     return []
-
 
 def _nomes_painel(sentenca: str) -> list:
     m = re.search(r"painel\s+(frontal|traseir[oa])", sentenca, re.IGNORECASE)
@@ -238,7 +227,6 @@ def _nomes_painel(sentenca: str) -> list:
         qualificador = "frontal" if "frontal" in m.group(1).lower() else "traseiro"
         return [f"painel_{qualificador}"]
     return []
-
 
 # Severidade base por família de peça — colunas e longarinas são sinal
 # estrutural (ou quase), o resto é chapa externa.
@@ -254,15 +242,13 @@ _SEVERIDADE_POR_PREFIXO = [
     ("painel", SeveridadeAvaria.MEDIA),
 ]
 
-
 def _severidade_de(nome: str) -> SeveridadeAvaria:
     for prefixo, sev in _SEVERIDADE_POR_PREFIXO:
         if nome.startswith(prefixo):
             return sev
     return SeveridadeAvaria.LEVE
 
-
-def extrair_avarias_textuais(observacoes: Optional[str]) -> list:
+def extrair_avarias_textuais(observacoes: str | None) -> list:
     """Extrai `list[Avaria]` a partir do texto livre do campo Observações.
 
     Retorna lista vazia se `observacoes` for None/empty ou não contiver nenhum
@@ -301,13 +287,11 @@ def extrair_avarias_textuais(observacoes: Optional[str]) -> list:
             ))
     return avarias
 
-
 # =============================================================================
 # Camada 3 — Haiku Vision na página 2 (diagrama estrutural)
 # =============================================================================
 
 _HAIKU_MODEL = "claude-haiku-4-5"
-
 
 _PROMPT_PAGINA_ESTRUTURAL = """Você recebe a PÁGINA 2 de um laudo cautelar veicular brasileiro.
 A página mostra um diagrama de um carro visto de cima com círculos coloridos em várias peças.
@@ -354,7 +338,6 @@ Regras para severidade_geral:
 
 NÃO inclua comentários, NÃO inclua texto fora do JSON."""
 
-
 def extrair_laudo_visual(pdf_path: Path, vision_client) -> dict:
     """Renderiza página 2 do PDF (diagrama estrutural) e delega a classificação pro `VisionClient`.
 
@@ -371,7 +354,6 @@ def extrair_laudo_visual(pdf_path: Path, vision_client) -> dict:
 
     return vision_client.classify(png_bytes, _PROMPT_PAGINA_ESTRUTURAL)
 
-
 # =============================================================================
 # Combinação: LaudoEstruturado final
 # =============================================================================
@@ -383,7 +365,6 @@ _SEVERIDADE_MAP = {
     "grave": SeveridadeAvaria.GRAVE,
     "estrutural": SeveridadeAvaria.ESTRUTURAL,
 }
-
 
 def extrair_laudo(
     pdf_path: Path,
@@ -399,7 +380,7 @@ def extrair_laudo(
     _log = _logging.getLogger(__name__)
 
     txt = parse_laudo_textual(pdf_path)
-    visual: Optional[dict] = None
+    visual: dict | None = None
     visao_falhou = False
     try:
         visual = extrair_laudo_visual(pdf_path, vision_client)
@@ -480,7 +461,6 @@ def extrair_laudo(
         confidence=confidence,
     )
 
-
 def _severidade_consolidada(avarias: list) -> SeveridadeAvaria:
     """Deriva severidade_geral da lista de avarias (quando a visão falhou).
 
@@ -511,7 +491,6 @@ def _severidade_consolidada(avarias: list) -> SeveridadeAvaria:
         return SeveridadeAvaria.MEDIA
 
     return SeveridadeAvaria.LEVE
-
 
 # =============================================================================
 # Utilidades

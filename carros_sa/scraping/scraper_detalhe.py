@@ -17,16 +17,14 @@ from __future__ import annotations
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from sqlmodel import Session
 
 from carros_sa.models import Lote, PrecoReferenciaAA
 from carros_sa.scraping.parsers import DetalheFlags, parse_detalhe
 
-
 PdfDownloader = Callable[[str, Path], None]
-
 
 def _default_pdf_downloader(url: str, destino: Path) -> None:
     """Baixa um PDF via stdlib. Substituível em testes."""
@@ -34,19 +32,17 @@ def _default_pdf_downloader(url: str, destino: Path) -> None:
     with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 - URL vem do site oficial
         destino.write_bytes(resp.read())
 
-
 @dataclass
 class ResultadoProcessamento:
     lote_id: str
-    early_exit: Optional[str]          # None = passou, str = motivo do descarte
+    early_exit: str | None          # None = passou, str = motivo do descarte
     pdf_baixado: bool
-    pdf_path: Optional[Path]
+    pdf_path: Path | None
     flags: DetalheFlags
 
     @property
     def passou(self) -> bool:
         return self.early_exit is None
-
 
 def _flags_to_dict(flags: DetalheFlags) -> dict:
     """Versão JSON-serializável dos campos do DetalheFlags pra raw_json."""
@@ -70,15 +66,14 @@ def _flags_to_dict(flags: DetalheFlags) -> dict:
         "early_exit": flags.early_exit,
     }
 
-
 def processar_detalhe(
     *,
     lote_id: str,
     body_text: str,
-    laudo_pdf_url: Optional[str],
+    laudo_pdf_url: str | None,
     session: Session,
     pdf_dir: Path,
-    downloader: Optional[PdfDownloader] = None,
+    downloader: PdfDownloader | None = None,
 ) -> ResultadoProcessamento:
     """Aplica parse_detalhe, persiste flags e baixa PDF se o lote sobreviver ao early-exit.
 
@@ -116,7 +111,7 @@ def processar_detalhe(
         lote.fipe_pct_lance_minimo = flags.fipe_pct_lance_minimo
 
     pdf_baixado = False
-    pdf_path: Optional[Path] = None
+    pdf_path: Path | None = None
     if flags.early_exit is None and laudo_pdf_url:
         pdf_path = pdf_dir / f"{lote_id}.pdf"
         dl = downloader or _default_pdf_downloader

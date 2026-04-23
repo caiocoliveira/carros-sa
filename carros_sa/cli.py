@@ -21,7 +21,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from dotenv import load_dotenv
@@ -40,7 +39,6 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
-
 
 def _imprimir_vision_provider(client) -> None:
     """Mostra qual provider de visão está ativo + warn se sem cascata.
@@ -63,7 +61,6 @@ def _imprimir_vision_provider(client) -> None:
                 "ativa cascata Gemini→Haiku — cobre overload silencioso "
                 "(~$5-15/mês em volumes de PoC).[/yellow]"
             )
-
 
 # ---------------------------------------------------------------------------
 # top — ranking offline a partir do SQLite
@@ -180,7 +177,6 @@ def top(
         )
     console.print(tbl)
 
-
 # ---------------------------------------------------------------------------
 # empresas — listar configs
 # ---------------------------------------------------------------------------
@@ -218,7 +214,6 @@ def empresas() -> None:
         except Exception as exc:
             tbl.add_row(empresa_id, "[red]erro[/red]", "-", f"[red]{exc}[/red]")
     console.print(tbl)
-
 
 # ---------------------------------------------------------------------------
 # ingest — JSON de listagem → SQLite
@@ -288,7 +283,6 @@ def ingest(
     )
     console.print(f"Total em `lote`: {total}")
 
-
 # ---------------------------------------------------------------------------
 # arrematado-import — CSV de histórico → Lote sintético + Arrematado
 # ---------------------------------------------------------------------------
@@ -339,7 +333,6 @@ def arrematado_import_cmd(
         for linha, msg in result.erros[:10]:
             console.print(f"  linha {linha}: {msg}")
 
-
 # ---------------------------------------------------------------------------
 # extrair-laudo — PDF → LaudoEstruturado
 # ---------------------------------------------------------------------------
@@ -361,7 +354,6 @@ def extrair_laudo_cmd(
     laudo = extrair_laudo(pdf, client)
     console.print_json(laudo.model_dump_json(indent=2))
 
-
 # ---------------------------------------------------------------------------
 # sheets — exporta avaliações pro Google Sheets
 # ---------------------------------------------------------------------------
@@ -369,8 +361,8 @@ def extrair_laudo_cmd(
 @app.command()
 def sheets(
     empresa: str = typer.Option(..., help="ID da empresa"),
-    sheet_id: Optional[str] = typer.Option(None, help="Override do GOOGLE_SHEETS_ID"),
-    credentials: Optional[str] = typer.Option(None, help="Override do GOOGLE_SERVICE_ACCOUNT_PATH"),
+    sheet_id: str | None = typer.Option(None, help="Override do GOOGLE_SHEETS_ID"),
+    credentials: str | None = typer.Option(None, help="Override do GOOGLE_SERVICE_ACCOUNT_PATH"),
 ) -> None:
     """Exporta avaliações da empresa para uma aba no Google Sheets."""
     sheet_id = sheet_id or os.environ.get("GOOGLE_SHEETS_ID")
@@ -397,7 +389,6 @@ def sheets(
     console.print(f"[green]✓ {n} lotes exportados → aba \"{empresa}\"[/green]")
     console.print(f"  Sheet: {exporter.sheet_url}")
 
-
 # ---------------------------------------------------------------------------
 # triagem — pipeline completo (thin wrapper do scripts/triagem_diaria.py)
 # ---------------------------------------------------------------------------
@@ -420,7 +411,6 @@ def triagem(
         raise typer.Exit(1)
 
     asyncio.run(_run_triagem(empresa, horizonte_dias, headless, sem_sheets, top_n, email, password))
-
 
 async def _run_triagem(
     empresa_id: str,
@@ -544,7 +534,6 @@ async def _run_triagem(
     except Exception as exc:
         console.print(f"[red]Erro ao exportar: {exc}[/red]")
 
-
 @app.command("audit-laudos")
 def audit_laudos_cmd(
     empresa: str = typer.Option("carros_uberlandia", "--empresa", "-e", help="ID da empresa"),
@@ -599,7 +588,6 @@ def audit_laudos_cmd(
             t.motivo,
         )
     console.print(table)
-
 
 if __name__ == "__main__":
     app()

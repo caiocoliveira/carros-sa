@@ -8,7 +8,7 @@ integridade referencial sem mexer em [carros_sa/models.py](carros_sa/models.py).
 Arquivos consumidos: `data/historico/<empresa_id>_arrematado.csv`.
 
 Fluxo:
-    parse_csv(path) → List[HistoricoRow]
+    parse_csv(path) → list[HistoricoRow]
     importar_historico(rows, empresa_id, session) → ImportResult
 
 Idempotência: re-importar o mesmo CSV não duplica linhas. Matching por
@@ -24,14 +24,12 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, select
 
 from carros_sa.models import Arrematado, Empresa, Lote
 from carros_sa.tenancy import carregar_empresa
-
 
 # =============================================================================
 # Pydantic — uma linha do CSV
@@ -47,12 +45,12 @@ class HistoricoRow(BaseModel):
     marca: str
     modelo: str
     ano: int
-    km: Optional[int] = None
+    km: int | None = None
     valor_compra: int = Field(gt=0)
-    data_compra: Optional[datetime] = None
-    custos_extras: Optional[int] = None
-    valor_venda: Optional[int] = None
-    data_venda: Optional[datetime] = None
+    data_compra: datetime | None = None
+    custos_extras: int | None = None
+    valor_venda: int | None = None
+    data_venda: datetime | None = None
     observacoes: str = ""
 
     @field_validator("marca", "modelo")
@@ -63,7 +61,6 @@ class HistoricoRow(BaseModel):
             raise ValueError("marca/modelo não pode ser vazio")
         return v
 
-
 # =============================================================================
 # Resultado da importação
 # =============================================================================
@@ -72,12 +69,11 @@ class HistoricoRow(BaseModel):
 class ImportResult:
     criados: int = 0
     atualizados: int = 0
-    erros: List[Tuple[int, str]] = field(default_factory=list)  # (linha_csv, mensagem)
+    erros: list[tuple[int, str]] = field(default_factory=list)  # (linha_csv, mensagem)
 
     @property
     def total_processados(self) -> int:
         return self.criados + self.atualizados
-
 
 # =============================================================================
 # Helpers
@@ -85,13 +81,11 @@ class ImportResult:
 
 _NAO_ALFANUM = re.compile(r"[^a-z0-9]+")
 
-
 def _slug(s: str) -> str:
     """Normaliza string pra slug ASCII lower-case (matching de modelo)."""
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
     s = s.lower().strip()
     return _NAO_ALFANUM.sub("_", s).strip("_")
-
 
 def lote_id_sintetico(empresa_id: str, marca: str, modelo: str, ano: int, idx: int) -> str:
     """ID determinístico pra Lote sintético — permite upsert idempotente.
@@ -101,8 +95,7 @@ def lote_id_sintetico(empresa_id: str, marca: str, modelo: str, ano: int, idx: i
     """
     return f"hist_{empresa_id}_{_slug(marca)}_{_slug(modelo)}_{ano}_{idx:03d}"
 
-
-def _parse_data(s: Optional[str]) -> Optional[datetime]:
+def _parse_data(s: str | None) -> datetime | None:
     """Parse data ISO (YYYY-MM-DD) ou BR (DD/MM/YYYY). Vazio → None."""
     if s is None or not s.strip():
         return None
@@ -114,8 +107,7 @@ def _parse_data(s: Optional[str]) -> Optional[datetime]:
             continue
     raise ValueError(f"data inválida: {s!r} (esperado YYYY-MM-DD ou DD/MM/YYYY)")
 
-
-def _parse_int_opcional(s: Optional[str]) -> Optional[int]:
+def _parse_int_opcional(s: str | None) -> int | None:
     """Parse int. Vazio → None. Aceita '1.500,00', '1500', '1500.00'."""
     if s is None or not s.strip():
         return None
@@ -125,18 +117,17 @@ def _parse_int_opcional(s: Optional[str]) -> Optional[int]:
     cleaned = cleaned.replace(".", "").replace(",", "")
     return int(cleaned)
 
-
 # =============================================================================
 # Parse CSV
 # =============================================================================
 
-def parse_csv(path: Path) -> Tuple[List[HistoricoRow], List[Tuple[int, str]]]:
+def parse_csv(path: Path) -> tuple[list[HistoricoRow], list[tuple[int, str]]]:
     """Lê CSV → (rows válidas, erros [(linha, msg)]).
 
     Linha 1 é cabeçalho; primeira linha de dado é linha 2 no log de erro.
     """
-    rows: List[HistoricoRow] = []
-    erros: List[Tuple[int, str]] = []
+    rows: list[HistoricoRow] = []
+    erros: list[tuple[int, str]] = []
 
     with path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
@@ -160,7 +151,6 @@ def parse_csv(path: Path) -> Tuple[List[HistoricoRow], List[Tuple[int, str]]]:
 
     return rows, erros
 
-
 # =============================================================================
 # Importação principal
 # =============================================================================
@@ -176,9 +166,8 @@ def _garantir_empresa(empresa_id: str, session: Session) -> None:
         config_yaml_path=str(Path("config/empresas") / f"{empresa_id}.yaml"),
     ))
 
-
 def importar_historico(
-    rows: List[HistoricoRow],
+    rows: list[HistoricoRow],
     empresa_id: str,
     session: Session,
 ) -> ImportResult:

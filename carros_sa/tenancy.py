@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -17,12 +16,10 @@ from carros_sa.models import CategoriaVeiculo
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config" / "empresas"
 
-
 class PatioConfig(BaseModel):
     cidade: str
     uf: str
-    cep: Optional[str] = None
-
+    cep: str | None = None
 
 class MargemConfig(BaseModel):
     base: float = Field(ge=0.0, le=1.0)
@@ -35,7 +32,6 @@ class MargemConfig(BaseModel):
         if base is not None and v > base:
             raise ValueError("minima_absoluta não pode exceder base")
         return v
-
 
 class CustosOperacionais(BaseModel):
     """Decomposição dos custos operacionais não-veículo recorrentes por carro.
@@ -66,7 +62,6 @@ class CustosOperacionais(BaseModel):
             + self.outros
         )
 
-
 class EmpresaConfig(BaseModel):
     """Snapshot carregado de config/empresas/<id>.yaml."""
 
@@ -78,8 +73,8 @@ class EmpresaConfig(BaseModel):
     # Raio operacional — cidades dentro desse haversine a partir do pátio são
     # raspadas. Distinto de raio_max_km (teto legado; não usado no frete real).
     raio_operacao_km: int = 150
-    fator_risco_bounds: Tuple[float, float] = (1.0, 2.0)
-    fator_liquidez_bounds: Tuple[float, float] = (1.0, 1.8)
+    fator_risco_bounds: tuple[float, float] = (1.0, 2.0)
+    fator_liquidez_bounds: tuple[float, float] = (1.0, 1.8)
     # tabela_frete: chave = "min-max" km, valor = dict categoria -> reais
     tabela_frete: dict  # dict[str, dict[str, int]]
     categorias_aceitas: list  # list[CategoriaVeiculo]
@@ -90,7 +85,7 @@ class EmpresaConfig(BaseModel):
     taxa_leilao_fixa: int = Field(default=0, ge=0)
     # Custos operacionais — formato novo decomposto OU int legado agregado.
     # `_custo_op_aplicado` resolve qual usar via model_validator.
-    custos_operacionais: Optional[CustosOperacionais] = None
+    custos_operacionais: CustosOperacionais | None = None
     custo_op_fixo: int = 0
 
     @model_validator(mode="after")
@@ -140,9 +135,8 @@ class EmpresaConfig(BaseModel):
             raio_km=self.raio_operacao_km,
         )
 
-
 @lru_cache(maxsize=32)
-def carregar_empresa(empresa_id: str, config_dir: Optional[Path] = None) -> EmpresaConfig:
+def carregar_empresa(empresa_id: str, config_dir: Path | None = None) -> EmpresaConfig:
     base = Path(config_dir) if config_dir else CONFIG_DIR
     path = base / f"{empresa_id}.yaml"
     if not path.exists():
@@ -151,8 +145,7 @@ def carregar_empresa(empresa_id: str, config_dir: Optional[Path] = None) -> Empr
         raw = yaml.safe_load(f)
     return EmpresaConfig(**raw)
 
-
-def listar_empresas(config_dir: Optional[Path] = None) -> list:
+def listar_empresas(config_dir: Path | None = None) -> list:
     base = Path(config_dir) if config_dir else CONFIG_DIR
     if not base.exists():
         return []

@@ -21,12 +21,10 @@ import unicodedata
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import yaml
 
 from carros_sa.models import CategoriaVeiculo
-
 
 # =============================================================================
 # Bucket relativo de popularidade
@@ -41,10 +39,9 @@ class BucketPopularidade(str, Enum):
     NICHO = "nicho"              # fora do top-30      → × 1.3
     ILIQUIDO = "iliquido"        # fora E ≥10 anos     → × 1.6
 
-
 # Multiplicador base (quando faixa_idade é None ou NOVO — carro novo é o mais
 # alinhado com o sinal FENABRAVE de emplacamentos 0km).
-_MULTIPLICADORES: Dict[BucketPopularidade, float] = {
+_MULTIPLICADORES: dict[BucketPopularidade, float] = {
     BucketPopularidade.BLOCKBUSTER: 0.6,
     BucketPopularidade.POPULAR: 0.8,
     BucketPopularidade.NORMAL: 1.0,
@@ -59,7 +56,7 @@ _MULTIPLICADORES: Dict[BucketPopularidade, float] = {
 #   - NOVO: multiplicador full (modelos quentes giram realmente mais rápido)
 #   - MEDIO: multiplicador ligeiramente atenuado (popularidade menos potente)
 #   - VELHO: multiplicador atenuado (carro antigo é antigo, mesmo popular)
-_CORRECAO_IDADE: Dict[str, Dict[BucketPopularidade, float]] = {
+_CORRECAO_IDADE: dict[str, dict[BucketPopularidade, float]] = {
     "novo":  {BucketPopularidade.BLOCKBUSTER: 1.0, BucketPopularidade.POPULAR: 1.0,
               BucketPopularidade.NORMAL: 1.0, BucketPopularidade.NICHO: 1.0,
               BucketPopularidade.ILIQUIDO: 1.0},
@@ -70,7 +67,6 @@ _CORRECAO_IDADE: Dict[str, Dict[BucketPopularidade, float]] = {
               BucketPopularidade.NORMAL: 1.0, BucketPopularidade.NICHO: 1.1,
               BucketPopularidade.ILIQUIDO: 1.2},
 }
-
 
 def multiplicador(bucket: BucketPopularidade, faixa_idade=None) -> float:
     """Devolve fator pra ajustar `dias_giro_estimado`.
@@ -88,16 +84,14 @@ def multiplicador(bucket: BucketPopularidade, faixa_idade=None) -> float:
     correcao = _CORRECAO_IDADE.get(faixa_str, {}).get(bucket, 1.0)
     return base * correcao
 
-
 # =============================================================================
 # Carregamento do ranking YAML (cacheado)
 # =============================================================================
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "mercado"
 
-
 @lru_cache(maxsize=8)
-def carregar_ranking(yaml_path: Optional[str] = None) -> Dict[str, List[str]]:
+def carregar_ranking(yaml_path: str | None = None) -> dict[str, list[str]]:
     """Lê o YAML mais recente em config/mercado/ ou um path explícito.
 
     Retorna: {categoria_str: [modelo1, modelo2, ...]} em ordem decrescente
@@ -119,11 +113,9 @@ def carregar_ranking(yaml_path: Optional[str] = None) -> Dict[str, List[str]]:
 
     return data.get("ranking_por_categoria", {}) or {}
 
-
 def invalidar_cache() -> None:
     """Limpa o cache do ranking — útil em testes e após updates manuais."""
     carregar_ranking.cache_clear()
-
 
 # =============================================================================
 # Matching de modelo
@@ -131,12 +123,10 @@ def invalidar_cache() -> None:
 
 _NAO_ALFANUM = re.compile(r"[^a-z0-9]+")
 
-
 def _slug(s: str) -> str:
     """Normaliza pra slug ASCII pra matching tolerante a acentos/grafia."""
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
     return _NAO_ALFANUM.sub(" ", s.lower()).strip()
-
 
 def _modelo_bate(modelo_lote: str, modelo_ranking: str) -> bool:
     """Modelo do lote (ex.: 'Polo Track 1.0') casa com modelo do ranking ('Polo Track')?
@@ -147,7 +137,6 @@ def _modelo_bate(modelo_lote: str, modelo_ranking: str) -> bool:
     """
     return _slug(modelo_ranking) in _slug(modelo_lote)
 
-
 # =============================================================================
 # API principal
 # =============================================================================
@@ -156,9 +145,9 @@ def bucket_modelo(
     marca: str,
     modelo: str,
     categoria: CategoriaVeiculo,
-    ano: Optional[int] = None,
+    ano: int | None = None,
     ano_referencia: int = 2026,
-    yaml_path: Optional[str] = None,
+    yaml_path: str | None = None,
 ) -> BucketPopularidade:
     """Devolve bucket relativo do modelo dentro da sua categoria.
 
@@ -194,7 +183,6 @@ def bucket_modelo(
     if posicao <= 30:
         return BucketPopularidade.NORMAL
     return BucketPopularidade.NICHO  # caso a lista exceda 30 (defensivo)
-
 
 def ajustar_dias_giro(
     dias_base: int,

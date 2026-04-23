@@ -17,7 +17,7 @@ A CLI fica em `scripts/audit_columns.py`.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable
 
 from sqlmodel import Session, select
 
@@ -27,16 +27,13 @@ from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
-
 # Validator retorna None se ok; string com motivo se suspeito.
-Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
+Validator = Callable[[Any, dict[str, Any]], str | None]
 
-
-def _situacao(row: Dict[str, Any]) -> str:
+def _situacao(row: dict[str, Any]) -> str:
     return "✓ Viável" if row["viavel"] else "✗ Caro demais"
 
-
-CHECKS: Dict[str, Validator] = {
+CHECKS: dict[str, Validator] = {
     "Rank": lambda v, r: None if isinstance(v, int) and v > 0 else "Rank deve ser int positivo",
     "Situação": lambda v, r: (
         None if v in SITUACOES_VALIDAS
@@ -83,9 +80,8 @@ CHECKS: Dict[str, Validator] = {
     "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
 }
 
-
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
-COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
+COLUMN_EXTRACTORS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
     "Modelo": lambda r: r["modelo"],
@@ -102,8 +98,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Laudo": lambda r: r.get("laudo_url") or "—",
 }
 
-
-def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
+def _build_rows(session: Session, sample_size: int) -> list[dict[str, Any]]:
     """Últimas N avaliações com JOIN Lote + LEFT JOIN LaudoCache, ordenadas e ranqueadas.
 
     Espelha `SheetsExporter._query` — encerrados são filtrados, ativos viáveis
@@ -115,12 +110,12 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
     ).all()
 
     agora = datetime.now()
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for av in avaliacoes:
         lote = session.get(Lote, av.lote_id)
         if lote is None:
             continue
-        laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)
+        laudo: LaudoCache | None = session.get(LaudoCache, av.lote_id)
 
         viavel = av.preco_max > (lote.lance_atual or 0)
 
@@ -204,8 +199,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         r["situacao"] = _situacao(r)
     return rows
 
-
-def audit(engine, sample_size: int = 20) -> List[str]:
+def audit(engine, sample_size: int = 20) -> list[str]:
     """Retorna lista de violações. Vazia = tudo ok.
 
     Cada violação é uma string pronta pra impressão no formato:
@@ -220,7 +214,7 @@ def audit(engine, sample_size: int = 20) -> List[str]:
     # Agrega por (coluna, motivo): N linhas + primeiro exemplo.
     # Dois motivos diferentes na mesma coluna viram DUAS entradas agrupadas
     # separadamente — menos compacto mas mais acionável.
-    agregador: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    agregador: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         for coluna in HEADER:
             extractor = COLUMN_EXTRACTORS.get(coluna)
@@ -241,7 +235,7 @@ def audit(engine, sample_size: int = 20) -> List[str]:
             else:
                 agregador[chave]["count"] += 1
 
-    saida: List[str] = []
+    saida: list[str] = []
     for (coluna, motivo), info in agregador.items():
         suffix = "" if info["count"] == 1 else "s"
         saida.append(

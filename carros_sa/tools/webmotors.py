@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from statistics import median
-from typing import Callable, List, Optional, Tuple
+from typing import Callable
 
 # =============================================================================
 # Modelo parseado (não é SQLModel — conversão pra AnuncioWebmotors é opcional)
@@ -49,7 +49,6 @@ class AnuncioWM:
     abaixo_da_fipe: bool = False
     oferta_destaque: bool = False
 
-
 @dataclass
 class EstatisticasWM:
     p25: int
@@ -59,7 +58,6 @@ class EstatisticasWM:
     # Usado pelo precificador pra ajustar a âncora de venda quando a km do lote
     # destoa da km típica do mercado (ver carros_sa/ajuste_km.py).
     km_mediana: int = 0
-
 
 # =============================================================================
 # Parser (funções puras)
@@ -72,12 +70,10 @@ _PRECO_RE = re.compile(r"^R\$\s*([\d\.]+)")
 _BADGES = {"OFERTA DESTAQUE", "ABAIXO DA FIPE"}
 _CAROUSEL_RE = re.compile(r"^\d+/\d+$")
 
-
 def _parse_br_int(s: str) -> int:
     return int(s.replace(".", "").split(",")[0])
 
-
-def parse_card(texto: List[str], anuncio_id: str) -> Optional[AnuncioWM]:
+def parse_card(texto: list[str], anuncio_id: str) -> AnuncioWM | None:
     """Converte lista de linhas `innerText` de um card em AnuncioWM.
 
     Retorna None se falta âncora essencial (preço, ano, ou modelo). Resiliente
@@ -144,8 +140,7 @@ def parse_card(texto: List[str], anuncio_id: str) -> Optional[AnuncioWM]:
         oferta_destaque=oferta_destaque,
     )
 
-
-def parse_resultados(cards_json: List[dict]) -> List[AnuncioWM]:
+def parse_resultados(cards_json: list[dict]) -> list[AnuncioWM]:
     """Recebe a lista do JSON coletado (`{id, anos, texto}`) → AnuncioWM[]."""
     anuncios = []
     for c in cards_json:
@@ -154,12 +149,11 @@ def parse_resultados(cards_json: List[dict]) -> List[AnuncioWM]:
             anuncios.append(a)
     return anuncios
 
-
 # =============================================================================
 # API pública: estatisticas()
 # =============================================================================
 
-def _percentil(sorted_vals: List[int], p: float) -> int:
+def _percentil(sorted_vals: list[int], p: float) -> int:
     n = len(sorted_vals)
     if n == 0:
         return 0
@@ -170,17 +164,15 @@ def _percentil(sorted_vals: List[int], p: float) -> int:
     c = min(f + 1, n - 1)
     return int(sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f))
 
-
-FetchFn = Callable[[str, str], List[AnuncioWM]]
-
+FetchFn = Callable[[str, str], list[AnuncioWM]]
 
 def estatisticas(
     marca: str,
     modelo: str,
     ano: int,
     *,
-    anuncios: Optional[List[AnuncioWM]] = None,
-    fetch: Optional[FetchFn] = None,
+    anuncios: list[AnuncioWM] | None = None,
+    fetch: FetchFn | None = None,
 ) -> EstatisticasWM:
     """Estatísticas de preço p/ (marca, modelo, ano) no Webmotors.
 
@@ -213,12 +205,11 @@ def estatisticas(
         km_mediana=km_med,
     )
 
-
 # =============================================================================
 # Fetch ao vivo — esqueleto, NÃO ligar sem discussão (workstream G)
 # =============================================================================
 
-def _fetch_playwright(marca: str, modelo: str) -> List[AnuncioWM]:
+def _fetch_playwright(marca: str, modelo: str) -> list[AnuncioWM]:
     """Placeholder. Implementar com playwright-stealth, rate-limit, cache 24h
     antes de ligar. Red flag do CLAUDE.md: risco de queimar IP.
     """

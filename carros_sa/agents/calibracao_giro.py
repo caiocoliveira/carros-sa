@@ -15,18 +15,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Dict, Optional, Tuple
 
 from sqlmodel import Session, select
 
 from carros_sa.models import Arrematado, CategoriaVeiculo, Lote
 
-
 # TTL do cache — 1h é mais que suficiente pra batch run; calibração nova fica
 # disponível na próxima invocação humana.
 _CACHE_TTL = timedelta(hours=1)
 _MIN_AMOSTRAS_CALIBRACAO = 3
-
 
 class FaixaIdade(str, Enum):
     """Sub-bucket de idade do veículo pra calibração de giro.
@@ -46,7 +43,6 @@ class FaixaIdade(str, Enum):
     MEDIO = "medio"
     VELHO = "velho"
 
-
 def faixa_de_idade(ano_veiculo: int, ano_referencia: int = 2026) -> FaixaIdade:
     idade = max(ano_referencia - ano_veiculo, 0)
     if idade <= 3:
@@ -55,15 +51,13 @@ def faixa_de_idade(ano_veiculo: int, ano_referencia: int = 2026) -> FaixaIdade:
         return FaixaIdade.MEDIO
     return FaixaIdade.VELHO
 
-
 # Cache: (empresa_id, categoria, faixa_idade_or_None) -> (dias, calculado_em).
 # None no 3º elemento = calibração agregada (sem sub-bucket), usada como fallback
 # quando a faixa específica não tem ≥3 amostras.
-_cache: Dict[
-    Tuple[str, CategoriaVeiculo, Optional[FaixaIdade]],
-    Tuple[int, datetime],
+_cache: dict[
+    tuple[str, CategoriaVeiculo, FaixaIdade | None],
+    tuple[int, datetime],
 ] = {}
-
 
 def _categoria_de_modelo(modelo: str) -> CategoriaVeiculo:
     """Inferência grosseira por substring no nome do modelo.
@@ -108,14 +102,13 @@ def _categoria_de_modelo(modelo: str) -> CategoriaVeiculo:
         return CategoriaVeiculo.SEDAN
     return CategoriaVeiculo.OUTRO
 
-
 def _calibrar_nivel(
     empresa_id: str,
     categoria: CategoriaVeiculo,
     session: Session,
-    faixa: Optional[FaixaIdade],
+    faixa: FaixaIdade | None,
     ano_ref: int,
-) -> Optional[int]:
+) -> int | None:
     """Tenta calcular média de dias_giro pra (empresa, cat[, faixa]).
 
     Retorna inteiro positivo se tem ≥`_MIN_AMOSTRAS_CALIBRACAO` amostras,
@@ -155,13 +148,12 @@ def _calibrar_nivel(
     _cache[chave] = (media, datetime.utcnow())
     return media
 
-
 def calibrar_dias_giro(
     empresa_id: str,
     categoria: CategoriaVeiculo,
-    session: Optional[Session],
+    session: Session | None,
     fallback: int,
-    faixa_idade: Optional[FaixaIdade] = None,
+    faixa_idade: FaixaIdade | None = None,
     ano_referencia: int = 2026,
 ) -> int:
     """Devolve dias_giro calibrado pra (empresa, categoria[, faixa_idade]).
@@ -190,15 +182,13 @@ def calibrar_dias_giro(
 
     return fallback
 
-
 def invalidar_cache() -> None:
     """Limpa o cache — útil em testes e quando importou novos arrematados."""
     _cache.clear()
 
-
 def lucro_reais_por_mes(
     lucro_absoluto_reais: int,
-    dias_giro: Optional[int],
+    dias_giro: int | None,
 ) -> int:
     """Converte lucro esperado (R$) em R$/mês, respeitando o tempo de venda.
 
@@ -214,8 +204,7 @@ def lucro_reais_por_mes(
     # (lucro / dias) * 30 = lucro mensal esperado
     return int(round(lucro_absoluto_reais * 30.0 / dias))
 
-
-def roi_anualizado(score_roi: float, dias_giro: Optional[int]) -> float:
+def roi_anualizado(score_roi: float, dias_giro: int | None) -> float:
     """Anualiza o ROI absoluto pelo tempo esperado de venda.
 
     Distinção semântica:

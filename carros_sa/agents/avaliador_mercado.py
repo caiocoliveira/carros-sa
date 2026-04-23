@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import statistics
 from datetime import datetime, timedelta
-from typing import List, Optional
 
 from sqlmodel import Session, select
 
@@ -43,7 +42,6 @@ _DIAS_GIRO_DEFAULT = {
     cat: faixas["medio"] for cat, faixas in _DIAS_GIRO_DEFAULT_POR_FAIXA.items()
 }
 
-
 def _prior_dias_giro(categoria: CategoriaVeiculo, faixa) -> int:
     """Look-up do prior hardcoded por (categoria, faixa)."""
     faixa_str = faixa.value if hasattr(faixa, "value") else str(faixa)
@@ -53,13 +51,12 @@ def _prior_dias_giro(categoria: CategoriaVeiculo, faixa) -> int:
 # TTL do cache persistente FIPE — Parallelum atualiza tabela mensalmente.
 _FIPE_CACHE_TTL = timedelta(days=20)
 
-
 def _consultar_fipe_com_cache(
     fipe: FipeClient,
     marca: str,
     modelo: str,
     ano: int,
-    session: Optional[Session],
+    session: Session | None,
 ) -> int:
     if session is None:
         return fipe.consultar(marca, modelo, ano)
@@ -80,8 +77,7 @@ def _consultar_fipe_com_cache(
     session.commit()
     return valor
 
-
-def _percentil_25(valores: List[int]) -> int:
+def _percentil_25(valores: list[int]) -> int:
     """p25 robusto pra amostras pequenas. n=1 → o próprio valor."""
     if not valores:
         raise ValueError("lista vazia")
@@ -94,19 +90,18 @@ def _percentil_25(valores: List[int]) -> int:
     frac = idx - lo
     return int(round(s[lo] + (s[hi] - s[lo]) * frac))
 
-
 def avaliar(
     marca: str,
     modelo: str,
     ano: int,
-    km: Optional[int] = None,
-    similares_precos: Optional[List[int]] = None,
+    km: int | None = None,
+    similares_precos: list[int] | None = None,
     categoria: CategoriaVeiculo = CategoriaVeiculo.OUTRO,
-    fipe_client: Optional[FipeClient] = None,
-    session: Optional[Session] = None,
-    empresa_id: Optional[str] = None,
+    fipe_client: FipeClient | None = None,
+    session: Session | None = None,
+    empresa_id: str | None = None,
     aplicar_popularidade: bool = True,
-    webmotors_km_mediana: Optional[int] = None,
+    webmotors_km_mediana: int | None = None,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 

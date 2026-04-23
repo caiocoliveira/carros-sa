@@ -19,7 +19,6 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import httpx
 
@@ -39,7 +38,6 @@ MARCAS_NON_FIPE = frozenset({
     "royal-enfield", "mv agusta", "mv-agusta", "ktm", "piaggio",
     "vespa",
 })
-
 
 def marca_fora_do_escopo_fipe(marca: str) -> bool:
     """True se a marca é fabricante exclusivo de moto (fora da FIPE carros)."""
@@ -61,14 +59,12 @@ _MARCAS_CACHE_PATH = Path(
 )
 _MARCAS_CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 dias
 
-
 def _parse_valor(valor_str: str) -> int:
     """'R$ 30.123,45' -> 30123 (em reais inteiros, descartando centavos)."""
     m = _PRECO_RE.search(valor_str)
     if not m:
         raise ValueError(f"valor FIPE não reconhecido: {valor_str!r}")
     return int(m.group(1).replace(".", ""))
-
 
 def _normalizar(s: str) -> str:
     """Lowercase + remove acentos/diacríticos + colapsa espaços/pontuação.
@@ -89,7 +85,6 @@ def _normalizar(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-
 def _score_modelo(query: str, candidato: str) -> int:
     """Pontua quão bem `candidato` (nome do modelo na FIPE) bate com `query`.
 
@@ -101,7 +96,6 @@ def _score_modelo(query: str, candidato: str) -> int:
     c_tokens = set(_normalizar(candidato).split())
     return len(q_tokens & c_tokens)
 
-
 class FipeClient:
     """Cliente FIPE com cache in-memory por instância.
 
@@ -112,15 +106,15 @@ class FipeClient:
         self,
         base_url: str = FIPE_BASE_URL,
         timeout: float = 10.0,
-        http_client: Optional[httpx.Client] = None,
+        http_client: httpx.Client | None = None,
         sleep_between_requests: float = _DEFAULT_SLEEP_BETWEEN_REQUESTS,
         max_retries: int = 3,
-        marcas_disk_cache_path: Optional[Path] = _MARCAS_CACHE_PATH,
+        marcas_disk_cache_path: Path | None = _MARCAS_CACHE_PATH,
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._client = http_client or httpx.Client(timeout=timeout)
-        self._cache: Dict[str, object] = {}
+        self._cache: dict[str, object] = {}
         self._sleep_between = sleep_between_requests
         self._max_retries = max_retries
         self._last_request_at: float = 0.0
@@ -185,7 +179,7 @@ class FipeClient:
         # Unreachable — raise_for_status já teria disparado
         raise RuntimeError("fipe: esgotou retries sem resposta")
 
-    def _carregar_marcas_do_disco(self) -> Optional[List[dict]]:
+    def _carregar_marcas_do_disco(self) -> list[dict] | None:
         """Tenta ler o cache de marcas do disco. None se não existe ou expirou."""
         if self._marcas_disk_cache is None or not self._marcas_disk_cache.exists():
             return None
@@ -214,8 +208,8 @@ class FipeClient:
 
     # -- Lookups internos --------------------------------------------------
 
-    def _resolve_marca(self, marca_query: str) -> Tuple[str, str]:
-        marcas: List[dict] = self._get("/carros/marcas")  # type: ignore[assignment]
+    def _resolve_marca(self, marca_query: str) -> tuple[str, str]:
+        marcas: list[dict] = self._get("/carros/marcas")  # type: ignore[assignment]
         alvo = _normalizar(marca_query)
         alvo_tokens = set(alvo.split())
 
@@ -245,9 +239,9 @@ class FipeClient:
 
         raise LookupError(f"marca não encontrada na FIPE: {marca_query!r}")
 
-    def _resolve_modelo(self, cod_marca: str, modelo_query: str) -> Tuple[str, str]:
+    def _resolve_modelo(self, cod_marca: str, modelo_query: str) -> tuple[str, str]:
         payload = self._get(f"/carros/marcas/{cod_marca}/modelos")
-        modelos: List[dict] = payload["modelos"] if isinstance(payload, dict) else payload  # type: ignore[index]
+        modelos: list[dict] = payload["modelos"] if isinstance(payload, dict) else payload  # type: ignore[index]
         scored = [
             (_score_modelo(modelo_query, m["nome"]), -len(m["nome"]), m["codigo"], m["nome"])
             for m in modelos
@@ -259,7 +253,7 @@ class FipeClient:
         return str(cod), nome
 
     def _resolve_ano(self, cod_marca: str, cod_modelo: str, ano: int) -> str:
-        anos: List[dict] = self._get(  # type: ignore[assignment]
+        anos: list[dict] = self._get(  # type: ignore[assignment]
             f"/carros/marcas/{cod_marca}/modelos/{cod_modelo}/anos"
         )
         # ano vem como "2013-1" (combustível 1=gasolina, 2=alcool, 3=diesel, 4=flex...)

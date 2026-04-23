@@ -20,8 +20,6 @@ Sobre as duas âncoras:
 
 from __future__ import annotations
 
-from typing import Optional
-
 from carros_sa.ajuste_km import fator_km
 from carros_sa.models import (
     Avaliacao,
@@ -34,7 +32,6 @@ from carros_sa.models import (
     StatusDocumentacao,
 )
 from carros_sa.tenancy import EmpresaConfig
-
 
 # =============================================================================
 # Derivação de fatores
@@ -69,7 +66,6 @@ def calcular_fator_risco(laudo: LaudoEstruturado, bounds: tuple[float, float]) -
     peso = min(peso, 1.0)  # satura em 1
     return lo + (hi - lo) * peso
 
-
 def calcular_fator_liquidez(mercado: SinalMercado, bounds: tuple[float, float]) -> float:
     """Pouca competição + giro rápido = fator baixo (margem menor já basta)."""
     lo, hi = bounds
@@ -83,7 +79,6 @@ def calcular_fator_liquidez(mercado: SinalMercado, bounds: tuple[float, float]) 
 
     peso = (peso_competicao + peso_giro) / 2.0
     return lo + (hi - lo) * peso
-
 
 # =============================================================================
 # Precificador principal
@@ -110,7 +105,7 @@ def precificar(
     #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
     preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
-    preco_giro_aa: Optional[int] = None
+    preco_giro_aa: int | None = None
     if mercado.auto_avaliar_ref is not None:
         preco_giro_aa = int(round(
             min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km

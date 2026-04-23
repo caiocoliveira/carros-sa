@@ -17,10 +17,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 DATA_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "geo" / "municipios.csv"
-
 
 @dataclass
 class Municipio:
@@ -37,7 +35,6 @@ class Municipio:
     def nome_normalizado(self) -> str:
         return _normaliza(self.nome)
 
-
 # =============================================================================
 # Normalização
 # =============================================================================
@@ -47,7 +44,6 @@ def _normaliza(s: str) -> str:
     nfkd = unicodedata.normalize("NFKD", s)
     sem_acento = "".join(c for c in nfkd if not unicodedata.combining(c))
     return sem_acento.strip().lower()
-
 
 # =============================================================================
 # Carregamento
@@ -62,9 +58,8 @@ _CODIGO_UF_PARA_SIGLA = {
     50: "MS", 51: "MT", 52: "GO", 53: "DF",
 }
 
-
 @lru_cache(maxsize=1)
-def carregar_municipios() -> Tuple[Municipio, ...]:
+def carregar_municipios() -> tuple[Municipio, ...]:
     """Lê o CSV uma vez e devolve tupla imutável (cacheada)."""
     if not DATA_PATH.exists():
         raise FileNotFoundError(
@@ -72,7 +67,7 @@ def carregar_municipios() -> Tuple[Municipio, ...]:
             "Esperado CSV com colunas codigo_ibge,nome,latitude,longitude,…,codigo_uf,…"
         )
 
-    resultados: List[Municipio] = []
+    resultados: list[Municipio] = []
     with DATA_PATH.open(encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -92,13 +87,11 @@ def carregar_municipios() -> Tuple[Municipio, ...]:
             ))
     return tuple(resultados)
 
-
 # =============================================================================
 # Distância haversine
 # =============================================================================
 
 _R_TERRA_KM = 6371.0
-
 
 def distancia_haversine_km(
     lat1: float, lon1: float,
@@ -116,12 +109,11 @@ def distancia_haversine_km(
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return _R_TERRA_KM * c
 
-
 # =============================================================================
 # Buscas
 # =============================================================================
 
-def buscar_municipio(nome: str, uf: str) -> Optional[Municipio]:
+def buscar_municipio(nome: str, uf: str) -> Municipio | None:
     """Procura por (nome, UF) case/accent-insensitive. None se não achar."""
     alvo_nome = _normaliza(nome)
     alvo_uf = uf.strip().upper()
@@ -130,12 +122,11 @@ def buscar_municipio(nome: str, uf: str) -> Optional[Municipio]:
             return m
     return None
 
-
 def cidades_no_raio(
     cidade_base: str,
     uf_base: str,
     raio_km: float,
-) -> List[Municipio]:
+) -> list[Municipio]:
     """Lista municípios dentro do raio (inclusive) a partir de (cidade_base, uf_base).
 
     Retorna ordenado por distância crescente — a cidade base sempre é o primeiro
@@ -145,7 +136,7 @@ def cidades_no_raio(
     if base is None:
         raise ValueError(f"Cidade-base não encontrada: {cidade_base}/{uf_base}")
 
-    resultado: List[Municipio] = []
+    resultado: list[Municipio] = []
     for m in carregar_municipios():
         d = distancia_haversine_km(base.latitude, base.longitude, m.latitude, m.longitude)
         if d <= raio_km:

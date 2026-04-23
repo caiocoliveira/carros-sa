@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
 
 from carros_sa.models import CategoriaVeiculo, LoteRaw
 
@@ -29,14 +28,12 @@ _TIMER_DIAS_RE = re.compile(
 _PCT_RE = re.compile(r"^(\d{1,3})%$")
 _CIDADE_UF_RE = re.compile(r"^([^/]+)/([A-Z]{2})$", re.IGNORECASE)
 
-
 def _parse_br_int(s: str) -> int:
     """'22.900,00' -> 22900; '171.053' -> 171053."""
     s = s.replace(".", "").split(",")[0]
     return int(s)
 
-
-def _timer_para_fim_em(agora: datetime, timer: str) -> Optional[datetime]:
+def _timer_para_fim_em(agora: datetime, timer: str) -> datetime | None:
     """Timer do card → datetime absoluto.
 
     Dois formatos no DOM (ambos confirmados ao vivo):
@@ -65,8 +62,7 @@ def _timer_para_fim_em(agora: datetime, timer: str) -> Optional[datetime]:
     except ValueError:
         return None
 
-
-def is_laudo_pdf_url(url: Optional[str]) -> bool:
+def is_laudo_pdf_url(url: str | None) -> bool:
     """True só se a URL parece um PDF de laudo de lote real.
 
     Valida contra decoys observados no DOM do Auto Avaliar — principalmente o
@@ -94,15 +90,13 @@ def is_laudo_pdf_url(url: Optional[str]) -> bool:
         return True
     return False
 
-
 _BADGES_IGNORADOS = {"anúncio destaque", "showroom", "oportunidade", "destaque"}
 _COMBUSTIVEIS = {"FLEX", "GASOLINA", "DIESEL", "ETANOL", "ALCOOL", "ÁLCOOL", "HIBRIDO", "HÍBRIDO", "ELETRICO", "ELÉTRICO", "GNV"}
 
 _RATING_RE = re.compile(r"^\d+(?:[.,]\d+)?$")
 _CTAS_IGNORADOS = {"AVALIE AGORA", "DAR LANCE", "ARREMATADO", "VENDIDO", "ENCERRADO", "FINALIZADO"}
 
-
-def extrair_loja_do_card(lines: list) -> Optional[str]:
+def extrair_loja_do_card(lines: list) -> str | None:
     """Nome da loja + grupo que está vendendo o lote, a partir das linhas do card.
 
     No DOM do Auto Avaliar as duas últimas âncoras antes do CTA são:
@@ -115,7 +109,7 @@ def extrair_loja_do_card(lines: list) -> Optional[str]:
     None quando o card é atípico (ex.: sem timer, sem linha após CTA).
     """
     cleaned = [ln.strip() for ln in lines if ln.strip()]
-    timer_idx: Optional[int] = None
+    timer_idx: int | None = None
     for i, ln in enumerate(cleaned):
         if _TIMER_RE.match(ln) or _TIMER_DIAS_RE.match(ln):
             timer_idx = i
@@ -133,13 +127,12 @@ def extrair_loja_do_card(lines: list) -> Optional[str]:
         return None
     return " · ".join(candidatos[:2])
 
-
 def parse_card_lines(
     lines: list,
     lote_id: str,
     href: str,
     leilao: str = "autoavaliar",
-    agora: Optional[datetime] = None,
+    agora: datetime | None = None,
 ) -> LoteRaw:
     """Converte innerText de um `div.vehicle[id^=avl]` em LoteRaw.
 
@@ -151,14 +144,14 @@ def parse_card_lines(
     cleaned = [ln.strip() for ln in lines if ln.strip()]
 
     # Âncoras por regex/set
-    origem_cidade: Optional[str] = None
-    origem_uf: Optional[str] = None
+    origem_cidade: str | None = None
+    origem_uf: str | None = None
     ano_modelo = 0
-    km: Optional[int] = None
+    km: int | None = None
     fim_em = None
     precos: list = []
-    combustivel_idx: Optional[int] = None
-    ano_idx: Optional[int] = None
+    combustivel_idx: int | None = None
+    ano_idx: int | None = None
 
     for i, ln in enumerate(cleaned):
         if origem_cidade is None:
@@ -236,7 +229,6 @@ def parse_card_lines(
         origem_uf=origem_uf,
     )
 
-
 # =============================================================================
 # Detalhe (flags estruturadas do HTML — sem LLM)
 # =============================================================================
@@ -248,18 +240,18 @@ class DetalheFlags:
         self,
         *,
         specs: dict,
-        status_laudo: Optional[str] = None,
-        status_documento: Optional[str] = None,
-        prazo_transferencia_dias: Optional[int] = None,
-        prazo_liberacao_dias: Optional[int] = None,
+        status_laudo: str | None = None,
+        status_documento: str | None = None,
+        prazo_transferencia_dias: int | None = None,
+        prazo_liberacao_dias: int | None = None,
         itens_reprovados: list = None,
         opcionais: list = None,
-        ipva_pago: Optional[bool] = None,
+        ipva_pago: bool | None = None,
         observacoes_anunciante: str = "",
-        laudo_pdf_url: Optional[str] = None,
+        laudo_pdf_url: str | None = None,
         similares_precos: list = None,
-        preco_referencia_aa: Optional[int] = None,
-        fipe_pct_lance_minimo: Optional[int] = None,
+        preco_referencia_aa: int | None = None,
+        fipe_pct_lance_minimo: int | None = None,
         encerrado: bool = False,
     ):
         self.specs = specs
@@ -286,7 +278,7 @@ class DetalheFlags:
         return self.status_laudo is not None and "aprovado" in self.status_laudo.lower() and "não" not in self.status_laudo.lower()
 
     @property
-    def early_exit(self) -> Optional[str]:
+    def early_exit(self) -> str | None:
         """Razão pra descartar o lote ANTES de chamar LLM. None = seguir em frente."""
         if self.encerrado:
             return "leilao_encerrado"
@@ -297,7 +289,6 @@ class DetalheFlags:
         if self.prazo_transferencia_dias and self.prazo_transferencia_dias > 45:
             return f"prazo_transferencia_excessivo_{self.prazo_transferencia_dias}d"
         return None
-
 
 _PRAZO_RE = re.compile(r"(\d+)\s*dias?", re.IGNORECASE)
 
@@ -311,7 +302,6 @@ _RE_ENCERRADO = re.compile(
 _RE_LEILAO_ENCERRADO = re.compile(
     r"(?i)leil[aã]o\s+(encerrad[oa]|finalizad[oa]|vendid[oa])"
 )
-
 
 def _detectar_encerrado(body_text: str) -> bool:
     """True se o DOM/innerText indica leilão já arrematado/encerrado.
@@ -334,8 +324,7 @@ def _detectar_encerrado(body_text: str) -> bool:
             return True
     return False
 
-
-def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> DetalheFlags:
+def parse_detalhe(body_text: str, laudo_pdf_url: str | None = None) -> DetalheFlags:
     """Extrai flags estruturadas do `innerText` da página de detalhe."""
     lines = [ln.strip() for ln in body_text.split("\n")]
 
@@ -425,13 +414,11 @@ def parse_detalhe(body_text: str, laudo_pdf_url: Optional[str] = None) -> Detalh
         encerrado=encerrado,
     )
 
-
-def _extrai_apos_label(lines: list, label: str) -> Optional[str]:
+def _extrai_apos_label(lines: list, label: str) -> str | None:
     for i, ln in enumerate(lines[:-1]):
         if ln.upper().strip() == label.upper():
             return lines[i + 1]
     return None
-
 
 def _extrai_lista_apos_label(lines: list, label: str, terminadores: list) -> list:
     resultado = []
@@ -448,7 +435,6 @@ def _extrai_lista_apos_label(lines: list, label: str, terminadores: list) -> lis
                 resultado.append(ln)
     return resultado
 
-
 def _extrai_observacoes(body_text: str) -> str:
     """Bloco longo de observações do anunciante (após documentação)."""
     marker_re = re.compile(r"(LEIA O ANÚNCIO|ATEN[ÇC][ÃA]O)", re.IGNORECASE)
@@ -460,7 +446,6 @@ def _extrai_observacoes(body_text: str) -> str:
     trecho = body_text[start : end if end > 0 else start + 2000]
     return trecho.strip()
 
-
 def _extrai_precos_similares(body_text: str) -> list:
     """Pega preços (R$) da seção 'Talvez se interesse por'."""
     idx = body_text.find("Talvez se interesse")
@@ -468,7 +453,6 @@ def _extrai_precos_similares(body_text: str) -> list:
         return []
     bloco = body_text[idx : idx + 2000]
     return [_parse_br_int(m) for m in re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", bloco)]
-
 
 # =============================================================================
 # Tabela Auto Avaliar — preços de referência embedded na página do anúncio
@@ -487,9 +471,8 @@ def _extrai_precos_similares(body_text: str) -> list:
 class PrecosAA:
     """Sinais de preço Tabela Auto Avaliar extraídos da página do lote."""
 
-    preco_referencia_aa: Optional[int] = None   # R$ da ULTIMA AVALIAÇÃO (referência do modelo)
-    fipe_pct_lance_minimo: Optional[int] = None # % sobre FIPE do lance mínimo (0..999)
-
+    preco_referencia_aa: int | None = None   # R$ da ULTIMA AVALIAÇÃO (referência do modelo)
+    fipe_pct_lance_minimo: int | None = None # % sobre FIPE do lance mínimo (0..999)
 
 _RE_BIND_PRICE = re.compile(
     r'class="[^"]*\bbind-price\b[^"]*"[^>]*>\s*([\d.,]+)\s*</',
@@ -507,15 +490,13 @@ _RE_TEXT_ULTIMA_AVAL = re.compile(
 # Fallback innerText: linha isolada "NN%" (pega o primeiro match até 3 dígitos)
 _RE_TEXT_PCT_ISOLADO = re.compile(r"(?m)^\s*(\d{1,3})\s*%\s*$")
 
-
-def _parse_preco_flexivel(s: str) -> Optional[int]:
+def _parse_preco_flexivel(s: str) -> int | None:
     """Converte '31.000,00' / '31.000' / '31000' em int. None se não parseável."""
     s = s.strip().replace(".", "")
     s = s.split(",")[0]  # descarta centavos
     if not s.isdigit():
         return None
     return int(s)
-
 
 def extrair_precos_aa(html_or_text: str) -> PrecosAA:
     """Extrai preço-referência Auto Avaliar e % FIPE do HTML (ou innerText) do lote.
@@ -529,8 +510,8 @@ def extrair_precos_aa(html_or_text: str) -> PrecosAA:
         return PrecosAA()
 
     # 1. Tentativa HTML-first (mais precisa)
-    preco: Optional[int] = None
-    fipe_pct: Optional[int] = None
+    preco: int | None = None
+    fipe_pct: int | None = None
 
     m = _RE_BIND_PRICE.search(html_or_text)
     if m:

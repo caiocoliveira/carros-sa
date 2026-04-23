@@ -379,6 +379,30 @@ Já registrado:
   - Lotes sem `origem_cidade`/`origem_uf` populados não entram na contagem (o scraper costuma popular, mas snapshots antigos podem ter NULL).
   - `lru_cache(32)` em `carregar_empresa` significa que mudanças no YAML em runtime do mesmo processo só refletem após reload — não impacta operação batch (script encerra entre runs).
 
+### T — Coluna "Tese" na planilha (sinalização baseada em histórico) ✅
+- **Branch:** `claude/adoring-black-d891b8`
+- **Arquivos:**
+  - [`carros_sa/tools/tese.py`](carros_sa/tools/tese.py) — NOVO. Módulo puro com `TeseConfig`, `HistoricoStat`, `carregar_historico_stat(session)`, `calcular_tese(marca, modelo, km, lance_max, historico, config)`. Classifica lote em 3 níveis: `tipica` 🟢 / `fora_da_curva` 🟡 / `atipica` 🔴.
+  - [`config/tese.yaml`](config/tese.yaml) — NOVO. Thresholds editáveis (ticket R$ 12k-85k, km 30k-260k, compras_min=2 por modelo) + 5 sinais ruins (V6 gasolina + km alto, diesel + km muito alto, nicho sem repetição, ticket acima do teto, elétrico sem revenda).
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — nova coluna "Tese" entre "Reforma (R$)" e "Anúncio"; pré-carrega `HistoricoStat` uma vez por export; fail-soft pra "—" se config quebra ou laudo pendente. Glossário atualizado.
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — invariante "string não vazia" pra Tese (mantém paridade HEADER↔CHECKS obrigatória do workstream Q).
+  - [`data/historico/uberlandia_arrematado.csv`](data/historico/uberlandia_arrematado.csv) — +62 linhas das 68 compras Auto Avaliar dos PDFs "Minhas compras" (jul/2024 → mar/2026). 5 saltados por dados cortados nas quebras de página; Polo Track 2024 já estava no CSV e não foi duplicado. Total histórico: 94 Arrematados.
+  - [`tests/test_tese.py`](tests/test_tese.py) — 14 testes: `_chave_modelo` normaliza variações (Focus Titanium ≡ Focus Sedan), agrega do DB real, típica/atípica/fora da curva com casos clássicos do histórico, desduplicação nicho×modelo_novo no render, `excludes` (V6+diesel não dupla-conta), km ausente tolerado.
+- **Motivação:** usuário analisou 6 PDFs "Minhas compras" (68 lotes, `data/laudos_amostra/Compras _ AutoAvaliar[1-6].pdf`) e pediu sinalização **prescritiva mas não filtrante**: "dentro do padrão de compras antigas". Nome escolhido: **Tese** (como "tese de compra" em M&A/PE). Ranking por ROI fica intocado — operador lê a Tese lado-a-lado e decide.
+- **Como funciona:** `calcular_tese` devolve célula pronta:
+  - `🟢 típica — Focus ×7, R$ 40k, 150k km` (modelo ≥ 2 compras + ticket + km na faixa)
+  - `🟡 fora da curva — V6 gasolina + km alto` (1 sinal ruim isolado OU um eixo fora)
+  - `🔴 atípica — diesel + km muito alto · modelo sem histórico · ticket acima do teto` (2+ sinais)
+  - Chave de agrupamento = `slug(marca) + "|" + primeira_palavra_slug(modelo)`. "Focus Titanium Plus", "FOCUS 2.0 SE" e "Focus Sedan Titanium" caem no bucket `ford|focus`.
+  - Granularidade futura (separar Renegade Sport de Longitude) = mudança em `_chave_modelo` só; o resto continua igual.
+- **Validação (banco real com 94 Arrematados):** Focus 2.0 Titanium (7 compras) → típica; Cadenza V6 + km 170k → atípica (V6 + nicho); Santa Fe V6 com 2 compras → fora da curva (não escala pra atípica porque nicho não dispara); JAC E-JS1 com 2 compras (< 5 exigidas pelo sinal) → fora da curva; Range Rover Vogue diesel 290k km R$ 90k → atípica (3 sinais: diesel + nicho + ticket).
+- **Cobertura:** 14 testes novos em [`tests/test_tese.py`](tests/test_tese.py).
+- **Limitações conhecidas:**
+  - Chave modelo = primeira palavra. "Compass Sport" e "Compass Night Eagle" entram juntos em `jeep|compass`. Se precisar distinguir trim, quebrar `_chave_modelo` em 2 níveis (marca+primeira+segunda) — isolado a 1 função.
+  - Sinais ruins são listas de substrings simples no nome do modelo — falso positivo possível (ex: "Santa Fe 3.5 Híbrido" casaria V6 se tivesse o pattern). Mitigado com `excludes`, mas o domínio é restrito à checagem por substring.
+  - `HistoricoStat` é cached por export — múltiplos exports na mesma sessão não veem Arrematados novos sem re-chamar `carregar_historico_stat`. Aceitável (export roda 1x por run).
+  - Coluna descritiva — NÃO afeta ranking, NÃO filtra. Lotes com laudo pendente mostram Tese "—" pra evitar sinal enganoso (lance_max está "—" nesses casos).
+
 ---
 
 ## Marcos (do plano arquitetural original)

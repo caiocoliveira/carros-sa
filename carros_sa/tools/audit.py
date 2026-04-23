@@ -79,6 +79,14 @@ CHECKS: Dict[str, Validator] = {
     "Reforma (R$)": lambda v, r: (
         "Reforma negativa" if v is not None and v < 0 else None
     ),
+    # Coluna informativa. Valores esperados: texto com emoji prefixo (🟢/🟡/🔴)
+    # ou "—" quando config/tese.yaml não carrega ou laudo pendente. String vazia
+    # seria bug (calcular_tese deveria sempre produzir algo).
+    "Tese": lambda v, r: (
+        "Tese string vazia — calcular_tese ou fallback '—' não produziu valor"
+        if v is None or (isinstance(v, str) and not v.strip())
+        else None
+    ),
     "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
     "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
 }
@@ -98,6 +106,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
     "Reforma (R$)": lambda r: r["reforma_estimada"],
+    "Tese": lambda r: r.get("tese", "—"),
     "Anúncio": lambda r: r["url"],
     "Laudo": lambda r: r.get("laudo_url") or "—",
 }

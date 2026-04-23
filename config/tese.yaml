@@ -1,0 +1,43 @@
+# config/tese.yaml
+#
+# Parâmetros da coluna "Tese" da planilha — SINALIZAÇÃO prescritiva baseada
+# no histórico de compras (tabela Arrematado).
+#
+# Três níveis possíveis: "típica" (🟢), "fora da curva" (🟡), "atípica" (🔴).
+# Nenhum afeta o ranking por ROI — a Tese é só um diagnóstico lado-a-lado pro
+# operador decidir.
+#
+# Edição segura: mexer nos thresholds aqui não exige release de código — o
+# módulo `carros_sa/tools/tese.py` lê esse YAML em tempo de export.
+
+tipica:
+  # Todos os 3 eixos precisam bater pra marcar "típica"
+  ticket_min: 12000           # menor compra histórica foi R$ 12k (Fiesta 2009)
+  ticket_max: 85000           # maior compra histórica foi R$ 84k (Renegade)
+  km_min: 30000
+  km_max: 260000              # cauda longa — Sandero 315k ficou fora mesmo
+  compras_minimas_modelo: 2   # modelo precisa ter >= 2 compras no histórico
+
+sinais_ruins:
+  # 2+ sinais acumulados → "atípica"; 1 sinal isolado → "fora da curva"
+  v6_gasolina_km_alto:
+    # carros V6/3.5 gasolina com km alta queimam revenda (consumo + manutenção)
+    patterns: ["v6", "3.5", "santa fe 3.5", "cadenza", "optima 3"]
+    excludes: ["diesel", "hibrido", "mild hybrid"]
+    km_minimo: 150000
+    motivo: "V6 gasolina + km alto"
+  diesel_km_alto:
+    patterns: ["diesel", "sd4", "tdi", "bluehdi"]
+    km_minimo: 200000
+    motivo: "diesel + km muito alto"
+  nicho_sem_repeticao:
+    # modelo com 0 compras anteriores — sem validação histórica
+    motivo: "modelo sem histórico de compra"
+  ticket_acima_teto:
+    # lance_max > ticket_max da tipica (R$ 85k)
+    motivo: "ticket acima do teto histórico"
+  eletrico_sem_revenda:
+    patterns: ["eletrico", "elétrico", "e-js1", "ev ", "electric", "bev"]
+    # compras_minimas: precisa de 5+ casos do mesmo modelo pra deixar de ser "sem revenda"
+    compras_minimas_modelo: 5
+    motivo: "elétrico sem revenda conhecida"

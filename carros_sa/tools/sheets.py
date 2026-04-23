@@ -24,6 +24,11 @@ from sqlmodel import Session, select
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
+from carros_sa.tools.tese import (
+    calcular_tese,
+    carregar_config_tese,
+    carregar_historico_stat,
+)
 
 HEADER = [
     "Rank",
@@ -38,6 +43,7 @@ HEADER = [
     "Lucro/mês (R$)",
     "ROI anualizado (%)",
     "Reforma (R$)",
+    "Tese",
     "Anúncio",
     "Laudo",
 ]
@@ -127,6 +133,15 @@ class SheetsExporter:
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
         ).all()
 
+        # Pré-carrega histórico pra Tese (sinalização informativa). Fail-soft:
+        # se config ou banco quebrarem, rows ganham tese_texto="—".
+        try:
+            hist_stat = carregar_historico_stat(session)
+            tese_cfg = carregar_config_tese()
+        except Exception:
+            hist_stat = None
+            tese_cfg = None
+
         agora = datetime.now()
         rows: List[dict] = []
         for av in avaliacoes:
@@ -189,6 +204,21 @@ class SheetsExporter:
             # fallback de valor, avisar explicitamente que não foi analisado.
             laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
 
+            # Tese — sinalização informativa baseada em Arrematado histórico.
+            # NÃO afeta rank nem filtra. Quando hist_stat/tese_cfg não carregam
+            # (ex: config quebrou), todas as linhas viram "—" — fail-soft.
+            if hist_stat is not None and tese_cfg is not None and lote.marca and lote.modelo:
+                tese_texto = calcular_tese(
+                    marca=lote.marca,
+                    modelo=lote.modelo,
+                    km=lote.km,
+                    lance_max=av.preco_max,
+                    historico=hist_stat,
+                    config=tese_cfg,
+                ).texto
+            else:
+                tese_texto = "—"
+
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo}",
@@ -201,6 +231,7 @@ class SheetsExporter:
                 "roi_anualizado": round(roi_anual, 1),
                 "lucro_mes": lucro_mes,
                 "reforma_estimada": av.reforma_estimada,
+                "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
                 "viavel": viavel,
@@ -265,11 +296,16 @@ class SheetsExporter:
                 lucro_mes_cell = "—"
                 roi_anual_cell = "—"
                 reforma_cell = "—"
+                # Tese depende do lance_max pra detectar "ticket acima do teto";
+                # sem esse valor definido (laudo pendente), zerar a célula evita
+                # sinalização enganosa.
+                tese_cell = "—"
             else:
                 preco_max_cell = r["preco_max"]
                 lucro_mes_cell = r["lucro_mes"]
                 roi_anual_cell = r["roi_anualizado"]
                 reforma_cell = r["reforma_estimada"]
+                tese_cell = r["tese"]
 
             sheet_rows.append([
                 rank,
@@ -284,6 +320,7 @@ class SheetsExporter:
                 lucro_mes_cell,
                 roi_anual_cell,
                 reforma_cell,
+                tese_cell,
                 url_cell,
                 laudo_cell,
             ])
@@ -476,6 +513,12 @@ class SheetsExporter:
                 "EstimadorReformaLLM (fallback: tabela YAML)",
                 "Custo total dos itens retornados pelo LLM a partir do laudo; se LLM falhar, soma da tabela (família_peça × severidade) + adicional estrutural quando aplicável. Já descontado do Lance Máximo.",
                 "Custo ANTES de vender. Números grandes aqui = lote com dano material relevante; confirmar no PDF do laudo antes do lance.",
+            ],
+            [
+                "Tese",
+                "Derivado (tabela Arrematado + config/tese.yaml)",
+                "🟢 típica: modelo ≥ 2 compras + ticket e KM na faixa histórica (12k-85k, 30k-260k km). 🔴 atípica: 2+ sinais ruins (V6 gasolina + km alto, diesel + km muito alto, nicho sem histórico, ticket acima do teto, elétrico sem revenda). 🟡 fora da curva: um eixo fora ou 1 sinal isolado.",
+                "SINALIZAÇÃO informativa — NÃO altera rank, NÃO filtra. Lado-a-lado com o ROI, responde 'isso se parece com o que a gente já comprou?'. Thresholds editáveis em config/tese.yaml sem release de código.",
             ],
             [
                 "Anúncio",

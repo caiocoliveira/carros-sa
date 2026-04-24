@@ -96,9 +96,10 @@ Critério de aceite pra merge em `main`:
 ## Memória persistente (compartilhada entre sessões)
 
 Leitura obrigatória ao começar algo novo:
-`/Users/caiocoliveira/.claude/projects/-Users-caiocoliveira-Carros-SA/memory/MEMORY.md`
+- `/Users/caiocoliveira/.claude/projects/-Users-caiocoliveira-Carros-SA/memory/MEMORY.md` — quirks específicos de fornecedor, flags de negócio, decisões fixadas
+- [`LESSONS.md`](LESSONS.md) — padrões de falha recorrentes + causa raiz + checklist pré-merge. Ler antes de declarar `✅` qualquer workstream.
 
-Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor) viram entrada nessa pasta — e a próxima sessão já lê sem precisar redescobrir.
+Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor) viram entrada em `memory/`. Padrões repetidos (falha silenciosa, validação N=1, premissa inventada) viram entrada em `LESSONS.md`.
 
 ## Red flags
 

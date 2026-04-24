@@ -89,6 +89,8 @@ def _categoria_de_modelo(modelo: str) -> CategoriaVeiculo:
         # Chineses + SUVs recentes
         "tiggo", "tucson", "cherokee", "commander", "territory", "santa fe", "trailblazer",
         "kicks", "captur", "t-cross", "corolla cross", "wr-v", "outlander", "sportage",
+        # SUVs que antes caíam em OUTRO (visto em coletas reais de Uberlândia)
+        "vitara", "jimny", "rav4", "forester", "xv", "cx-5", "cx-30", "cx-3",
         # Premium SUVs
         "x1", "x3", "x5", "x6", "q3", "q5", "q7", "glk", "gla", "glb",
     )):

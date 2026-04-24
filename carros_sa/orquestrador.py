@@ -99,12 +99,20 @@ def _pdf_eh_laudo_valido(pdf_path: Path) -> bool:
 # Frete heurístico (sem geo lookup externo)
 # ---------------------------------------------------------------------------
 
-def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
+def _calcular_frete(
+    lote: Lote,
+    empresa: EmpresaConfig,
+    categoria: Optional[CategoriaVeiculo] = None,
+) -> CustoLogistico:
     """Estima frete por distância haversine real (origem do lote → pátio da empresa).
 
     Fallback pra heurística de UF quando a cidade de origem não está no dataset
     de municípios (ex.: nome grafado de forma inusitada). Caso especial:
     mesma cidade do pátio → distância 0 → frete 0 (comprador busca o carro).
+
+    `categoria` prioriza o que o laudo já classificou; fallback pra inferência
+    por substring no nome do modelo (`_categoria_de_modelo`, alinhado com a
+    calibração de giro — uma fonte de verdade só).
     """
     from carros_sa.tools.geo import buscar_municipio, distancia_haversine_km
 
@@ -134,21 +142,13 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
         else:
             distancia_km = 700
 
-    # Categoria do veículo — usa OUTRO se não tiver laudo ainda
-    categoria = CategoriaVeiculo.OUTRO
-    try:
-        # Tenta inferir da marca/modelo (heurística simples)
-        modelo_lower = (lote.modelo or "").lower()
-        if any(k in modelo_lower for k in ("hilux", "s10", "saveiro", "strada", "ranger")):
-            categoria = CategoriaVeiculo.PICAPE
-        elif any(k in modelo_lower for k in ("compass", "hr-v", "tracker", "creta", "haval", "evoque")):
-            categoria = CategoriaVeiculo.SUV
-        elif any(k in modelo_lower for k in ("onix", "hb20", "gol", "fiesta", "polo", "ka ")):
-            categoria = CategoriaVeiculo.HATCH
-        elif any(k in modelo_lower for k in ("cruze", "corolla", "civic", "jetta")):
-            categoria = CategoriaVeiculo.SEDAN
-    except Exception:
-        pass
+    # Categoria: prioriza o que veio do laudo (mais confiável); senão infere do
+    # modelo usando a lista única compartilhada com `calibracao_giro` — antes
+    # havia uma lista pobre local (só 4 regras) que errava SUVs chineses
+    # (Tiggo, Kicks, T-Cross) e picapes menos comuns (Triton, Oroch).
+    if categoria is None:
+        from carros_sa.agents.calibracao_giro import _categoria_de_modelo
+        categoria = _categoria_de_modelo(lote.modelo or "")
 
     frete = empresa.frete_para(distancia_km, categoria)
 
@@ -349,6 +349,7 @@ def _upsert_lote(
         fim_em=lote_raw.fim_em,
         origem_cidade=lote_raw.origem_cidade,
         origem_uf=lote_raw.origem_uf,
+        origem_cep=lote_raw.origem_cep,
         raw_json=raw_json,
         scraped_at=datetime.utcnow(),
     )
@@ -625,8 +626,10 @@ async def _pipeline_lote(
         else:
             reforma = estimar_reforma(laudo, empresa)
 
-        # 7. Frete
-        frete = _calcular_frete(lote, empresa)
+        # 7. Frete — reusa categoria já resolvida pelo laudo/heurística (não
+        # re-infere com lista pobre local; `_calcular_frete` cai no
+        # `_categoria_de_modelo` compartilhado quando `categoria=None`).
+        frete = _calcular_frete(lote, empresa, categoria=categoria)
 
         # 8. Precificar
         avaliacao = precificar(lote_raw, laudo, mercado, reforma, frete, empresa)

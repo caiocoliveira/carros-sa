@@ -597,3 +597,59 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
     # preço-alvo sobe com f_km > 1
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
     assert "f_km=1.15" in av_com_ajuste.justificativa
+
+
+# =============================================================================
+# Clamp de segurança: preco_giro nunca ancora acima de FIPE+5%
+# =============================================================================
+
+def test_preco_giro_trava_em_fipe_x_105_quando_mediana_estoura(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """Mediana inflada (ex: similares da página incluem ULTIMA AVALIAÇÃO dos
+    vizinhos) não deve empurrar o preço-alvo pra cima da FIPE sem limite.
+
+    Cenário: FIPE=28000, mediana "suja" vindo do parser=40000. Sem o clamp,
+    preco_giro=40000 → preco_max ficaria > FIPE, algo que o operador já sinalizou
+    como bug-feeling ("lance máximo muito maior que FIPE não faz sentido").
+
+    Com o clamp, preco_giro fica em FIPE*1.05 = 29400.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    mercado_estourado = SinalMercado(
+        fipe=28_000,
+        webmotors_mediana=40_000,   # ~43% acima da FIPE — claramente ruidoso
+        webmotors_p25=38_000,
+        n_anuncios_competidores=5,
+        dias_giro_estimado=60,
+    )
+
+    av = precificar(
+        gol_2015_lote, gol_2015_laudo, mercado_estourado, gol_2015_reforma, frete, empresa,
+    )
+    teto = int(28_000 * 1.05)
+    assert av.preco_giro == teto
+    assert av.preco_giro_fipe == teto
+    # Cap vale também quando AA vem misturado
+    mercado_aa_alto = mercado_estourado.model_copy(update={"auto_avaliar_ref": 45_000})
+    av2 = precificar(
+        gol_2015_lote, gol_2015_laudo, mercado_aa_alto, gol_2015_reforma, frete, empresa,
+    )
+    assert av2.preco_giro_fipe == teto
+    assert av2.preco_giro_aa == teto
+    assert av2.preco_giro == teto
+
+
+def test_preco_giro_cap_nao_reduz_quando_mediana_está_abaixo_da_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """Cap só limita acima da FIPE — caso típico (mediana < FIPE) passa intacto."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    mercado = SinalMercado(
+        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        n_anuncios_competidores=80, dias_giro_estimado=25,
+    )
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado, gol_2015_reforma, frete, empresa)
+    assert av.preco_giro == 25_000  # mediana passou sem clamp

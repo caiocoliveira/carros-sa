@@ -100,6 +100,16 @@ Leitura obrigatória ao começar algo novo:
 
 Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor) viram entrada nessa pasta — e a próxima sessão já lê sem precisar redescobrir.
 
+## Lições aprendidas (atualizadas a cada sessão)
+
+- **Coerência dos valores — sempre simular antes de reportar.** Antes de declarar uma linha da planilha "ok", checar que `lance_max ≤ FIPE` (intuição do operador confirmada). Divergência grande → ou mediana de mercado está inflada por ruído, ou `f_km` saturou. Cap FIPE×1.05 em `precificador.preco_giro` cobre esses casos (2026-04-24).
+- **`similares_precos` da página do lote são LANCES, não varejo.** A seção "Talvez se interesse por" lista OUTROS LOTES em leilão com seus lances atuais — não preços retail. Mediana desses lances é sinal ruidoso pra âncora de venda; o fallback FIPE×0.97 costuma ser mais calibrado (user confirmou). Mantido por retrocompat + sinal de liquidez (`n_anuncios_competidores`), mas com clamp FIPE×1.05.
+- **`webmotors_km_mediana` é dead code no pipeline atual.** O scraper Webmotors existe mas não está ligado ao orquestrador — `avaliar_mercado` é chamado sem `webmotors_km_mediana`, então `fator_km=1.0` sempre. Ajuste por km do lote só começa a funcionar quando workstream B entrar no pipeline. Documentado no docstring do `precificador.py`.
+- **Heurística de categoria deve ter UMA fonte só.** `orquestrador._calcular_frete` tinha lista local pobre (4 regras) que errava SUVs chineses (Tiggo, Kicks, T-Cross) e picapes menos comuns (Triton, Oroch). Agora reutiliza `_categoria_de_modelo` de `calibracao_giro` + aceita `categoria=` quando o orquestrador já resolveu via laudo.
+- **Docstrings de precificação decaem rápido.** Fórmula real diverge da descrita no topo do `precificador.py` de 3 refactors atrás (header dizia `min(FIPE*0.95, webmotors_p25)`; código era `webmotors_mediana * f_km`). Ao tocar lógica de preço, reler e ajustar o header.
+- **Nomenclatura engana.** `preco_giro_fipe` NÃO é ancorado em FIPE — é ancorado na mediana de mercado (com cap FIPE×1.05). `preco_giro_aa` é o único genuinamente ancorado numa tabela externa (Tabela Auto Avaliar). Ao introduzir variável nova, casar nome e conteúdo ou a próxima sessão reinterpreta errado.
+- **Revisão completa exige simulação com dado real, não só leitura.** `data/scrapes/2026-04-14_uberlandia_listagem.json` + mocks FIPE plausíveis dão uma visão linha-a-linha em 30s via `precificar()` direto — mais informativo que ler 10 arquivos no peito. Gold de revisão: confirmar que `preco_max < FIPE`, `preco_giro` coerente com FIPE, categoria do frete correta pra cada marca/modelo.
+
 ## Red flags
 
 - **NÃO** iniciar scraping agressivo de Webmotors (ou outro) sem discutir estratégia anti-bot — pode queimar IP.

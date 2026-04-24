@@ -171,6 +171,28 @@ class TestCalcularFrete:
         assert frete_sp.distancia_km < frete_am.distancia_km
         assert frete_sp.frete_estimado <= frete_am.frete_estimado
 
+    def test_frete_suv_chines_usa_categoria_correta(self):
+        """Regressão: Tiggo/Kicks/T-Cross/Haval são SUV; a lista local antiga
+        só reconhecia "compass/hr-v/tracker/creta/haval/evoque". Agora o frete
+        reutiliza `_categoria_de_modelo` do módulo de calibração (lista rica).
+        """
+        empresa = _empresa()
+        lote = _lote(uf="GO")  # força Goiânia/GO → distância > 0, frete por tabela
+        lote.origem_cidade = "Goiânia"
+        lote.modelo = "Tiggo 2.0 16V Gasolina 4P Automatico"
+        frete = _calcular_frete(lote, empresa)
+        assert frete.categoria_veiculo == CategoriaVeiculo.SUV
+
+    def test_frete_respeita_categoria_externa_quando_passada(self):
+        """Quando o orquestrador já resolveu a categoria (via laudo), `_calcular_frete`
+        não re-infere — usa a categoria passada direto."""
+        empresa = _empresa()
+        lote = _lote(uf="GO")
+        lote.origem_cidade = "Goiânia"
+        lote.modelo = "Modelo completamente desconhecido XYZ"
+        frete = _calcular_frete(lote, empresa, categoria=CategoriaVeiculo.PICAPE)
+        assert frete.categoria_veiculo == CategoriaVeiculo.PICAPE
+
 
 # ---------------------------------------------------------------------------
 # Testes de _pipeline_lote

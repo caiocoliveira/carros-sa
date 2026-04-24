@@ -1,21 +1,33 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
+Fórmula real (2026-04-24):
+    ancora_venda     = webmotors_mediana * f_km           # mediana ≈ FIPE*0.97 no fallback
+    preco_giro_fipe  = min(ancora_venda, FIPE * 1.05)     # hard cap acima da FIPE (+5%)
+    preco_giro_aa    = min(auto_avaliar_ref * f_km, ancora_venda, FIPE * 1.05)
+                       # só quando auto_avaliar_ref vem da ULTIMA AVALIAÇÃO
     preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
     margem_min       = margem_base * fator_risco * fator_liquidez
     preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
 
+Âncora de venda vem de `webmotors_mediana`:
+- Quando `similares_precos` presente na página do lote, é a mediana dos LANCES
+  ATUAIS de lotes similares na própria AA — sinal ruidoso de revenda, pode ser
+  tanto varejo-ish quanto piso de leilão. Por isso aplicamos o clamp FIPE*1.05.
+- Quando ausente, cai pra FIPE*0.97 (usuário confirmou que vende próximo da FIPE).
+
+Sobre o cap FIPE*1.05:
+- Responde à intuição: lance-máximo muito acima da FIPE é sinal de bug (mediana
+  inflacionada, similares com ULTIMA AVALIAÇÃO misturada, ou f_km saturando pra
+  cima num lote com km muito baixa). Limite de +5% dá folga pra carros de baixa
+  km legítimos sem liberar absurdos.
+
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
-Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
-- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
-  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
-  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
-  de giro consolidado.
+Limitação conhecida: `webmotors_km_mediana` nunca é preenchido no pipeline atual
+(Webmotors scraper existe em `carros_sa/tools/webmotors.py` mas não está ligado
+no orquestrador). Então `f_km = 1.0` na prática — o ajuste por km do lote é
+dead code até workstream B entrar no pipeline.
 """
 
 from __future__ import annotations
@@ -109,12 +121,21 @@ def precificar(
     #    fator_km calibra a âncora pela km do lote vs km mediana do mercado:
     #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
-    preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
+    # Cap de segurança: preço-alvo NUNCA ancora acima de FIPE+5%. Cobre três
+    # casos de ruído em `webmotors_mediana`:
+    #   1. Similares da página contêm ULTIMA AVALIAÇÃO de lotes vizinhos → média
+    #      inflada acima do retail.
+    #   2. f_km saturando em 1.15 pra lote com km muito baixa em mercado ruidoso.
+    #   3. Fixture antiga com mediana maior que FIPE por erro de coleta.
+    # Folga de +5% permite carros de baixa km legítimos sem liberar absurdos.
+    teto_giro = int(mercado.fipe * 1.05)
+    preco_giro_fipe = min(int(round(mercado.webmotors_mediana * f_km)), teto_giro)
     preco_giro_aa: Optional[int] = None
     if mercado.auto_avaliar_ref is not None:
-        preco_giro_aa = int(round(
-            min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km
-        ))
+        preco_giro_aa = min(
+            int(round(min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km)),
+            teto_giro,
+        )
     # Consolidado = o mais conservador entre os dois (mais baixo preço de giro
     # => preço-alvo de lance também mais baixo => decisão mais cautelosa).
     preco_giro = min(preco_giro_fipe, preco_giro_aa) if preco_giro_aa is not None else preco_giro_fipe

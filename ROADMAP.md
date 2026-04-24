@@ -404,6 +404,23 @@ Já registrado:
   - `HistoricoStat` é cached por export — múltiplos exports na mesma sessão não veem Arrematados novos sem re-chamar `carregar_historico_stat`. Aceitável (export roda 1x por run).
   - Coluna descritiva — NÃO afeta ranking, NÃO filtra. Lotes com laudo pendente mostram Tese "—" pra evitar sinal enganoso (lance_max está "—" nesses casos).
 
+### U — Audit de completude de laudo (zumbi-guard na planilha) ✅
+- **Branch:** `claude/great-turing-VNHxV`
+- **Arquivos:**
+  - [`carros_sa/tools/auditoria_laudo.py`](carros_sa/tools/auditoria_laudo.py) — NOVO. `StatusCompletude` (OK, LAUDO_PENDENTE, SEM_PDF_LOCAL, SEM_LINK), `classificar_lote`, `auditar_completude(session, pdf_dir, empresa_id)`, `reextrair_pendentes_com_pdf_local(...)`.
+  - [`scripts/auditar_laudos.py`](scripts/auditar_laudos.py) — CLI (`--fix`, `--detalhes`, `--empresa`). Exit 1 se houver zumbi.
+  - [`tests/test_auditoria_laudo.py`](tests/test_auditoria_laudo.py) — 20 testes: classificação (8 casos), agregação (7), auto-fix (3), hygiene DB real (1 skip sem DB), invariantes de impl (2).
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — cron agora roda (4) `auditar_laudos --fix` após (3) retry. Exit code != 0 do audit vai pro log — rastro pro operador saber que algo escapou.
+  - [`Makefile`](Makefile) — `make auditar-laudos` + `make auditar-laudos-fix`.
+- **Motivação:** Operador reportou que lotes na planilha apareciam como "⚠ LAUDO NÃO ANALISADO" (numéricos suprimidos) mesmo após `make triagem` e o retry do cron. Sem invariante, esses lotes acumulavam silenciosamente — a regressão "algum carro sem laudo" não era capturável pelo `pytest` nem pelo audit de colunas do workstream Q (que cobre ranges de valor, não presença de laudo).
+- **Como funciona:** Audit classifica cada lote ATIVO com `AvaliacaoLote` (= linha na planilha) nas 3 dimensões que o operador usa: link válido em `raw_json.detalhe.laudo_pdf_url` (passa em `is_laudo_pdf_url`), PDF em `data/laudos_pdfs/<id>.pdf` (≥5KB), `LaudoCache.confidence >= 0.6`. Qualquer dimensão ausente = zumbi, com razão específica. `--fix` re-roda o extrator **offline** (sem Playwright) em lotes `LAUDO_PENDENTE` que têm PDF local — cobre o caso "download funcionou, mas Gemini 503 na hora → placeholder persistido". `SEM_LINK` e `SEM_PDF_LOCAL` pedem re-scraping (Playwright+cookies) e são reportados ao operador com o comando exato a rodar.
+- **Invariante:** `TestHygieneDBReal::test_db_atual_nao_tem_zumbi` roda contra `carros_sa.db` quando existe e falha o `make test` se algum zumbi sobrou, com amostra por status + comando pra fixar. Skippa gracefully em CI. Mesmo padrão do workstream R.1 (`test_decoy_laudo_guard`).
+- **Cobertura:** 20 testes novos — classificação de cada transição (OK, SEM_LINK, SEM_PDF_LOCAL com PDF truncado, LAUDO_PENDENTE com/sem LaudoCache, limite exato 0.6), filtros de ativo (encerrado por timer, badge ARREMATADO, early_exit sem AvaliacaoLote), multi-tenancy, determinismo de ordenação, auto-fix em dry-run + sem pendentes + sem PDF local, paridade de emoji entre enum e CLI. `make test` agora roda 346 (antes 326).
+- **Limitações conhecidas:**
+  - Auto-fix offline só cobre `LAUDO_PENDENTE` (caso mais acionável). `SEM_PDF_LOCAL` poderia baixar via httpx + cookies salvos, mas deixamos pro retry do cron pra manter o audit como leitura pura.
+  - Audit não re-precifica após fix — o ROI/reforma podem ficar stale até o próximo `triagem_diaria.py`. Aceitável porque o objetivo é tirar o lote do estado "LAUDO NÃO ANALISADO" na planilha; o refino numérico vem no próximo ciclo.
+  - Não protege lotes com `laudo_pdf_url` válida mas apontando pro PDF de OUTRO lote (troca no scraper). Pra isso precisaria de um hash/content check — fora do escopo.
+
 ---
 
 ## Marcos (do plano arquitetural original)

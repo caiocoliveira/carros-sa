@@ -573,12 +573,14 @@ def test_ajuste_km_lote_com_km_alta_reduz_preco_alvo(
 def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
     gol_2015_lote, gol_2015_laudo, gol_2015_reforma
 ):
-    """Lote com km abaixo da mediana → f_km > 1 → preço-alvo sobe."""
+    """Lote com km abaixo da mediana → f_km > 1 → preço-alvo sobe (até o cap FIPE)."""
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
 
+    # FIPE folgada (32k) pra que o ganho de f_km=1.15 sobre mediana=25k (=28_750)
+    # NÃO seja capado. Cap-FIPE é coberto em test_preco_giro_capado_em_fipe_*.
     mercado_sem_km = SinalMercado(
-        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        fipe=32_000, webmotors_mediana=25_000, webmotors_p25=24_000,
         n_anuncios_competidores=80, dias_giro_estimado=25,
     )
     # km=40k, mediana=80k → delta=+0.5 → fator=1.15 (cap)
@@ -592,8 +594,104 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
         lote_km_baixa, gol_2015_laudo, mercado_com_km, gol_2015_reforma, frete, empresa,
     )
 
-    # preco_giro: 25000 * 1.15 = 28_750
+    # preco_giro: 25000 * 1.15 = 28_750 (FIPE 32k não capa)
     assert av_com_ajuste.preco_giro == 28_750
     # preço-alvo sobe com f_km > 1
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
     assert "f_km=1.15" in av_com_ajuste.justificativa
+
+
+# =============================================================================
+# Cap FIPE — preço de giro nunca excede o varejo de referência
+# =============================================================================
+
+def test_preco_giro_capado_em_fipe_quando_km_baixa_extrapola(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """f_km=1.15 sobre mediana=25k = 28_750, mas FIPE=28k → cap em 28k.
+
+    Sem o cap, o preco_max ficaria ancorado em 28_750 (acima da FIPE) — modelo
+    de negócio do operador é vender PRÓXIMO da FIPE, então pagar como se fosse
+    revender acima dela é incoerente.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    mercado = SinalMercado(
+        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        n_anuncios_competidores=80, dias_giro_estimado=25,
+        webmotors_km_mediana=80_000,
+    )
+    lote_km_baixa = gol_2015_lote.model_copy(update={"km": 40_000})
+
+    av = precificar(lote_km_baixa, gol_2015_laudo, mercado, gol_2015_reforma, frete, empresa)
+
+    # 25000 × 1.15 = 28_750 → capado em FIPE 28_000
+    assert av.preco_giro == 28_000
+    assert av.preco_giro_fipe == 28_000
+    # preco_max não pode passar da FIPE — sanity check absoluto do modelo de negócio.
+    assert av.preco_max <= mercado.fipe
+
+
+def test_preco_giro_capado_quando_similares_acima_de_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """Similares no Auto Avaliar com mediana acima da FIPE (pool contaminado).
+
+    Pode acontecer quando o pool de similares mistura veículos premium ou
+    versões diferentes do mesmo modelo. Sem cap, preco_max sobe acima da FIPE.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    # FIPE 28k, mas similares com mediana 35k (outliers premium)
+    mercado = SinalMercado(
+        fipe=28_000, webmotors_mediana=35_000, webmotors_p25=30_000,
+        n_anuncios_competidores=10, dias_giro_estimado=25,
+    )
+
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado, gol_2015_reforma, frete, empresa)
+
+    # Cap absoluto em FIPE
+    assert av.preco_giro == 28_000
+    assert av.preco_giro_fipe == 28_000
+    assert av.preco_max <= mercado.fipe
+
+
+def test_preco_max_nunca_passa_de_fipe_em_cenarios_realistas(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """Sanity check abrangente: pra QUALQUER combinação de mediana/AA/km
+    o preco_max deve ser ≤ FIPE.
+
+    A intuição do operador: o teto pago em leilão atacado nunca pode passar
+    do valor de venda (FIPE), porque entre o teto e a venda existe ainda
+    reforma + frete + taxas + custo op + margem mínima — todos positivos.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    cenarios = [
+        # (fipe, mediana, p25, aa_ref, km_lote, km_mediana_mercado)
+        (28_000, 25_000, 24_000, None,   95_000, None),       # baseline
+        (28_000, 25_000, 24_000, 22_000, 95_000, None),       # com AA
+        (28_000, 35_000, 30_000, None,   95_000, None),       # mediana > FIPE
+        (28_000, 25_000, 24_000, None,   40_000, 80_000),     # km baixa
+        (28_000, 25_000, 24_000, None,  150_000, 50_000),     # km alta
+        (28_000, 35_000, 30_000, 30_000, 40_000, 80_000),     # tudo combinado
+    ]
+
+    for fipe, mediana, p25, aa, km_lote, km_med in cenarios:
+        mercado = SinalMercado(
+            fipe=fipe, webmotors_mediana=mediana, webmotors_p25=p25,
+            n_anuncios_competidores=10, dias_giro_estimado=25,
+            auto_avaliar_ref=aa, webmotors_km_mediana=km_med,
+        )
+        lote = gol_2015_lote.model_copy(update={"km": km_lote})
+        av = precificar(lote, gol_2015_laudo, mercado, gol_2015_reforma, frete, empresa)
+        assert av.preco_max <= fipe, (
+            f"preco_max={av.preco_max} > FIPE={fipe} em cenário {cenarios.index((fipe, mediana, p25, aa, km_lote, km_med))}"
+        )
+        assert av.preco_giro <= fipe, (
+            f"preco_giro={av.preco_giro} > FIPE={fipe} em cenário {cenarios.index((fipe, mediana, p25, aa, km_lote, km_med))}"
+        )

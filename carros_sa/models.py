@@ -176,7 +176,7 @@ class Avaliacao(BaseModel):
     preco_giro: int                       # preço de venda de referência consolidado (menor entre FIPE e AA)
     # Decomposição do preço de giro por fonte — permite à triagem mostrar
     # ambas as âncoras (FIPE e Tabela Auto Avaliar) lado a lado.
-    preco_giro_fipe: int                  # ancorado em FIPE descontado ∩ webmotors p25
+    preco_giro_fipe: int                  # ancorado em mediana de mercado, capado pela FIPE crua
     preco_giro_aa: Optional[int] = None   # ancorado em Tabela Auto Avaliar; None se sem dado
     # Âncoras brutas — persistidas pra que o relatório mostre FIPE puro e a mediana
     # Webmotors ao lado do preço de giro, facilitando auditoria humana.
@@ -308,7 +308,7 @@ class AvaliacaoLote(SQLModel, table=True):
     reforma_estimada: int
     taxas_leilao: int
     preco_giro: int                                # consolidado (menor entre FIPE e AA)
-    preco_giro_fipe: int                           # decomposto — ancorado em FIPE
+    preco_giro_fipe: int                           # decomposto — mediana de mercado capada pela FIPE crua
     preco_giro_aa: Optional[int] = None            # decomposto — ancorado em Tabela Auto Avaliar
     # Âncoras brutas pro relatório — FIPE puro e mediana Webmotors no momento da avaliação.
     # Podem ficar NULL em registros antigos (pré-workstream K).

@@ -113,3 +113,22 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.
 - Listagem real de Uberlândia/MG: `data/scrapes/2026-04-14_uberlandia_listagem.json` (10 lotes variados).
 - Fixture de resposta Gemini: `tests/fixtures/21854782_visual_gemini.json`.
+
+## Heurística de revisão — sanity da fórmula de preço
+
+Antes de aceitar como "pronto" qualquer mudança no `precificador` ou no `avaliador_mercado`, validar invariantes do modelo de negócio (operador vende **próximo da FIPE**, atacado→reforma→varejo):
+
+1. `preco_giro <= FIPE` SEMPRE (sem exceções). Acima da FIPE significa esperar vender no varejo acima da referência — incoerente com o histórico do operador.
+2. `preco_max <= FIPE` SEMPRE. O teto pago em leilão atacado precisa caber abaixo da venda menos reforma+frete+taxas+custo_op+margem_min — e todos esses são positivos.
+3. `preco_max > preco_alvo` (alvo respeita margem calibrada por risco/liquidez; max só respeita margem mínima absoluta).
+4. Variável que se chama `preco_giro_fipe` não tem FIPE crua na fórmula — usa `webmotors_mediana × f_km` capado por FIPE. **Naming ficou por compatibilidade de schema (coluna em produção)**, não por significado literal. Se for renomear, planejar migração de DB.
+
+Cenários que historicamente quebraram esses invariantes (testes em `tests/test_precificador.py::test_preco_giro_capado_*` cobrem):
+- Pool de similares Auto Avaliar contaminado (outliers premium puxando mediana acima da FIPE).
+- Lote com km muito abaixo da mediana de mercado (`f_km=1.15`) sobre FIPE folgada.
+- Combinação dos dois.
+
+## Red flags adicionais (aprendizado 2026-04-25)
+
+- **NÃO** confiar em variáveis cujo nome menciona uma fonte de dado se a fórmula real não usa essa fonte. Sempre cruzar nome com implementação ANTES de raciocinar sobre comportamento. Caso real: `preco_giro_fipe` usava `webmotors_mediana`, induzindo todo o time a achar que tinha cap FIPE quando não tinha.
+- **NÃO** assumir que clamps em `ajuste_km` cuidam de invariantes do modelo de negócio. `f_km` clampa em `[0.75, 1.15]`, mas isso NÃO impede que a multiplicação resulte em valores acima da FIPE — o cap precisa ser explícito no destino, não no fator.

@@ -1,21 +1,31 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
-    preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
+Fórmula real (após cap FIPE adicionado em 2026-04-25):
+    preco_giro_fipe  = min(webmotors_mediana * f_km, FIPE)        # cap absoluto na FIPE
+    preco_giro_aa    = min(auto_avaliar_ref, webmotors_mediana) * f_km, capado em FIPE
+    preco_giro       = min(preco_giro_fipe, preco_giro_aa)        # consolidado, mais conservador
     margem_min       = margem_base * fator_risco * fator_liquidez
     preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
-Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
-- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
-  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
-  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
-  de giro consolidado.
+Sobre as âncoras:
+- `webmotors_mediana` é a expectativa de revenda. Quando há similares no
+  Auto Avaliar, é a mediana real; senão, fallback FIPE×0.97 (operador vende
+  próximo da FIPE).
+- FIPE atua como **teto absoluto** do preço-de-giro: nunca compramos esperando
+  vender acima do varejo. Sem esse cap, similares contaminados ou f_km>1
+  inflacionavam preco_max acima da FIPE — incoerente com o modelo de negócio
+  (atacado→reforma→varejo).
+- Tabela Auto Avaliar (`auto_avaliar_ref`) só existe quando o lote (ou histórico
+  do mesmo modelo) trouxe "ULTIMA AVALIAÇÃO". Reflete atacado real e em geral
+  fica abaixo da FIPE — daí o min final.
+
+Nota sobre naming: o campo `preco_giro_fipe` foi mantido por compatibilidade
+de schema (coluna `avaliacao_lote.preco_giro_fipe` em produção). Conceitualmente
+é "preço-de-giro ancorado pela mediana de mercado, com FIPE como teto" — não a
+FIPE crua. Renomear quebraria migração; preferimos deixar comentado.
 """
 
 from __future__ import annotations
@@ -108,13 +118,22 @@ def precificar(
     #    Auto Avaliar ref: preço de referência da própria plataforma quando disponível.
     #    fator_km calibra a âncora pela km do lote vs km mediana do mercado:
     #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
+    #
+    #    CAP FIPE (2026-04-25): preco_giro nunca pode exceder a FIPE crua.
+    #    Caso contrário, similares contaminados (pool com outliers altos) ou
+    #    f_km>1 puxam a expectativa de venda acima do varejo de referência —
+    #    incoerente com o modelo de negócio (atacado→reforma→varejo) e produz
+    #    preco_max acima da FIPE, que não faz sentido em leilão online.
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
-    preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
+    preco_giro_fipe = min(int(round(mercado.webmotors_mediana * f_km)), mercado.fipe)
     preco_giro_aa: Optional[int] = None
     if mercado.auto_avaliar_ref is not None:
-        preco_giro_aa = int(round(
-            min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km
-        ))
+        preco_giro_aa = min(
+            int(round(
+                min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km
+            )),
+            mercado.fipe,
+        )
     # Consolidado = o mais conservador entre os dois (mais baixo preço de giro
     # => preço-alvo de lance também mais baixo => decisão mais cautelosa).
     preco_giro = min(preco_giro_fipe, preco_giro_aa) if preco_giro_aa is not None else preco_giro_fipe
@@ -182,9 +201,16 @@ def precificar(
             f" f_km={f_km:.2f} (km={lote.km}, "
             f"km_mercado={mercado.webmotors_km_mediana})"
         )
+    # Sinaliza quando o cap FIPE capou o preço-de-giro (mediana×f_km > FIPE
+    # ou AA_ref > FIPE). Útil pro operador entender por que o teto ficou
+    # justo num modelo que tinha similares contaminados.
+    cap_txt = ""
+    pre_cap_fipe = int(round(mercado.webmotors_mediana * f_km))
+    if pre_cap_fipe > mercado.fipe:
+        cap_txt = f" [cap FIPE: mediana×f_km={pre_cap_fipe} > FIPE={mercado.fipe}]"
     justificativa = (
         f"preco_giro=R${preco_giro} (fipe={preco_giro_fipe}"
-        f"{f', aa={preco_giro_aa}' if preco_giro_aa is not None else ''}){km_txt} "
+        f"{f', aa={preco_giro_aa}' if preco_giro_aa is not None else ''}){km_txt}{cap_txt} "
         f"(FIPE={mercado.fipe}{aa_txt}, WM_p25={mercado.webmotors_p25}) "
         f"reforma=R${reforma.custo_total} frete=R${frete_incluso} "
         f"taxas≈R${taxas_leilao_max} ({taxa_desc}) op=R${custo_op} "

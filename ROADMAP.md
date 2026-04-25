@@ -380,6 +380,21 @@ Já registrado:
   - Lotes sem `origem_cidade`/`origem_uf` populados não entram na contagem (o scraper costuma popular, mas snapshots antigos podem ter NULL).
   - `lru_cache(32)` em `carregar_empresa` significa que mudanças no YAML em runtime do mesmo processo só refletem após reload — não impacta operação batch (script encerra entre runs).
 
+### U — Fix coluna Laudo (PDF) "—" em massa + grade fantasma na planilha ✅
+- **Branch:** `claude/fix-report-download-analysis-3WSXM`
+- **Sintoma:** operador apontou em 25/abr planilha com 19 lotes "✓ Viável" mas coluna `Laudo (PDF)` em Z toda "—". Como `laudo_analisado=True` exige `LaudoCache.confidence ≥ 0.6` (PDF baixado e extraído com sucesso), a URL deveria estar em `detalhe.laudo_pdf_url` — mas chegava como `None` no exporter.
+- **Causa raiz #1 (URL sumindo):** `scripts/limpar_decoys_laudo.py` rodava entre triagem e retry e anulava qualquer URL que não passasse em `is_laudo_pdf_url()` — incluindo URLs que JÁ tinham gerado `LaudoCache.confidence ≥ 0.6`. A allowlist (`storage.googleapis.com/doc-b2b`, `cdn-aav.autoavaliar.com.br`, `*.pdf+laudo`) é heurística; quando o AA serve laudo de host fora da lista, o gate rejeitava mesmo o PDF tendo sido baixado e validado por `_pdf_eh_laudo_valido()`. Resultado: planilha mostrava "—" em todos esses lotes e o retry ficava em loop tentando re-extrair.
+- **Causa raiz #2 (grade fantasma):** slim-down do HEADER (commit `51ccc59`, 27→15 colunas) deixou as colunas P→AA órfãs em abas criadas em versões anteriores. `ws.clear()` esvazia o range ativo mas não derruba colunas no servidor — então rótulos antigos ("Reforma Estimada", "Racional Reforma", "Frete (R$)", "Justificativa", "URL", "Laudo (PDF)") congelavam em Z e mascaravam o "Laudo" novo em O.
+- **Arquivos tocados:**
+  - [`scripts/limpar_decoys_laudo.py`](scripts/limpar_decoys_laudo.py) — `limpar_decoys()` agora preserva URL+cache quando `LaudoCache.confidence ≥ 0.6` (evidência empírica vence allowlist). Novo contador `preservados_por_cache` no `ResultadoLimpeza`.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `_write_sheet` chama `ws.resize(cols=len(HEADER))` antes de `clear()+update()`, derrubando no servidor qualquer coluna além do HEADER atual. Fail-soft em versões de gspread que reclamem de no-op.
+  - [`tests/test_decoy_laudo_guard.py`](tests/test_decoy_laudo_guard.py) — 2 testes novos: `test_url_fora_da_allowlist_com_cache_forte_e_preservada` (cobre o sintoma de produção) + `test_url_fora_da_allowlist_com_cache_fraco_e_limpa` (cache fraco continua sendo limpo normalmente).
+  - [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — `test_resize_encolhe_grade_pra_len_header` valida ordem `resize → clear → update`.
+- **Cobertura:** 329/329 testes verdes localmente (3 novos). Hygiene check do DB real continua falhando em decoys legítimos.
+- **Limitações conhecidas:**
+  - O fix do limpar_decoys é retroativo só pra lotes em que o cache forte sobreviveu até hoje — quem já teve cache derrubado em ciclos anteriores precisa de 1 rodada de retry pra recriar.
+  - O resize no exporter requer 1 export bem-sucedido pra limpar a aba; até lá, operador pode apagar manualmente as colunas P→AA na UI sem perda de dado real.
+
 ### T — Coluna "Tese" na planilha (sinalização baseada em histórico) ✅
 - **Branch:** `claude/adoring-black-d891b8`
 - **Arquivos:**

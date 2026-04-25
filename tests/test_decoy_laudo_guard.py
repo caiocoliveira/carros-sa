@@ -182,7 +182,8 @@ class TestLimparDecoys:
     def test_url_nao_mapeada_tambem_e_limpa(self):
         """Qualquer URL que não passe em `is_laudo_pdf_url()` vira lixo — não
         só a família 'Relatorio-de-Transparencia'. Protege contra decoys
-        novos que o scraper ainda não conheça."""
+        novos que o scraper ainda não conheça. Sem LaudoCache forte, não há
+        evidência empírica de que a URL seja boa."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L_LIXO", "https://exemplo.com/arquivo-qualquer.pdf"))
@@ -190,6 +191,52 @@ class TestLimparDecoys:
 
             res = limpar_decoys(session)
             assert res.decoys_encontrados == 1
+
+    def test_url_fora_da_allowlist_com_cache_forte_e_preservada(self):
+        """Evidência empírica vence allowlist: URL que falha `is_laudo_pdf_url`
+        mas tem `LaudoCache.confidence ≥ 0.6` é preservada — `extrair_laudo`
+        já comprovou que aquela URL apontou pra laudo real. Anular agora
+        derrubaria o link "Ver laudo" da planilha sem ganho real e poderia
+        entrar em loop com o retry. Era exatamente o sintoma observado:
+        coluna Laudo (PDF) com '—' em massa mesmo com lotes '✓ Viável'."""
+        engine = _engine_mem()
+        url_host_novo = "https://exemplo.com/arquivo-qualquer.pdf"
+        assert is_laudo_pdf_url(url_host_novo) is False  # sanity
+
+        with Session(engine) as session:
+            session.add(_lote("L_HOST_NOVO", url_host_novo))
+            session.add(_laudo_cache("L_HOST_NOVO", confidence=0.7))
+            session.commit()
+
+            res = limpar_decoys(session)
+
+            assert res.decoys_encontrados == 0
+            assert res.decoys_limpos == 0
+            assert res.laudos_derrubados == 0
+            assert res.preservados_por_cache == 1
+
+            lote = session.get(Lote, "L_HOST_NOVO")
+            assert lote.raw_json["detalhe"]["laudo_pdf_url"] == url_host_novo
+            laudo = session.get(LaudoCache, "L_HOST_NOVO")
+            assert laudo is not None
+            assert laudo.confidence == 0.7
+
+    def test_url_fora_da_allowlist_com_cache_fraco_e_limpa(self):
+        """Cache com confidence<0.6 (fallback `_laudo_sem_pdf`) NÃO conta como
+        evidência empírica — significa que a extração não viu o PDF. URL
+        deve ser limpa normalmente."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L_FRACO", "https://exemplo.com/qualquer.pdf"))
+            session.add(_laudo_cache("L_FRACO", confidence=0.5))
+            session.commit()
+
+            res = limpar_decoys(session)
+
+            assert res.decoys_encontrados == 1
+            assert res.decoys_limpos == 1
+            assert res.laudos_derrubados == 1
+            assert res.preservados_por_cache == 0
 
 
 class TestHygieneDBReal:

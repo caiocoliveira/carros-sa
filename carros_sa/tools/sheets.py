@@ -325,6 +325,24 @@ class SheetsExporter:
                 laudo_cell,
             ])
 
+        # Encolhe a grade pra exatamente len(HEADER) colunas ANTES do clear.
+        # Sem isso, abas criadas em versões com HEADER mais largo (ex.: 27 cols
+        # com "Laudo (PDF)" em Z, "Coletado em" em AA) ficam com colunas
+        # órfãs depois do slim-down: `ws.clear()` esvazia o range ativo mas
+        # não derruba colunas, e `ws.update()` só escreve até `len(HEADER)`,
+        # então P→AA congela no estado antigo. Resultado observado pelo
+        # operador: "Laudo (PDF)" zumbi em Z mostrando "—" pra todo mundo
+        # mesmo com lotes "✓ Viável" e Laudo válido em O. Resize derruba
+        # o lixo no servidor — gspread aceita encolher pra cols<atual.
+        n_rows = max(len(sheet_rows) + 50, 100)  # folga pra crescer sem reflow
+        try:
+            ws.resize(rows=n_rows, cols=len(HEADER))
+        except Exception:
+            # gspread pode falhar se a aba já estiver em len(HEADER) cols
+            # (resize trivial vira no-op em algumas versões). Fail-soft —
+            # o clear+update abaixo ainda escreve os dados corretos.
+            pass
+
         ws.clear()
         self._reaplicar_formato_numerico(ws)
         ws.update(sheet_rows, value_input_option="USER_ENTERED")

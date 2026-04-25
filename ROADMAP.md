@@ -236,6 +236,19 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Guard do DB real faz `dry_run` mas não auto-corrige durante o `pytest` — exige intervenção (`make limpar-decoys`). Intencional: teste não deve mutar estado de produção silenciosamente.
   - Se um novo padrão de decoy aparecer no Auto Avaliar e o `is_laudo_pdf_url()` aceitar incorretamente, ambos scraper E limpeza deixam passar. Defesa secundária fica com `_pdf_eh_laudo_valido()` no orquestrador (inspeciona o PDF baixado).
 
+### T — Guardrail "todo lote tem laudo ou motivo claro" ✅
+- **Branch:** `claude/great-turing-6hch5`
+- **Arquivos:**
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_pipeline_lote` agora classifica todo lote em 5 motivos (`sem_laudo_declarado`, `url_nao_capturada`, `download_falhou`, `pdf_invalido`, `extracao_falhou`) ou `OK`, persistindo `motivo_sem_laudo` + `pdf_path_local` em `raw_json["detalhe"]` via novo helper `_registrar_estado_laudo()`.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — coluna Laudo agora tem 3 estados visuais: `=HYPERLINK("Ver laudo")`, `SEM LAUDO` (final), `⏳ <motivo>` (acionável). `_render_laudo_cell()` extraído pro fluxo de render. Glossário atualizado.
+  - [`scripts/auditar_laudos.py`](scripts/auditar_laudos.py) — script novo. Lê DB, classifica cada lote ativo, imprime tabela rich + exemplos, **exit code 1 quando há pendentes acionáveis**. `make auditar-laudos [EMPRESA=<id>]`.
+  - [`scripts/triagem_diaria.py`](scripts/triagem_diaria.py) — chama `_auditar_laudos_pos_run` no fim do export pra mostrar resumo de pendências (não falha o triagem; cron tem o exit-code separado via `auditar_laudos.py`).
+  - [`Makefile`](Makefile) — alvo `auditar-laudos`.
+- **Motivação:** "Garantir que todos carros na lista tem laudo baixado, revisado e link na planilha." Antes, lotes sem PDF caíam num `—` genérico na coluna Laudo — não dava pra distinguir "Auto Avaliar disse SEM LAUDO" (legítimo) de "modal lazy não foi clicado" (bug retryável) de "429 no download" (bug retryável) de "decoy filtrado" (bug retryável). Operador só sabia que faltava algo, sem saber se valia retry. ROADMAP D já mencionava "Gol e Cruze tinham `pdf=null` no DOM — link em modal lazy" mas a planilha escondia esse fato.
+- **Como funciona:** orquestrador sempre escreve `motivo_sem_laudo` (None quando OK). Sheets renderiza rótulo claro. Auditoria pós-run conta cada motivo e falha quando há acionáveis. Cron pode ligar via `make auditar-laudos` pra alertar. Lotes legados (raw_json sem motivo) viram `legado` no audit — reprocessar resolve.
+- **Cobertura:** **16 testes novos** em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) e [`tests/test_orquestrador.py`](tests/test_orquestrador.py) — render dos 5 estados na planilha (incluindo URL ganha quando coexiste com motivo), `_registrar_estado_laudo` preserva campos pré-existentes, `classificar_lote` cobre OK/sem_laudo/pendente/extracao_falhou/legado. Suite: **342/342 verde** (era 326).
+- **Limitações:** retry físico continua sendo `make triagem` ou `scripts/reprocessar_laudos.py` — o guardrail é diagnóstico, não auto-resolve. Lotes em `legado` (ingeridos antes do guardrail) só ganham motivo após próximo `_pipeline_lote`.
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

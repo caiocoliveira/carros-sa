@@ -362,6 +362,37 @@ def _upsert_lote(
     return row
 
 
+_MOTIVOS_SEM_LAUDO_VALIDOS = {
+    "sem_laudo_declarado",   # Auto Avaliar marca "SEM LAUDO" — legítimo, sem retry
+    "url_nao_capturada",     # modal lazy não revelou URL — retry resolve
+    "download_falhou",       # 429/timeout no httpx — retry resolve
+    "pdf_invalido",          # baixou mas é decoy (Transparência Salarial etc) — retry pode resolver
+    "extracao_falhou",       # PDF ok mas extrator falhou — re-run com vision client diferente
+}
+
+
+def _registrar_estado_laudo(
+    *,
+    lote: Lote,
+    session: Session,
+    pdf_path_local: Optional[Path],
+    motivo_sem_laudo: Optional[str],
+) -> None:
+    """Persiste pdf_path_local e motivo_sem_laudo em raw_json["detalhe"].
+
+    Único ponto onde esses dois campos são gravados — a planilha e a auditoria
+    só leem daqui pra renderizar/classificar. Quando há PDF válido, ambos os
+    campos seguem com pdf_path_local=str(path) e motivo_sem_laudo=None.
+    """
+    raw = dict(lote.raw_json or {})
+    detalhe = dict(raw.get("detalhe") or {})
+    detalhe["pdf_path_local"] = str(pdf_path_local) if pdf_path_local else None
+    detalhe["motivo_sem_laudo"] = motivo_sem_laudo
+    raw["detalhe"] = detalhe
+    lote.raw_json = raw
+    session.add(lote)
+
+
 def _upsert_laudo_cache(lote_id: str, laudo: LaudoEstruturado, session: Session, modelo_llm: str = "gemini-flash") -> None:
     """Persiste LaudoCache (global, por lote_id)."""
     existente = session.get(LaudoCache, lote_id)
@@ -523,8 +554,15 @@ async def _pipeline_lote(
         # assim reprocessar_laudos.py pode re-rodar extração sem baixar de novo,
         # e dá pra auditar manualmente o PDF depois. PDF é pequeno (~300KB) e o
         # volume total (~600 lotes/mês × 300KB = 180MB/mês) é gerenciável.
+        #
+        # Cada caminho que NÃO termina em PDF válido grava um `motivo_sem_laudo`
+        # em raw_json["detalhe"] — assim a planilha mostra um rótulo acionável
+        # ("SEM LAUDO" vs "⏳ Pendente") em vez de um genérico "—" que escondia
+        # bugs (modal lazy não clicado, 429 no download, decoy). Auditoria pós-
+        # run via `scripts/auditar_laudos.py` lista todos os motivos != None.
         laudo: LaudoEstruturado
         pdf_dest: Optional[Path] = None
+        motivo_sem_laudo: Optional[str] = None
         if pdf_url:
             pdf_dest = _pdf_persistente_path(lote.id)
             cookies = await page.context.cookies()
@@ -535,8 +573,21 @@ async def _pipeline_lote(
                     # pego por seletor frouxo no passado) — descarta e trata como sem PDF.
                     pdf_dest.unlink(missing_ok=True)
                     pdf_dest = None
+                    motivo_sem_laudo = "pdf_invalido"
             except Exception:
                 pdf_dest = None
+                motivo_sem_laudo = "download_falhou"
+        else:
+            # Sem URL: distingue entre "Auto Avaliar declarou SEM LAUDO" (caso
+            # legítimo, frequente em motos e carros antigos sem inspeção) e
+            # "URL não foi capturada" (modal lazy não clicado, bug do scraper).
+            # Sem essa distinção o operador não sabe se o lote é definitivo ou
+            # se vale retry. Heurística usa o `status_laudo` parseado do detalhe.
+            sl = (flags.status_laudo or "").strip().upper()
+            if sl in {"SEM LAUDO", "NÃO HÁ", "NAO HA", "INDISPONÍVEL", "INDISPONIVEL"}:
+                motivo_sem_laudo = "sem_laudo_declarado"
+            else:
+                motivo_sem_laudo = "url_nao_capturada"
 
         if pdf_dest is not None:
             try:
@@ -551,8 +602,18 @@ async def _pipeline_lote(
                 except Exception:
                     # Último recurso: sem PDF
                     laudo = _laudo_sem_pdf(flags)
+                    motivo_sem_laudo = "extracao_falhou"
         else:
             laudo = _laudo_sem_pdf(flags)
+
+        # Persiste pdf_path_local + motivo no raw_json["detalhe"]. A planilha
+        # lê esses campos pra renderizar a coluna Laudo com rótulo claro.
+        _registrar_estado_laudo(
+            lote=lote,
+            session=session,
+            pdf_path_local=pdf_dest if pdf_dest is not None else None,
+            motivo_sem_laudo=motivo_sem_laudo,
+        )
 
         # 4. Persist laudo cache
         _upsert_laudo_cache(lote.id, laudo, session)

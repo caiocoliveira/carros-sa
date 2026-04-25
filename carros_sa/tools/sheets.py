@@ -91,6 +91,35 @@ def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
     return round(lucro / max(capital, 1) * 100, 1)
 
 
+# Rótulos curtos pros estados pendentes — devem caber na coluna Laudo da
+# planilha sem quebrar o layout. Mantidos em PT-BR e com prefixo ⏳ pra distinguir
+# do "SEM LAUDO" (estado final, sem retry) e do hyperlink "Ver laudo".
+_LAUDO_PENDENTE_LABELS = {
+    "url_nao_capturada": "⏳ URL não capturada",
+    "download_falhou":   "⏳ Download falhou",
+    "pdf_invalido":      "⏳ PDF inválido",
+    "extracao_falhou":   "⏳ Extração falhou",
+}
+
+
+def _render_laudo_cell(row: dict) -> str:
+    """Constrói a célula da coluna Laudo a partir do row interno.
+
+    Prioridade: URL válida > motivo declarativo > motivo pendente > fallback "—".
+    O fallback "—" só persiste em rows ingeridos antes do guardrail entrar (quando
+    `motivo_sem_laudo` ainda é None na DB).
+    """
+    if row.get("laudo_url"):
+        url_escaped = row["laudo_url"].replace('"', '""')
+        return f'=HYPERLINK("{url_escaped}"; "Ver laudo")'
+    motivo = row.get("motivo_sem_laudo")
+    if motivo == "sem_laudo_declarado":
+        return "SEM LAUDO"
+    if motivo in _LAUDO_PENDENTE_LABELS:
+        return _LAUDO_PENDENTE_LABELS[motivo]
+    return "—"
+
+
 class SheetsExporter:
     """Exporta avaliações do SQLite para uma aba no Google Sheets."""
 
@@ -196,6 +225,12 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
+            # Motivo persistido pelo orquestrador quando não há PDF utilizável.
+            # Usado pra renderizar rótulo acionável na coluna Laudo (SEM LAUDO
+            # vs ⏳ Pendente). Lotes ingeridos antes do workstream do guardrail
+            # vêm como None — caem no fallback "—" igual antes.
+            motivo_sem_laudo = detalhe_raw.get("motivo_sem_laudo")
+
             # Laudo só conta como "analisado" se veio de um PDF real — fallback
             # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
             # confidence <= 0.55. Sem essa distinção o usuário via reforma de
@@ -234,6 +269,7 @@ class SheetsExporter:
                 "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
+                "motivo_sem_laudo": motivo_sem_laudo,
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "laudo_analisado": laudo_analisado,
@@ -275,15 +311,16 @@ class SheetsExporter:
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
-            # Link pro PDF do laudo. Se URL passou pelo filtro de decoy
-            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, "—".
-            # Motivação: usuário quer conferir o laudo antes de dar lance
-            # sem precisar clicar no anúncio, abrir o modal e esperar carregar.
-            if r["laudo_url"]:
-                laudo_escaped = r["laudo_url"].replace('"', '""')
-                laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
-            else:
-                laudo_cell = "—"
+            # Coluna Laudo — três estados visuais, todos acionáveis:
+            #   1. URL válida → HYPERLINK "Ver laudo" (operador confere PDF
+            #      antes de dar lance, sem precisar abrir o anúncio).
+            #   2. SEM LAUDO declarado pelo Auto Avaliar → "SEM LAUDO" (final;
+            #      retry não vai resolver, é decisão de não inspecionar).
+            #   3. Pendente (modal lazy, 429, decoy, extração falhou) → rótulo
+            #      "⏳ <motivo>" pra sinalizar que cron de retry vai tentar de
+            #      novo. Antes esses 3 casos virariam "—" indistinguíveis,
+            #      escondendo bugs.
+            laudo_cell = _render_laudo_cell(r)
 
             # Quando o laudo não foi analisado de verdade (sem PDF ou extração
             # falhou), NÃO exibimos preço-alvo, ROI nem reforma — seriam chutes
@@ -528,9 +565,9 @@ class SheetsExporter:
             ],
             [
                 "Laudo",
-                "Scraper detalhe",
-                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. URLs que não são laudo real (Relatório de Transparência, listagem) são filtradas e a célula fica '—'.",
-                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. '—' = laudo não achado ou selo 'SEM LAUDO'.",
+                "Scraper detalhe + orquestrador",
+                "=HYPERLINK 'Ver laudo' quando a URL passou pelo filtro de decoy E o PDF foi baixado. 'SEM LAUDO' quando o Auto Avaliar marca explicitamente. '⏳ <motivo>' quando há pendência: URL não capturada (modal lazy), Download falhou (429), PDF inválido (decoy), Extração falhou (LLM).",
+                "Evidência material antes do lance + sinalização de pendência acionável. ⏳ aparece pra cron de retry pegar; SEM LAUDO é estado final. '—' só em lotes legados ingeridos antes do classificador entrar.",
             ],
         ]
 

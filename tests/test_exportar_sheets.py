@@ -551,6 +551,91 @@ class TestSheetsExporterQuery:
         assert 20 < roi_val < 80
 
 
+class TestColunaLaudoMotivoSemPdf:
+    """Quando não há URL válida, a coluna Laudo deve mostrar um rótulo
+    acionável em vez de '—' genérico — assim o operador distingue 'sem laudo
+    declarado' (final) de 'pendente' (cron de retry vai resolver).
+
+    Guardrail: antes desse teste, lote sem URL e lote com URL não capturada
+    viravam ambos '—', escondendo bugs do scraper (modal lazy, 429, decoy).
+    """
+
+    def _exportar_e_capturar_laudo_cell(self, raw_json: dict) -> str:
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.raw_json = raw_json
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_laudo = HEADER.index("Laudo")
+        return rows[2][idx_laudo]
+
+    def test_motivo_sem_laudo_declarado_vira_rotulo_final(self):
+        cell = self._exportar_e_capturar_laudo_cell(
+            {"detalhe": {"motivo_sem_laudo": "sem_laudo_declarado"}}
+        )
+        assert cell == "SEM LAUDO"
+
+    def test_motivo_url_nao_capturada_vira_rotulo_pendente(self):
+        cell = self._exportar_e_capturar_laudo_cell(
+            {"detalhe": {"motivo_sem_laudo": "url_nao_capturada"}}
+        )
+        assert cell.startswith("⏳"), f"esperado rótulo pendente, recebido {cell!r}"
+        assert "URL" in cell or "capturada" in cell
+
+    def test_motivo_download_falhou_vira_rotulo_pendente(self):
+        cell = self._exportar_e_capturar_laudo_cell(
+            {"detalhe": {"motivo_sem_laudo": "download_falhou"}}
+        )
+        assert cell.startswith("⏳")
+        assert "Download" in cell or "falhou" in cell.lower()
+
+    def test_motivo_pdf_invalido_vira_rotulo_pendente(self):
+        cell = self._exportar_e_capturar_laudo_cell(
+            {"detalhe": {"motivo_sem_laudo": "pdf_invalido"}}
+        )
+        assert cell.startswith("⏳")
+
+    def test_motivo_extracao_falhou_vira_rotulo_pendente(self):
+        cell = self._exportar_e_capturar_laudo_cell(
+            {"detalhe": {"motivo_sem_laudo": "extracao_falhou"}}
+        )
+        assert cell.startswith("⏳")
+
+    def test_url_valida_continua_priorizando_hyperlink_mesmo_com_motivo(self):
+        """Se houver URL válida E motivo (estado transiente entre re-runs),
+        URL ganha — operador clica e vê o laudo. Motivo só pinta a célula
+        quando NÃO há URL utilizável."""
+        cell = self._exportar_e_capturar_laudo_cell({
+            "detalhe": {
+                "laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/abc.pdf",
+                "motivo_sem_laudo": "extracao_falhou",
+            }
+        })
+        assert cell.startswith("=HYPERLINK(")
+        assert "Ver laudo" in cell
+
+    def test_lote_legado_sem_motivo_no_raw_cai_pro_placeholder(self):
+        """Lotes ingeridos antes do guardrail entrar não têm `motivo_sem_laudo`
+        em raw_json — devem virar '—' (compatibilidade), não crashar."""
+        cell = self._exportar_e_capturar_laudo_cell({})
+        assert cell == "—"
+
+
 class TestSheetsExporterFimEmObrigatorio:
     """Lotes sem fim_em (Auto Avaliar não está mais mostrando countdown = lote
     saiu do leilão ativo) não entram no export. Feedback do usuário 2026-04-16:

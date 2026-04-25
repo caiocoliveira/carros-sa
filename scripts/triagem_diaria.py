@@ -163,6 +163,65 @@ async def _run(empresa_id: str, horizonte_dias: int, headless: bool, sem_sheets:
     except Exception as exc:
         console.print(f"[red]Erro ao exportar para Sheets: {exc}[/red]")
 
+    # Auditoria de laudos pós-export — chama o classificador como módulo (não
+    # subprocess) pra herdar o init_db e a sessão. Resumo no console; exit-code
+    # da função não propaga aqui, mas a contagem de pendentes apareça pro cron.
+    _auditar_laudos_pos_run(empresa_id)
+
+
+def _auditar_laudos_pos_run(empresa_id: str) -> None:
+    """Imprime resumo de estados de laudo dos lotes ativos da empresa.
+
+    Não falha o triagem_diaria — só sinaliza pendências pro operador. Auditoria
+    "que falha" fica em `scripts/auditar_laudos.py` (cron pode chamar separado
+    e usar exit-code pra alertar).
+    """
+    from sqlmodel import Session, select
+
+    from carros_sa.db import get_engine
+    from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+
+    from datetime import datetime as _dt
+    from scripts.auditar_laudos import classificar_lote, _ESTADOS_NAO_ACIONAVEIS
+
+    agora = _dt.now()
+    contagem: dict = {}
+    with Session(get_engine()) as session:
+        ids_empresa = session.exec(
+            select(AvaliacaoLote.lote_id).where(AvaliacaoLote.empresa_id == empresa_id)
+        ).all()
+        if not ids_empresa:
+            return
+        lotes = session.exec(
+            select(Lote)
+            .where(Lote.fim_em > agora)
+            .where(Lote.id.in_(ids_empresa))  # type: ignore[attr-defined]
+        ).all()
+        for lote in lotes:
+            laudo = session.get(LaudoCache, lote.id)
+            estado = classificar_lote(lote, laudo)
+            contagem[estado] = contagem.get(estado, 0) + 1
+
+    if not contagem:
+        return
+    pendentes = sum(n for e, n in contagem.items() if e not in _ESTADOS_NAO_ACIONAVEIS)
+    ok = contagem.get("OK", 0)
+    sem_laudo = contagem.get("sem_laudo_declarado", 0)
+    console.print(
+        f"\n[bold]Auditoria de laudos:[/bold] "
+        f"[green]{ok} OK[/green] · "
+        f"{sem_laudo} SEM LAUDO declarado · "
+        f"[yellow]{pendentes} pendente(s)[/yellow]"
+    )
+    if pendentes > 0:
+        detalhes = ", ".join(
+            f"{e}={n}" for e, n in contagem.items() if e not in _ESTADOS_NAO_ACIONAVEIS
+        )
+        console.print(
+            f"  [yellow]Rode `python scripts/auditar_laudos.py --empresa {empresa_id}` "
+            f"para investigar[/yellow] ({detalhes})"
+        )
+
 
 if __name__ == "__main__":
     app()

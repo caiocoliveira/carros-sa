@@ -36,6 +36,7 @@ from carros_sa.orquestrador import (
     _pdf_persistente_path,
     _persistir_flags_no_lote,
     _pipeline_lote,
+    _registrar_estado_laudo,
     _upsert_avaliacao,
     _upsert_lote,
 )
@@ -505,3 +506,129 @@ class TestLaudoSemPdfComFlags:
         laudo = _laudo_sem_pdf(None)
         assert laudo.severidade_geral == SeveridadeAvaria.NENHUMA
         assert laudo.confidence == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Guardrail: pdf_path_local + motivo_sem_laudo persistidos em raw_json
+# ---------------------------------------------------------------------------
+
+class TestRegistrarEstadoLaudo:
+    """A planilha e a auditoria leem `raw_json["detalhe"]["motivo_sem_laudo"]`
+    e `pdf_path_local` pra classificar cada lote. Se o orquestrador esquecer
+    de gravar esses campos, lotes ficam invisíveis no diagnóstico — mesmo bug
+    que causou os 'PDFs faltando sem motivo' antes do guardrail.
+    """
+
+    def _setup(self):
+        engine = _engine()
+        session = Session(engine)
+        lote = _lote("L_REG")
+        # Simula um detalhe pré-existente (parse de flags já rodou).
+        lote.raw_json = {"detalhe": {"laudo_pdf_url": "https://x/laudo.pdf"}}
+        session.add(lote)
+        session.commit()
+        return engine, session, lote
+
+    def test_grava_pdf_path_e_motivo_none_quando_ok(self, tmp_path):
+        engine, session, lote = self._setup()
+        pdf = tmp_path / "L_REG.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        _registrar_estado_laudo(
+            lote=lote, session=session, pdf_path_local=pdf, motivo_sem_laudo=None,
+        )
+        session.commit()
+
+        refreshed = session.get(Lote, "L_REG")
+        det = refreshed.raw_json["detalhe"]
+        assert det["pdf_path_local"] == str(pdf)
+        assert det["motivo_sem_laudo"] is None
+        # Campo pré-existente preservado (não esmaga o que `_persistir_flags`
+        # gravou antes).
+        assert det["laudo_pdf_url"] == "https://x/laudo.pdf"
+
+    def test_grava_motivo_quando_pdf_invalido(self):
+        engine, session, lote = self._setup()
+        _registrar_estado_laudo(
+            lote=lote, session=session,
+            pdf_path_local=None, motivo_sem_laudo="pdf_invalido",
+        )
+        session.commit()
+
+        det = session.get(Lote, "L_REG").raw_json["detalhe"]
+        assert det["pdf_path_local"] is None
+        assert det["motivo_sem_laudo"] == "pdf_invalido"
+
+    def test_motivo_sem_laudo_declarado_para_url_ausente_e_status_explicito(self):
+        """Validador: 'sem_laudo_declarado' é o rótulo final pro caso em que o
+        Auto Avaliar marca explicitamente `STATUS DO LAUDO: SEM LAUDO`."""
+        engine, session, lote = self._setup()
+        _registrar_estado_laudo(
+            lote=lote, session=session,
+            pdf_path_local=None, motivo_sem_laudo="sem_laudo_declarado",
+        )
+        session.commit()
+
+        det = session.get(Lote, "L_REG").raw_json["detalhe"]
+        assert det["motivo_sem_laudo"] == "sem_laudo_declarado"
+
+
+class TestAuditarLaudosClassificador:
+    """`scripts/auditar_laudos.classificar_lote` cobre o ciclo todo: olhamos
+    apenas raw_json + LaudoCache, sem precisar de Playwright/LLM. É o coração
+    do guardrail (cron chama isso e falha se há pendentes acionáveis)."""
+
+    def _lote_com_detalhe(self, **detalhe) -> Lote:
+        lote = _lote("L_AUD")
+        lote.raw_json = {"detalhe": detalhe}
+        return lote
+
+    def test_motivo_sem_laudo_declarado_classifica_final(self):
+        from scripts.auditar_laudos import classificar_lote
+        lote = self._lote_com_detalhe(motivo_sem_laudo="sem_laudo_declarado")
+        assert classificar_lote(lote, laudo_cache=None) == "sem_laudo_declarado"
+
+    def test_motivo_url_nao_capturada_classifica_pendente(self):
+        from scripts.auditar_laudos import classificar_lote
+        lote = self._lote_com_detalhe(motivo_sem_laudo="url_nao_capturada")
+        assert classificar_lote(lote, laudo_cache=None) == "url_nao_capturada"
+
+    def test_pdf_local_e_laudo_confidence_alta_classifica_ok(self):
+        from scripts.auditar_laudos import classificar_lote
+        lote = self._lote_com_detalhe(pdf_path_local="/tmp/x.pdf", motivo_sem_laudo=None)
+        laudo = LaudoCache(
+            lote_id="L_AUD", avarias_json=[], severidade_geral="leve",
+            motor_ok=True, documentacao="ok", categoria_veiculo="hatch",
+            confidence=0.9, modelo_llm="gemini-flash", custo_usd=0.001,
+        )
+        assert classificar_lote(lote, laudo_cache=laudo) == "OK"
+
+    def test_pdf_local_mas_confidence_baixa_classifica_extracao_falhou(self):
+        from scripts.auditar_laudos import classificar_lote
+        lote = self._lote_com_detalhe(pdf_path_local="/tmp/x.pdf", motivo_sem_laudo=None)
+        laudo = LaudoCache(
+            lote_id="L_AUD", avarias_json=[], severidade_geral="nenhuma",
+            motor_ok=True, documentacao="ok", categoria_veiculo="outro",
+            confidence=0.5, modelo_llm="gemini-flash", custo_usd=0.0,
+        )
+        assert classificar_lote(lote, laudo_cache=laudo) == "extracao_falhou"
+
+    def test_lote_legado_sem_motivo_e_sem_pdf_path_classifica_legado(self):
+        """Lotes ingeridos antes do guardrail entrar — raw_json sem motivo
+        nem pdf_path. Sem LaudoCache de qualidade são `legado` (precisam
+        reprocessar pra ganhar motivo)."""
+        from scripts.auditar_laudos import classificar_lote
+        lote = self._lote_com_detalhe()  # detalhe sem campos novos
+        assert classificar_lote(lote, laudo_cache=None) == "legado"
+
+    def test_lote_legado_mas_com_laudo_cache_bom_classifica_ok(self):
+        """Lote legado mas com LaudoCache de confiança ≥0.6 conta como OK —
+        retroatividade pro estado do DB antes do guardrail."""
+        from scripts.auditar_laudos import classificar_lote
+        lote = self._lote_com_detalhe()
+        laudo = LaudoCache(
+            lote_id="L_AUD", avarias_json=[], severidade_geral="leve",
+            motor_ok=True, documentacao="ok", categoria_veiculo="hatch",
+            confidence=0.85, modelo_llm="gemini-flash", custo_usd=0.001,
+        )
+        assert classificar_lote(lote, laudo_cache=laudo) == "OK"

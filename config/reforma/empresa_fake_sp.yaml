@@ -45,6 +45,18 @@ pecas:
     media: 1500
     grave: 4200
     estrutural: 7800
+  # Para-choque e lateral traseira — adicionados em 2026-04-25 (ver comentário
+  # do mesmo bloco em carros_uberlandia.yaml). SP ~25% acima de MG.
+  para_choque:
+    leve: 650
+    media: 1500
+    grave: 3100
+    estrutural: 5000
+  lateral_traseira:
+    leve: 1000
+    media: 2300
+    grave: 4400
+    estrutural: 7500
 
 default:
   leve: 400

@@ -303,6 +303,169 @@ def extrair_avarias_textuais(observacoes: Optional[str]) -> list:
 
 
 # =============================================================================
+# Camada 2b — Parser da seção "PINTURA V1" do cautelar Auto Avaliar
+# =============================================================================
+#
+# O cautelar V2 + Pintura tem uma seção dedicada ao estado da pintura/funilaria,
+# fora do bloco "Observações" e fora do diagrama estrutural da página 2. Formato
+# típico (após PyMuPDF):
+#
+#     PINTURA V1
+#     • VISTA SUPERIOR
+#     1 - COLUNA DIANTEIRA DIREITA:
+#     PINTURA EM BOAS CONDIÇÕES
+#     6 - TAMPA TRASEIRA:
+#     AMASSADO, RISCADO OU RALADO (5CM A 20CM)
+#     ...
+#
+# Esses defeitos são **cosméticos** (lataria/pintura) — diferente da seção
+# estrutural, que rastreia coluna/longarina **reparada/soldada**. Aqui:
+#  - "PINTURA EM BOAS CONDIÇÕES" / "ORIGINAL" → ignora (sem avaria).
+#  - "PEQUENO AMASSADO/RISCADO/RALADO (ATÉ 5CM)" → SeveridadeAvaria.LEVE.
+#  - "AMASSADO/RISCADO/RALADO (5CM A 20CM)" / faixas maiores → MEDIA.
+#  - "REPARAD<x>" / "REPINTAD<x>" / "SUBSTITU<x>" → MEDIA (intervenção prévia).
+#
+# Importante: avarias daqui são MEDIA mesmo em colunas — `_severidade_consolidada`
+# só promove pra ESTRUTURAL quando a coluna está GRAVE ou ESTRUTURAL, então a
+# pintura sozinha não falsifica um diagnóstico estrutural.
+
+_RE_BLOCO_PINTURA = re.compile(
+    r"PINTURA\s+V\d+\s*(?:\n.*?)?(?=OBSERVA[ÇC][ÃA]O|OBSERVA[ÇC][ÕO]ES\s+GERAIS|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Linha de item dentro do bloco: "<n> - <NOME PEÇA>:" seguido (na próxima linha)
+# da condição. PyMuPDF preserva as quebras de linha do PDF.
+_RE_LINHA_PINTURA = re.compile(
+    r"^\s*\d+\s*-\s*([^:\n]+?):\s*\n\s*([^\n]+)",
+    re.MULTILINE,
+)
+
+# Mapa nome da peça do laudo → `parte` interno do projeto.
+# Ordem importa: mais específico primeiro (PARA-CHOQUE antes de qualquer alias).
+def _peca_pintura_para_parte(nome: str) -> Optional[str]:
+    """Normaliza o nome da peça do bloco PINTURA V1 para o `parte` interno.
+
+    Retorna None quando a peça não é mapeável (ex.: nome desconhecido).
+    """
+    n = nome.upper().strip()
+
+    # Coluna: posição (DIANTEIRA=A, CENTRAL=B, TRASEIRA=C) + lado.
+    m = re.search(r"COLUNA\s+(DIANTEIRA|CENTRAL|TRASEIRA)\s+(ESQUERD[OA]|DIREIT[OA])", n)
+    if m:
+        pos_map = {"DIANTEIRA": "a", "CENTRAL": "b", "TRASEIRA": "c"}
+        lado = "esquerda" if m.group(2).startswith("ESQUERD") else "direita"
+        return f"coluna_{pos_map[m.group(1)]}_{lado}"
+
+    # Para-choque (com ou sem hífen): só tem posição (DIANTEIRO/TRASEIRO), sem lado.
+    m = re.search(r"PARA[\s\-]?CHOQUE\s+(DIANTEIR[OA]|TRASEIR[OA])", n)
+    if m:
+        pos = "dianteiro" if m.group(1).startswith("DIANTEIR") else "traseiro"
+        return f"para_choque_{pos}"
+
+    # Para-lama: posição + lado.
+    m = re.search(r"PARA[\s\-]?LAMA\s+(DIANTEIR[OA]|TRASEIR[OA])\s+(ESQUERD[OA]|DIREIT[OA])", n)
+    if m:
+        pos = "dianteiro" if m.group(1).startswith("DIANTEIR") else "traseiro"
+        lado = "esquerdo" if m.group(2).startswith("ESQUERD") else "direito"
+        return f"paralama_{pos}_{lado}"
+
+    # Porta: posição + lado.
+    m = re.search(r"PORTA\s+(DIANTEIRA|TRASEIRA)\s+(ESQUERDA|DIREITA)", n)
+    if m:
+        pos = m.group(1).lower()
+        lado = m.group(2).lower()
+        return f"porta_{pos}_{lado}"
+
+    # Lateral traseira: chapa lateral grande (folha lat. traseira do laudo estrutural).
+    m = re.search(r"LATERAL\s+(TRASEIRA|DIANTEIRA)\s+(ESQUERDA|DIREITA)", n)
+    if m:
+        pos = m.group(1).lower()
+        lado = m.group(2).lower()
+        return f"lateral_{pos}_{lado}"
+
+    # Capô e tampa traseira (peças únicas, sem lado).
+    if re.search(r"CAP[ÔO]\b", n):
+        return "capo_tampa_motor"
+    if re.search(r"TAMPA\s+TRASEIRA", n):
+        return "tampa_traseira"
+    if re.search(r"\bTETO\b", n):
+        return "teto"
+    # Painel frontal/traseiro (raro na pintura, mas cobre).
+    m = re.search(r"PAINEL\s+(FRONTAL|TRASEIRO)", n)
+    if m:
+        return f"painel_{m.group(1).lower()}"
+
+    return None
+
+
+def _severidade_pintura(condicao: str) -> Optional[SeveridadeAvaria]:
+    """Mapeia o texto da condição de pintura para SeveridadeAvaria. None = sem avaria."""
+    c = condicao.upper().strip()
+
+    # Sem avaria — ignora.
+    if "BOAS CONDI" in c or "ORIGINAL" in c or "SEM AVARIA" in c:
+        return None
+
+    # Pequena avaria.
+    if "PEQUENO" in c or "ATÉ 5CM" in c or "ATE 5CM" in c:
+        return SeveridadeAvaria.LEVE
+
+    # Avaria moderada (faixa típica do laudo) ou repintura/reparo prévio.
+    if (
+        "5CM A 20CM" in c or "AMASSADO" in c or "RISCADO" in c or "RALADO" in c
+        or "REPARAD" in c or "REPINTAD" in c or "SUBSTITU" in c
+        or "ACIMA DE 20" in c or "MAIOR QUE" in c
+    ):
+        return SeveridadeAvaria.MEDIA
+
+    # Texto desconhecido mas não-vazio: assumir LEVE pra não inflar custo.
+    return SeveridadeAvaria.LEVE
+
+
+def extrair_avarias_pintura(texto_bruto: Optional[str]) -> list:
+    """Extrai `list[Avaria]` da seção "PINTURA V1" do cautelar V2 + Pintura.
+
+    Operates no `texto_bruto` (output de `parse_laudo_textual`), localizando o
+    bloco entre o título "PINTURA V1" e a próxima seção (OBSERVAÇÃO/Z).
+
+    Retorna lista vazia quando a seção não existe (laudos antigos sem módulo
+    de pintura) ou quando todas as peças estão "EM BOAS CONDIÇÕES".
+    """
+    if not texto_bruto:
+        return []
+
+    bloco_match = _RE_BLOCO_PINTURA.search(texto_bruto)
+    if not bloco_match:
+        return []
+    bloco = bloco_match.group(0)
+
+    avarias: list = []
+    vistas: set = set()
+    for m in _RE_LINHA_PINTURA.finditer(bloco):
+        nome_raw = m.group(1).strip()
+        condicao = m.group(2).strip()
+
+        severidade = _severidade_pintura(condicao)
+        if severidade is None:
+            continue
+
+        parte = _peca_pintura_para_parte(nome_raw)
+        if parte is None:
+            continue
+        if parte in vistas:
+            continue
+        vistas.add(parte)
+
+        avarias.append(Avaria(
+            parte=parte,
+            severidade=severidade,
+            descricao=f"Pintura: {condicao[:120]}",
+        ))
+    return avarias
+
+
+# =============================================================================
 # Camada 3 — Haiku Vision na página 2 (diagrama estrutural)
 # =============================================================================
 
@@ -442,11 +605,29 @@ def extrair_laudo(
             vistas_parte.add(av_text.parte)
             avarias.append(av_text)
 
-    # Severidade: prioriza valor da visão, senão deriva das avarias textuais.
+    # Camada 4 — seção PINTURA V1 do cautelar V2+Pintura. Sempre tenta extrair:
+    # captura defeitos cosméticos (amassados, riscos, ralados) que o diagrama
+    # estrutural da página 2 não vê e que não aparecem em "Observações".
+    # Antes desse fix, lotes com estrutura limpa mas pintura ruim caíam todos no
+    # piso de R$ 1.000 (visão="nenhuma" → avarias=[] → custo=0 → piso).
+    for av_pint in extrair_avarias_pintura(txt.texto_bruto):
+        if av_pint.parte not in vistas_parte:
+            vistas_parte.add(av_pint.parte)
+            avarias.append(av_pint)
+
+    # Severidade: combina valor da visão (página 2 estrutural) com o que as
+    # avarias textuais + pintura indicam. Pega o MAIOR — antes a visão "nenhuma"
+    # zerava as avarias de pintura silenciosamente.
+    severidade_visual = None
     if visual is not None and "severidade_geral" in visual:
-        severidade = _SEVERIDADE_MAP.get(visual.get("severidade_geral", "nenhuma"), SeveridadeAvaria.NENHUMA)
+        severidade_visual = _SEVERIDADE_MAP.get(
+            visual.get("severidade_geral", "nenhuma"), SeveridadeAvaria.NENHUMA,
+        )
+    severidade_consolidada = _severidade_consolidada(avarias)
+    if severidade_visual is None:
+        severidade = severidade_consolidada
     else:
-        severidade = _severidade_consolidada(avarias)
+        severidade = max(severidade_visual, severidade_consolidada, key=_severidade_rank)
 
     # Documentação: consolidação textual
     if txt.roubo_furto_ativo or txt.comunicado_venda:
@@ -479,6 +660,19 @@ def extrair_laudo(
         categoria_veiculo=categoria_veiculo,
         confidence=confidence,
     )
+
+
+_RANK_SEVERIDADE = {
+    SeveridadeAvaria.NENHUMA: 0,
+    SeveridadeAvaria.LEVE: 1,
+    SeveridadeAvaria.MEDIA: 2,
+    SeveridadeAvaria.GRAVE: 3,
+    SeveridadeAvaria.ESTRUTURAL: 4,
+}
+
+
+def _severidade_rank(s: SeveridadeAvaria) -> int:
+    return _RANK_SEVERIDADE.get(s, 0)
 
 
 def _severidade_consolidada(avarias: list) -> SeveridadeAvaria:

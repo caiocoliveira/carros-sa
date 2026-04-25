@@ -36,7 +36,8 @@ from carros_sa.tenancy import EmpresaConfig
 CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "reforma"
 
 
-# Ordem importa: prefixos mais específicos primeiro ("capo_tampa" antes de "tampa").
+# Ordem importa: prefixos mais específicos primeiro ("capo_tampa" antes de "tampa";
+# "lateral_traseira" antes de "lateral" hipotético).
 _FAMILIAS = (
     ("longarina", "longarina"),
     ("coluna", "coluna"),
@@ -46,6 +47,8 @@ _FAMILIAS = (
     ("paralama", "paralama"),
     ("teto", "teto"),
     ("painel", "painel"),
+    ("para_choque", "para_choque"),
+    ("lateral_traseira", "lateral_traseira"),
 )
 
 

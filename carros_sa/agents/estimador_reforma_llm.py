@@ -110,6 +110,28 @@ Regras de ESCOPO (o que SIM e o que NÃO incluir):
      mais que Gol popular. Fuja de valores genéricos.
   7. Mão-de-obra em São Paulo capital ~25% mais cara que interior de MG.
   8. Devolva entre 0 e 8 itens. 0 = veículo limpo, sem reparo necessário.
+  9. AVARIAS DE PINTURA/FUNILARIA (`para_choque_*`, `lateral_traseira_*`,
+     `porta_*`, `paralama_*`, `tampa_traseira`, `capo_tampa_motor`, `teto`)
+     com descrição contendo "Pintura:" são DEFEITOS COSMÉTICOS detectados na
+     seção PINTURA V1 do laudo cautelar — NÃO indicam dano estrutural mesmo
+     quando aparecem em peças tipo "coluna_*". Estime martelinho + repintura
+     da peça (por peça: leve R$ 400-700, média R$ 1.000-1.800 em MG; +25% SP).
+     Múltiplas peças no mesmo carro permitem um leve desconto de mão-de-obra
+     compartilhada (~10% se 5+ peças).
+
+ESCOPO DO LAUDO CAUTELAR (importante pro racional):
+  O laudo cautelar V2 + Pintura cobre identificação (chassi/motor/ETA),
+  estrutura visível e pintura/lataria. NÃO inspeciona:
+    - Mecânica (motor funcionando, embreagem, vazamentos, turbo)
+    - Suspensão e freios
+    - Pneus (medição de profundidade)
+    - Elétrica/eletrônica e airbag
+    - Ar-condicionado, multimídia
+  Se severidade_geral == 'nenhuma' ou 'leve' E não há sinais de problema
+  mecânico/documental, sua `justificativa` DEVE incluir uma frase explícita
+  do tipo: "Risco mecânico não avaliado pelo laudo cautelar — recomenda
+  vistoria mecânica adicional antes do lance." Isso é flag, NÃO acrescenta
+  custo no `custo_total` (não há evidência de defeito, só ausência de info).
 
 Responda APENAS em JSON no formato:
 {{
@@ -120,7 +142,7 @@ Responda APENAS em JSON no formato:
   "range_min": <int, piso plausível>,
   "range_max": <int, teto plausível>,
   "confidence": <float 0.0-1.0>,
-  "justificativa": "uma frase explicando o driver principal do custo"
+  "justificativa": "uma frase explicando o driver principal do custo + flag de risco mecânico quando aplicável"
 }}
 """
 

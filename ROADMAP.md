@@ -111,6 +111,27 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Textual só detecta peças mencionadas em português no bloco Observações — PDFs com convenção diferente podem não ser cobertos (mitigável adicionando padrões).
   - Reprocessar lotes antigos depende de PDFs locais. Lotes sem PDF ficam na zona cinza (avarias=0) até a próxima triagem completa.
 
+### L.1 — Fix do parser de pintura (cautelar V2 + Pintura) ✅
+- **Branch:** `claude/review-car-inspection-BFSpp`
+- **Arquivos:**
+  - [`carros_sa/agents/extrator_laudo.py`](carros_sa/agents/extrator_laudo.py) — nova `extrair_avarias_pintura(texto_bruto)` lê o bloco "PINTURA V1" do PDF, parseia 1 linha por peça (`<n> - <NOME>: <CONDIÇÃO>`), mapeia condição → severidade (`PINTURA EM BOAS CONDIÇÕES`/`ORIGINAL`→ignora, `PEQUENO ... ATÉ 5CM`→LEVE, `5CM A 20CM` / `ACIMA DE 20CM` / `REPINTADO`→MEDIA) e nome → `parte` interno (`COLUNA DIANTEIRA`→`coluna_a_*`, `PARA-CHOQUE *`→`para_choque_*`, `LATERAL TRASEIRA *`→`lateral_traseira_*`, etc). Severidade final no `extrair_laudo` agora é `max(visão, _severidade_consolidada(avarias))` — antes a visão "nenhuma" zerava as avarias da pintura silenciosamente.
+  - [`carros_sa/agents/estimador_reforma.py`](carros_sa/agents/estimador_reforma.py) — adicionados prefixos `para_choque` e `lateral_traseira` em `_FAMILIAS`.
+  - [`config/reforma/carros_uberlandia.yaml`](config/reforma/carros_uberlandia.yaml) e [`config/reforma/empresa_fake_sp.yaml`](config/reforma/empresa_fake_sp.yaml) — adicionadas tabelas `para_choque` (LEVE 500 / MEDIA 1200 / GRAVE 2500 / ESTRUTURAL 4000 em MG; +25% SP) e `lateral_traseira` (LEVE 800 / MEDIA 1800 / GRAVE 3500 / ESTRUTURAL 6000 em MG; +25% SP).
+  - [`carros_sa/agents/estimador_reforma_llm.py`](carros_sa/agents/estimador_reforma_llm.py) — prompt agora diferencia avarias cosméticas de pintura (descrição com "Pintura:") de dano estrutural, e exige flag textual "Risco mecânico não avaliado pelo laudo cautelar — recomenda vistoria mecânica adicional antes do lance" no `justificativa` quando severidade é nenhuma/leve.
+  - [`tests/fixtures/laudo_triton_pintura_5a383023d7.txt`](tests/fixtures/laudo_triton_pintura_5a383023d7.txt) — texto extraído do PDF (PyMuPDF) do laudo cautelar real do Mitsubishi L200 Triton 2022 (placa RBZ4I61, lote ranqueado #1 em 2026-04-25).
+  - [`tests/test_avarias_pintura.py`](tests/test_avarias_pintura.py) — 22 testes (mapeamento de peças, severidades, gold Triton, severidade combinada visão×pintura).
+- **Diagnóstico:** A planilha do Sheets vinha mostrando `Reforma Estimada = R$ 1.000` + `severidade = nenhuma` + racional "O laudo cautelar não identificou avarias..." para **praticamente todos os lotes** com estrutura limpa. Causa raiz: o pipeline lia o diagrama estrutural da página 2 (visão) + bloco "Observações:" (textual), mas **a seção "PINTURA V1" do PDF nunca era parseada**. Lotes com 12 peças amassadas/riscadas listadas explicitamente caíam todos em `avarias=[]` → `custo_total=0` → piso de imprevistos eleva pra R$ 1.000.
+- **Como funciona:** O parser de pintura é determinístico (regex sobre `texto_bruto` do PyMuPDF), sem custo de LLM, e roda em paralelo com a visão. O `extrair_laudo` consolida avarias de 3 fontes (visão página 2 + Observações + PINTURA V1) e tira a severidade pelo MAIOR — mantendo a invariante de que pintura sozinha (sem coluna/longarina GRAVE+) não escala pra ESTRUTURAL.
+- **Risco mecânico não avaliado:** o laudo cautelar **explicitamente não cobre** mecânica/freios/suspensão/elétrica (o próprio PDF avisa nas Observações Gerais). Optei por flag textual no `racional` em vez de margem $$ automática, porque não há evidência de defeito — só ausência de informação. Usuário vê a flag na coluna `Racional Reforma` da planilha e decide se pede vistoria mecânica complementar antes do lance.
+- **Validação gold (Triton RBZ4I61):**
+  - Antes: `severidade=nenhuma, avarias=[], reforma=R$ 1.000` (piso) → ranking #1 indevido.
+  - Depois: 12 avarias detectadas (11 MEDIA + 1 LEVE), severidade=MEDIA, reforma=**R$ 17.300 em MG / R$ 21.950 em SP** → cai do topo do ranking.
+- **Cobertura:** 22 testes novos em [`tests/test_avarias_pintura.py`](tests/test_avarias_pintura.py) + suite existente continua verde (319 testes).
+- **Limitações conhecidas:**
+  - O parser assume formato do cautelar "V2 + Pintura" do Auto Avaliar (Super Visão / Toledo Vistorias). Outros emissores podem usar layout diferente — nesse caso `extrair_avarias_pintura` retorna `[]` e cai no comportamento antigo (sem regressão).
+  - Lotes já avaliados ANTES desse fix continuam com `reforma=R$ 1.000` no SQLite — precisam ser reprocessados via `scripts/reprocessar_laudos.py` pra que o ranking se autocorrija.
+  - O determinístico não popula `racional` (continua deixando o precificador montar sumário dos itens). A flag de "risco mecânico não avaliado" só aparece quando o caminho do LLM é usado — que é o default em produção (text_llm_client está sempre configurado no orquestrador).
+
 ### M — Expansão geográfica por raio ✅
 - **Branch:** `claude/adoring-sinoussi`
 - **Arquivos:**

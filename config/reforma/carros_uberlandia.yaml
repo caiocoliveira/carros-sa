@@ -52,6 +52,22 @@ pecas:
     media: 1200
     grave: 3500
     estrutural: 6500
+  # Para-choque: peça grande mas só pintura/funilaria + (eventual) substituição.
+  # Adicionada após bug do Triton (2026-04-25): laudos cautelar V2+Pintura
+  # listam para-choque dianteiro/traseiro como entradas próprias e o estimador
+  # estava caindo no `default` (R$700 média) — subestimado.
+  para_choque:
+    leve: 500     # martelinho + retoque
+    media: 1200   # repintura de para-choque inteiro
+    grave: 2500   # substituição peça nacional + pintura
+    estrutural: 4000  # substituição peça importada
+  # Lateral traseira: chapa grande (folha lat. traseira). Custo de pintura/
+  # funilaria mais alto que porta porque não desmonta — tudo no carro.
+  lateral_traseira:
+    leve: 800
+    media: 1800
+    grave: 3500
+    estrutural: 6000
 
 # Fallback quando o nome da peça não casa em nenhuma família acima.
 default:

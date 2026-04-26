@@ -20,6 +20,7 @@ from carros_sa.tools.sheets import (
     SheetsExporter,
     _calcular_roi_no_maximo,
     _col_letter,
+    _farol_prazo_venda,
 )
 
 
@@ -63,6 +64,9 @@ def _avaliacao(
     preco_max: int = 30000,
     preco_giro_fipe: int = 35000,
     preco_giro_aa=None,
+    fipe: Optional[int] = 32000,
+    dias_giro_estimado: Optional[int] = 60,
+    reforma_racional: Optional[str] = "Farol direito quebrado · parachoque dianteiro arranhado",
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
         empresa_id=empresa_id,
@@ -79,6 +83,9 @@ def _avaliacao(
         preco_giro=preco_giro,
         preco_giro_fipe=preco_giro_fipe,
         preco_giro_aa=preco_giro_aa,
+        fipe=fipe,
+        dias_giro_estimado=dias_giro_estimado,
+        reforma_racional=reforma_racional,
         justificativa="Laudo leve, FIPE R$30k, giro estimado 30 dias.",
         criado_em=datetime.utcnow(),
     )
@@ -765,6 +772,216 @@ class TestSheetsExporterTimestamp:
 
         # O primeiro freeze é da aba de dados (o segundo é o Glossário)
         mock_ws.freeze.assert_any_call(rows=2)
+
+
+class TestFarolPrazoVenda:
+    """Classificação curto/médio/longo do dias_giro_estimado em emoji + rótulo."""
+
+    def test_curto_ate_45d(self):
+        assert "🟢" in _farol_prazo_venda(30)
+        assert "Curto" in _farol_prazo_venda(45)
+        assert "(30d)" in _farol_prazo_venda(30)
+
+    def test_medio_46_a_90d(self):
+        assert "🟡" in _farol_prazo_venda(46)
+        assert "Médio" in _farol_prazo_venda(60)
+        assert "🟡" in _farol_prazo_venda(90)
+
+    def test_longo_acima_90d(self):
+        assert "🔴" in _farol_prazo_venda(91)
+        assert "Longo" in _farol_prazo_venda(180)
+
+    def test_none_vira_traco(self):
+        assert _farol_prazo_venda(None) == "—"
+
+
+class TestNovasColunas:
+    """FIPE, Vendedor, ROI transação, Prazo Venda, Valor Venda e Racional
+    Reforma — colunas adicionadas a partir de feedback do operador (2026-04-26).
+    """
+
+    def _exportar_e_pegar_data_row(self, engine, empresa="uberlandia_mg"):
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar(empresa, session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        return rows[2]  # rows[0]=banner, rows[1]=header, rows[2]=primeiro lote
+
+    def test_coluna_fipe_traz_valor_da_avaliacao(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", fipe=42000))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("FIPE (R$)")] == 42000
+
+    def test_coluna_fipe_none_vira_traco(self):
+        """Registros pré-workstream K (fipe=NULL) → célula '—' sem crash."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", fipe=None))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("FIPE (R$)")] == "—"
+
+    def test_coluna_fipe_visivel_mesmo_com_laudo_pendente(self):
+        """FIPE depende do AvaliadorMercado, não do laudo — fica visível mesmo
+        quando o laudo não foi analisado."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", fipe=42000))
+            # sem laudo → "LAUDO NÃO ANALISADO"
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
+        assert data_row[HEADER.index("FIPE (R$)")] == 42000
+        # Reforma e ROI sumiram (dependem do laudo) mas FIPE persiste
+        assert data_row[HEADER.index("Reforma (R$)")] == "—"
+
+    def test_coluna_vendedor_lida_de_raw_json_loja(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.raw_json = {"loja": "QUITCAR · Revendedores Auto Avaliar"}
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("Vendedor")] == "QUITCAR · Revendedores Auto Avaliar"
+
+    def test_coluna_vendedor_ausente_vira_traco(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))  # raw_json={} default
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("Vendedor")] == "—"
+
+    def test_coluna_roi_transacao_e_diferente_do_anualizado(self):
+        """ROI transação = ROI no máximo SEM anualizar; ROI anualizado escala
+        pelo dias_giro. Pra dias_giro!=365 os dois valores divergem."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20000))
+            session.add(_avaliacao(
+                "L001", preco_giro=35000, preco_max=25000, dias_giro_estimado=30,
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        roi_transacao = data_row[HEADER.index("ROI transação (%)")]
+        roi_anualizado = data_row[HEADER.index("ROI anualizado (%)")]
+        # ROI transação ≈ 11% (capital ~31.5k vs giro 35k)
+        # ROI anualizado = 11 × 365/30 ≈ 134%
+        assert isinstance(roi_transacao, float)
+        assert 5 < roi_transacao < 20
+        assert roi_anualizado > roi_transacao * 5
+
+    def test_coluna_roi_transacao_traco_quando_laudo_pendente(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            # sem laudo
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("ROI transação (%)")] == "—"
+
+    def test_coluna_prazo_venda_curto_verde(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", dias_giro_estimado=30))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        cell = data_row[HEADER.index("Prazo Venda")]
+        assert "🟢" in cell
+        assert "Curto" in cell
+
+    def test_coluna_prazo_venda_longo_vermelho(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", dias_giro_estimado=180))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        cell = data_row[HEADER.index("Prazo Venda")]
+        assert "🔴" in cell
+        assert "Longo" in cell
+
+    def test_coluna_valor_venda_e_preco_giro(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", preco_giro=37500))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("Valor Venda (R$)")] == 37500
+
+    def test_coluna_racional_reforma_traz_texto(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                reforma_racional="Para-choque traseiro amassado, R$1500.",
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert "Para-choque traseiro" in data_row[HEADER.index("Racional Reforma")]
+
+    def test_coluna_racional_reforma_none_vira_traco(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", reforma_racional=None))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("Racional Reforma")] == "—"
+
+    def test_coluna_racional_reforma_traco_quando_laudo_pendente(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            # sem laudo
+            session.commit()
+
+        data_row = self._exportar_e_pegar_data_row(engine)
+        assert data_row[HEADER.index("Racional Reforma")] == "—"
 
 
 class TestCidadesFreteSheet:

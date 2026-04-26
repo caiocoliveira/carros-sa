@@ -35,14 +35,20 @@ HEADER = [
     "Situação",
     "Modelo",
     "Ano",
+    "Vendedor",
     "Cidade",
     "Fim do Leilão",
     "KM",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
+    "FIPE (R$)",
+    "Valor Venda (R$)",
     "Lucro/mês (R$)",
+    "ROI transação (%)",
     "ROI anualizado (%)",
+    "Prazo Venda",
     "Reforma (R$)",
+    "Racional Reforma",
     "Tese",
     "Anúncio",
     "Laudo",
@@ -61,10 +67,34 @@ COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
+    "FIPE (R$)": _NUMBER_INTEIRO,
+    "Valor Venda (R$)": _NUMBER_INTEIRO,
     "Lucro/mês (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
+    "ROI transação (%)": _NUMBER_DECIMAL_1,
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
 }
+
+# Faróis de prazo de venda: classificação curto/médio/longo do dias_giro_estimado.
+# Threshold definido a partir do floor 30d / fallback 90d usado em
+# calibracao_giro. Lotes "rápidos" (≤45d) são verde; até ~90d (1 trimestre)
+# amarelo; acima vermelho.
+_PRAZO_CURTO_MAX_DIAS = 45
+_PRAZO_MEDIO_MAX_DIAS = 90
+
+
+def _farol_prazo_venda(dias_giro: Optional[int]) -> str:
+    """Classifica dias_giro_estimado em farol (curto/médio/longo).
+
+    Retorna string com emoji + rótulo + dias entre parênteses. None vira "—".
+    """
+    if dias_giro is None:
+        return "—"
+    if dias_giro <= _PRAZO_CURTO_MAX_DIAS:
+        return f"🟢 Curto ({dias_giro}d)"
+    if dias_giro <= _PRAZO_MEDIO_MAX_DIAS:
+        return f"🟡 Médio ({dias_giro}d)"
+    return f"🔴 Longo ({dias_giro}d)"
 
 
 def _col_letter(idx_0based: int) -> str:
@@ -219,18 +249,29 @@ class SheetsExporter:
             else:
                 tese_texto = "—"
 
+            # Vendedor / loja: gravado em raw_json["loja"] pelo orquestrador a
+            # partir de extrair_loja_do_card. Pode estar ausente em coletas
+            # antigas — cai pra "—".
+            vendedor = (lote.raw_json or {}).get("loja") or "—"
+
             rows.append({
                 "lote_id": av.lote_id,
                 "modelo": f"{lote.marca} {lote.modelo}",
                 "ano": lote.ano,
+                "vendedor": vendedor,
                 "cidade": lote.origem_cidade or "—",
                 "fim_em": fim_em_str,
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
+                "fipe": av.fipe,
+                "preco_giro": av.preco_giro,
+                "roi_transacao": roi_max,
                 "roi_anualizado": round(roi_anual, 1),
                 "lucro_mes": lucro_mes,
+                "dias_giro_estimado": av.dias_giro_estimado,
                 "reforma_estimada": av.reforma_estimada,
+                "reforma_racional": av.reforma_racional,
                 "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
@@ -294,8 +335,10 @@ class SheetsExporter:
             if nao_analisado:
                 preco_max_cell = "—"
                 lucro_mes_cell = "—"
+                roi_transacao_cell = "—"
                 roi_anual_cell = "—"
                 reforma_cell = "—"
+                reforma_racional_cell = "—"
                 # Tese depende do lance_max pra detectar "ticket acima do teto";
                 # sem esse valor definido (laudo pendente), zerar a célula evita
                 # sinalização enganosa.
@@ -303,23 +346,38 @@ class SheetsExporter:
             else:
                 preco_max_cell = r["preco_max"]
                 lucro_mes_cell = r["lucro_mes"]
+                roi_transacao_cell = r["roi_transacao"]
                 roi_anual_cell = r["roi_anualizado"]
                 reforma_cell = r["reforma_estimada"]
+                reforma_racional_cell = r["reforma_racional"] or "—"
                 tese_cell = r["tese"]
+
+            # FIPE e Valor Venda dependem do AvaliadorMercado, não do laudo —
+            # ficam visíveis mesmo com laudo pendente, ajudam o operador a
+            # entender a âncora antes do retry.
+            fipe_cell = r["fipe"] if r["fipe"] is not None else "—"
+            valor_venda_cell = r["preco_giro"] if r["preco_giro"] else "—"
+            prazo_venda_cell = _farol_prazo_venda(r["dias_giro_estimado"])
 
             sheet_rows.append([
                 rank,
                 situacao,
                 r["modelo"],
                 r["ano"],
+                r["vendedor"],
                 r["cidade"],
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
                 preco_max_cell,
+                fipe_cell,
+                valor_venda_cell,
                 lucro_mes_cell,
+                roi_transacao_cell,
                 roi_anual_cell,
+                prazo_venda_cell,
                 reforma_cell,
+                reforma_racional_cell,
                 tese_cell,
                 url_cell,
                 laudo_cell,
@@ -467,6 +525,12 @@ class SheetsExporter:
                 "Âncora de depreciação FIPE; separado da coluna Modelo pra facilitar filtro/ordenação",
             ],
             [
+                "Vendedor",
+                "Auto Avaliar (listagem)",
+                "Loja + grupo extraídos do card via extrair_loja_do_card (formato 'LOJA · GRUPO'). '—' em coletas antigas sem o dado.",
+                "Identifica quem está anunciando — útil pra rastrear padrões por revendedor (qualidade do laudo, comportamento do leilão, recorrência de modelo).",
+            ],
+            [
                 "Cidade",
                 "Auto Avaliar (detalhe)",
                 "Campo origem_cidade do lote (onde o carro está pra retirada); '—' se não informado",
@@ -497,22 +561,52 @@ class SheetsExporter:
                 "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
             ],
             [
+                "FIPE (R$)",
+                "AvaliadorMercado (Tabela FIPE bruta)",
+                "Valor FIPE puro do (marca, modelo, ano) consultado no momento da avaliação, persistido em AvaliacaoLote.fipe. Sem desconto, sem ajuste de KM. '—' em registros anteriores ao workstream K.",
+                "Âncora bruta de mercado pro operador comparar com Lance Máximo e Valor Venda — facilita audit ('estou pagando X% da FIPE?'). Não é base direta do preço-alvo; o Precificador usa min(FIPE×0.95, Webmotors p25).",
+            ],
+            [
+                "Valor Venda (R$)",
+                "Precificador",
+                "preco_giro consolidado: menor entre preco_giro_fipe (FIPE×0.95 ∩ Webmotors p25, ajustado por KM) e preco_giro_aa (Tabela Auto Avaliar ∩ Webmotors p25). Conservador por design.",
+                "Estimativa do quanto o carro vende quando sai do pátio — base de cálculo do Lance Máximo e do ROI. Útil pra responder 'quanto eu vou tirar disso?' antes de decidir o lance.",
+            ],
+            [
                 "Lucro/mês (R$)",
                 "Derivado",
                 "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
+                "ROI transação (%)",
+                "Derivado",
+                "ROI no máximo SEM anualizar: (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
+                "Retorno bruto da operação se ganhar exatamente no Lance Máximo, em percentual sobre o capital empatado. Útil pra avaliar a margem da transação isolada — independe de quanto tempo o carro fica no pátio.",
+            ],
+            [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
+                "ROI transação × 365 / dias_giro (floor 30d; fallback 90d).",
                 "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+            ],
+            [
+                "Prazo Venda",
+                "Derivado (SinalMercado.dias_giro_estimado)",
+                "Farol baseado em dias_giro_estimado: 🟢 Curto ≤45d · 🟡 Médio 46-90d · 🔴 Longo >90d. '—' quando dias_giro=NULL.",
+                "Sinaliza o tempo de giro estimado do carro no pátio. Lê junto com Valor Venda: prazo curto + valor alto = lote líquido; prazo longo + valor baixo = capital parado. Os faróis ajudam a decidir entre dois lotes com ROI parecido mas tempo de giro muito diferente.",
             ],
             [
                 "Reforma (R$)",
                 "EstimadorReformaLLM (fallback: tabela YAML)",
                 "Custo total dos itens retornados pelo LLM a partir do laudo; se LLM falhar, soma da tabela (família_peça × severidade) + adicional estrutural quando aplicável. Já descontado do Lance Máximo.",
                 "Custo ANTES de vender. Números grandes aqui = lote com dano material relevante; confirmar no PDF do laudo antes do lance.",
+            ],
+            [
+                "Racional Reforma",
+                "EstimadorReformaLLM (justificativa do modelo) ou sumário dos itens",
+                "Texto livre — caminho LLM: frase do próprio modelo explicando os itens; caminho determinístico: sumário 'item1 (R$X) · item2 (R$Y)' montado no Precificador. '—' quando reforma=0 ou registro pré-workstream O.",
+                "Permite o operador entender DE ONDE veio o número da Reforma sem ter que abrir o PDF — ex.: 'farol direito quebrado, parachoque dianteiro arranhado' deixa claro se é dano cosmético leve ou estrutural pesado.",
             ],
             [
                 "Tese",

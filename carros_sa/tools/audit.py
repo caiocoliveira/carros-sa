@@ -23,7 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
+from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo, _farol_prazo_venda
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
@@ -66,9 +66,27 @@ CHECKS: Dict[str, Validator] = {
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
         else None
     ),
+    "FIPE (R$)": lambda v, r: (
+        "FIPE não-positiva — ancoragem suspeita" if isinstance(v, (int, float)) and v <= 0 else None
+    ),
+    "Valor Venda (R$)": lambda v, r: (
+        "Valor Venda não-positivo num lote 'Viável' — preco_giro deveria ser > 0"
+        if r["situacao"] == "✓ Viável" and isinstance(v, (int, float)) and v <= 0
+        else None
+    ),
+    "ROI transação (%)": lambda v, r: (
+        "ROI transação >500% sugere capital_total subestimado ou preco_giro absurdo"
+        if isinstance(v, (int, float)) and v > 500
+        else None
+    ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"
         if v is not None and v > 1000
+        else None
+    ),
+    "Prazo Venda": lambda v, r: (
+        "Prazo Venda string vazia — _farol_prazo_venda não produziu valor"
+        if v is None or (isinstance(v, str) and not v.strip())
         else None
     ),
     "Lucro/mês (R$)": lambda v, r: (
@@ -79,6 +97,8 @@ CHECKS: Dict[str, Validator] = {
     "Reforma (R$)": lambda v, r: (
         "Reforma negativa" if v is not None and v < 0 else None
     ),
+    "Racional Reforma": lambda v, r: None,  # texto livre ou "—"; ambos aceitáveis
+    "Vendedor": lambda v, r: None,  # string livre ou "—"; ambos aceitáveis
     # Coluna informativa. Valores esperados: texto com emoji prefixo (🟢/🟡/🔴)
     # ou "—" quando config/tese.yaml não carrega ou laudo pendente. String vazia
     # seria bug (calcular_tese deveria sempre produzir algo).
@@ -98,14 +118,20 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Situação": lambda r: r["situacao"],
     "Modelo": lambda r: r["modelo"],
     "Ano": lambda r: r["ano"],
+    "Vendedor": lambda r: r["loja"],
     "Cidade": lambda r: r["cidade"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
+    "FIPE (R$)": lambda r: r["fipe"] if r.get("fipe") is not None else "—",
+    "Valor Venda (R$)": lambda r: r.get("preco_giro", "—"),
+    "ROI transação (%)": lambda r: r["roi_pct"],
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
+    "Prazo Venda": lambda r: _farol_prazo_venda(r.get("dias_giro")),
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
     "Reforma (R$)": lambda r: r["reforma_estimada"],
+    "Racional Reforma": lambda r: r.get("reforma_racional") or "—",
     "Tese": lambda r: r.get("tese", "—"),
     "Anúncio": lambda r: r["url"],
     "Laudo": lambda r: r.get("laudo_url") or "—",
@@ -191,6 +217,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "severidade": laudo.severidade_geral if laudo else "—",
             "motor_ok": ("Sim" if laudo.motor_ok else "NÃO") if laudo else "—",
             "reforma_estimada": av.reforma_estimada,
+            "reforma_racional": av.reforma_racional,
             "frete": av.frete_incluso,
             "justificativa": av.justificativa,
             "url": lote.url,

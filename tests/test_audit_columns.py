@@ -147,15 +147,21 @@ class TestAuditHappyPath:
 
 class TestAuditDeteccao:
     def test_roi_absurdo_reportado(self):
-        """ROI anualizado > 1000% sugere erro de cálculo — fora do racional econômico."""
+        """ROI anualizado > 1000% sugere erro de cálculo — fora do racional econômico.
+
+        ROI no alvo agora vem direto do score_roi (não recompute no preco_max).
+        score_roi >> 1.0 é absurdo (lucro maior que o capital investido) e
+        anualizado em janela curta vira > 1000%.
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=1000))
-            # preco_giro enorme vs preco_max minúsculo → ROI no máximo explode,
-            # anualizado com dias_giro=30 vira ~5 dígitos.
-            session.add(_avaliacao("L001", preco_max=1000, preco_giro=100_000,
-                                   reforma_estimada=0, frete_incluso=0,
-                                   dias_giro_estimado=30))
+            # score_roi=3.0 → 300% no alvo, anualizado em 30d → ~3650%
+            av = _avaliacao("L001", preco_max=1000, preco_giro=100_000,
+                            reforma_estimada=0, frete_incluso=0,
+                            dias_giro_estimado=30)
+            av.score_roi = 3.0
+            session.add(av)
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"
@@ -223,3 +229,57 @@ class TestAuditAgregacao:
         assert "KM" in texto
         assert "Reforma" in texto
         assert "Ano" in texto
+
+
+class TestAuditLanceMaximoVsFipe:
+    """Lance Máximo > FIPE×1.10 é forte sinal de problema:
+       a) similares contaminados por trim/versão errada (mediana inflada)
+       b) f_km absurdamente alto (lote km << mediana mercado)
+       c) FIPE retornou modelo errado pelo lookup
+    Auditoria deve flagar pra operador conferir antes de dar lance.
+    """
+
+    def test_lance_maximo_acima_de_fipe_por_mais_de_10pct_reportado(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20_000))
+            # Lance Máximo R$50k vs FIPE R$30k = 67% acima → DEVE flagar
+            session.add(_avaliacao(
+                "L001", preco_max=50_000, fipe=30_000,
+                preco_giro=55_000, reforma_estimada=0, frete_incluso=0,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        texto = "\n".join(violacoes)
+        assert "Lance Máximo" in texto, f"Esperava violação de Lance Máximo > FIPE: {violacoes}"
+        assert "FIPE" in texto
+
+    def test_lance_maximo_dentro_de_10pct_acima_de_fipe_e_silencioso(self):
+        """Tolerância pra cima de 10% absorve flutuações honestas (lote km baixa,
+        similares premium do mesmo modelo)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            # Lance R$31.5k, FIPE R$30k = 5% acima → ok
+            session.add(_avaliacao(
+                "L001", preco_max=31_500, fipe=30_000, preco_giro=33_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Lance Máximo" in v and "FIPE" in v for v in violacoes), (
+            f"Não deveria flagar: {violacoes}"
+        )
+
+    def test_lance_maximo_sem_fipe_nao_quebra(self):
+        """Avaliações antigas (pré-workstream K) podem ter fipe=NULL na linha.
+        Auditoria precisa tolerar e não flagar."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            session.add(_avaliacao("L001", preco_max=50_000, fipe=None))
+            session.commit()
+        violacoes = audit(engine)
+        # Não deve haver violação de Lance Máximo > FIPE (FIPE ausente)
+        assert not any("Lance Máximo" in v and "FIPE" in v for v in violacoes), (
+            f"Não deveria flagar com fipe=None: {violacoes}"
+        )

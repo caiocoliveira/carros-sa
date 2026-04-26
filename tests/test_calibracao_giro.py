@@ -21,6 +21,8 @@ from carros_sa.agents.calibracao_giro import (
     calibrar_dias_giro,
     faixa_de_idade,
     invalidar_cache,
+    lucro_absoluto_no_alvo,
+    lucro_reais_por_mes,
     roi_anualizado,
 )
 from carros_sa.models import Arrematado, CategoriaVeiculo, Empresa, Lote
@@ -216,6 +218,45 @@ def test_roi_anualizado_dias_none_usa_fallback_90():
 
 def test_roi_anualizado_score_zero_e_zero():
     assert roi_anualizado(0.0, 30) == 0.0
+
+
+# =============================================================================
+# lucro_absoluto_no_alvo — derivação algébrica que substitui o bug antigo
+# =============================================================================
+
+def test_lucro_absoluto_no_alvo_consistente_com_precificador():
+    """Identidade: dado preco_giro e score_roi, o lucro absoluto = preco_giro × s / (1+s).
+
+    Calibrado contra simulação real do precificador:
+      preco_giro=30000, reforma=3000, frete=1000, custo_op=2500, taxa_fixa=999
+      → preco_alvo=17101, capital_alvo=24600, retorno=5400, score_roi=0.2195
+
+    Bug antigo: usava score_roi × preco_alvo = 3753 (subestimava em ~30%).
+    Identidade nova devolve 5399 (off-by-1 de arredondamento, mas honesto).
+    """
+    # score_roi = 5400/24600 = 0.219512195...
+    score_roi = 5400 / 24600
+    assert lucro_absoluto_no_alvo(30_000, score_roi) == 5400
+
+
+def test_lucro_absoluto_no_alvo_score_zero_retorna_zero():
+    assert lucro_absoluto_no_alvo(50_000, 0.0) == 0
+
+
+def test_lucro_absoluto_no_alvo_score_negativo_retorna_zero():
+    """Lote inviável (score negativo) — lucro absoluto não faz sentido, devolve 0
+    pra não exibir 'lucro/mês negativo' enganoso na planilha."""
+    assert lucro_absoluto_no_alvo(50_000, -0.10) == 0
+
+
+def test_lucro_reais_por_mes_usa_lucro_absoluto_correto():
+    """Pipeline final: lucro_absoluto_no_alvo + lucro_reais_por_mes.
+
+    preco_giro=30k, score_roi=0.22 → lucro_abs=5400. Em 90d = 1800/mês.
+    Antes (bug): score_roi × preco_alvo = 3753 → 1251/mês. Falseava 30% pra menos.
+    """
+    lucro_abs = lucro_absoluto_no_alvo(30_000, 5400 / 24600)
+    assert lucro_reais_por_mes(lucro_abs, 90) == 1800
 
 
 # =============================================================================

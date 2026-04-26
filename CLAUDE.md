@@ -113,3 +113,17 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.
 - Listagem real de Uberlândia/MG: `data/scrapes/2026-04-14_uberlandia_listagem.json` (10 lotes variados).
 - Fixture de resposta Gemini: `tests/fixtures/21854782_visual_gemini.json`.
+
+## Sanidade entre colunas — armadilha recorrente do precificador
+
+Toda vez que tocar `precificador.py`, `sheets.py` ou `audit.py`, validar o pipeline de valores:
+
+- **`score_roi` é normalizado pelo `capital_alvo` (preco_alvo + reforma + frete + taxas + custo_op), NÃO pelo preco_alvo isolado.** Pra reconstruir o lucro absoluto: `lucro = preco_giro × score_roi / (1 + score_roi)` (identidade algébrica, ver `calibracao_giro.lucro_absoluto_no_alvo`). Multiplicar por preco_alvo subestima ~25-30%.
+- **ROI no `preco_max` é tautologia** = `margem_min / (1 - margem_min)` constante por empresa. Ranking deve usar `score_roi` (alvo, calibrado por risco/liquidez).
+- **`preco_giro_fipe` tem nome enganoso**: na fórmula real é `webmotors_mediana × f_km`. No caso vazio (sem similares), `webmotors_mediana = fipe × 0.97` — então o nome é "moralmente correto". Quando há similares, pode flutuar acima de FIPE: invariante `Lance Máximo > FIPE × 1.10` em `audit.py` flagra outliers (similares contaminados por trim/versão errada, f_km absurdo, FIPE errada).
+- **`auto_avaliar_ref` (Tabela Auto Avaliar embedded SSR)** precisa ser passada explícita ao `avaliar_mercado`. Persistência em `Lote.preco_referencia_aa` ≠ uso no precificador — bug histórico foi exatamente esse esquecimento. Fallback no `PrecoReferenciaAA` histórico (≤30d) cobre lotes que não trazem o dado embutido.
+
+Antes de marcar como "pronto" qualquer mexida nesse caminho:
+1. Rodar `make audit` (chama auditoria invariante por coluna).
+2. Garantir que `Lance Máximo`, `Giro FIPE`, `FIPE` numa mesma linha façam sentido qualitativo (Lance Máximo deve ser tipicamente 70-95% de FIPE; > 110% é red flag).
+3. Conferir `Lucro/mês` ≈ `(preco_giro × score_roi / (1+score_roi)) × 30 / dias_giro` (não `score_roi × preco_alvo`).

@@ -1,20 +1,30 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
+Fórmula (real, em código):
+    preco_giro_fipe  = webmotors_mediana * f_km
+    preco_giro_aa    = min(auto_avaliar_ref, webmotors_mediana) * f_km   # só se auto_avaliar_ref
     preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
-    margem_min       = margem_base * fator_risco * fator_liquidez
-    preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
+    margem_calc      = margem_base * fator_risco * fator_liquidez
+    margem_aplicada  = max(margem_calc, margem_minima_absoluta)
+    preco_alvo_lance = (preco_giro - reforma - frete - custo_op - margem_aplicada*giro - taxa_fixa) / (1 + taxa_pct)
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
+Nota sobre o nome `preco_giro_fipe`: vem da intenção original ("ancorar em
+FIPE descontada"), mas hoje a fórmula usa `webmotors_mediana * f_km`. Quando
+não há similares de mercado, `webmotors_mediana` cai no fallback `fipe * 0.97`
+em [avaliador_mercado.py](agents/avaliador_mercado.py) — então o sinal continua
+ancorado em FIPE no caso vazio. Quando há similares, a mediana pode flutuar
+acima ou abaixo de FIPE; auditoria (`tools/audit.py`) sinaliza desvios > 10%
+acima de FIPE como suspeita de outliers nos similares.
+
 Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
+- FIPE é sempre disponível (API pública). Cai no fallback x0.97 quando não há
+  competidores observados (margem de negociação típica do mercado).
 - Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
-  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
-  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
+  mesmo modelo, ≤30d) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real
+  e costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
   de giro consolidado.
 """
 

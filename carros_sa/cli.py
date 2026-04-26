@@ -160,10 +160,12 @@ def top(
     for av, lote, roi_anual in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
-        # Lucro esperado no alvo (usar score_roi × capital_alvo daria o lucro
-        # no caso médio). Aproximação simples: score_roi × preco_alvo — é o
-        # lucro que a margem.base × fatores persegue no preço-alvo.
-        lucro_esperado = int(av.score_roi * av.preco_alvo)
+        # Lucro esperado no alvo: derivado algebricamente do score_roi
+        # (preco_giro × score_roi / (1 + score_roi)). Fórmula correta — o
+        # score_roi é normalizado pelo capital total (preco_alvo + reforma +
+        # frete + taxas + custo_op), não pelo preco_alvo isolado.
+        from carros_sa.agents.calibracao_giro import lucro_absoluto_no_alvo
+        lucro_esperado = lucro_absoluto_no_alvo(av.preco_giro, av.score_roi)
         r_mes = lucro_reais_por_mes(lucro_esperado, av.dias_giro_estimado)
         tbl.add_row(
             lote.id,

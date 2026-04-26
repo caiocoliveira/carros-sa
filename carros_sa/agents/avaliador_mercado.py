@@ -18,7 +18,7 @@ from typing import List, Optional
 
 from sqlmodel import Session, select
 
-from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, SinalMercado
+from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, PrecoReferenciaAA, SinalMercado
 from carros_sa.tools.fipe import FipeClient
 
 # Heurística inicial de giro por (categoria, faixa_idade). Calibrada com
@@ -107,6 +107,7 @@ def avaliar(
     empresa_id: Optional[str] = None,
     aplicar_popularidade: bool = True,
     webmotors_km_mediana: Optional[int] = None,
+    auto_avaliar_ref: Optional[int] = None,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
@@ -117,6 +118,12 @@ def avaliar(
     Quando `empresa_id` e `session` são passados, `dias_giro_estimado` é
     calibrado a partir do histórico real (Arrematado da empresa) — fallback
     pro prior categórico hardcoded quando há <3 amostras na categoria.
+
+    `auto_avaliar_ref` é o preço-referência da Tabela Auto Avaliar (campo
+    "ULTIMA AVALIAÇÃO" embutido no anúncio). Quando não passado mas há
+    `session`, faz lookup no `PrecoReferenciaAA` (histórico de outros lotes
+    do mesmo modelo+ano) — atualiza o sinal mesmo pra lotes que não trazem
+    o dado embutido. Cap de 30 dias evita usar referência velha demais.
     """
     fipe = fipe_client or FipeClient()
     fipe_valor = _consultar_fipe_com_cache(fipe, marca, modelo, ano, session)
@@ -167,6 +174,10 @@ def avaliar(
         # não acelera tanto quanto picape nova blockbuster.
         dias_giro = ajustar_dias_giro(dias_giro, bucket, faixa_idade=faixa)
 
+    aa_ref = auto_avaliar_ref
+    if aa_ref is None and session is not None:
+        aa_ref = _buscar_preco_referencia_aa(marca, modelo, ano, session)
+
     return SinalMercado(
         fipe=fipe_valor,
         webmotors_mediana=mediana,
@@ -174,4 +185,35 @@ def avaliar(
         n_anuncios_competidores=n,
         dias_giro_estimado=dias_giro,
         webmotors_km_mediana=webmotors_km_mediana,
+        auto_avaliar_ref=aa_ref,
     )
+
+
+# Janela do histórico de PrecoReferenciaAA. Auto Avaliar reprecifica modelos
+# com frequência — referência de >30 dias atrás é menos confiável que o cálculo
+# baseado em FIPE+similares. Conservador no recente, ignora antigo.
+_AA_REF_HISTORICO_TTL = timedelta(days=30)
+
+
+def _buscar_preco_referencia_aa(
+    marca: str, modelo: str, ano: int, session: Session,
+) -> Optional[int]:
+    """Lookup mais recente em PrecoReferenciaAA pra (marca, modelo, ano).
+
+    Match exato por marca+modelo+ano. Modelos parecidos com versão diferente
+    ("Polo Track" vs "Polo Highline") NÃO casam — preço-referência depende
+    bastante de versão/trim e usar o vizinho errado polui mais que ajuda.
+    """
+    stmt = (
+        select(PrecoReferenciaAA)
+        .where(PrecoReferenciaAA.marca == marca)
+        .where(PrecoReferenciaAA.modelo == modelo)
+        .where(PrecoReferenciaAA.ano == ano)
+        .order_by(PrecoReferenciaAA.coletado_em.desc())
+    )
+    hit = session.exec(stmt).first()
+    if hit is None:
+        return None
+    if (datetime.utcnow() - hit.coletado_em) > _AA_REF_HISTORICO_TTL:
+        return None
+    return hit.preco

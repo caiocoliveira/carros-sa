@@ -215,6 +215,25 @@ def lucro_reais_por_mes(
     return int(round(lucro_absoluto_reais * 30.0 / dias))
 
 
+def lucro_absoluto_no_alvo(preco_giro: int, score_roi: float) -> int:
+    """Reconstrói o lucro absoluto esperado no preço-alvo, dado preço-giro + score_roi.
+
+    Identidade algébrica derivada do precificador:
+        score_roi = retorno_alvo / capital_alvo
+        retorno_alvo = preco_giro - capital_alvo
+        => capital_alvo = preco_giro / (1 + score_roi)
+        => retorno_alvo = preco_giro * score_roi / (1 + score_roi)
+
+    Por que não `score_roi * preco_alvo`? Porque score_roi é normalizado pelo
+    capital TOTAL (preco_alvo + reforma + frete + taxas + custo_op), não pelo
+    preco_alvo isolado. Multiplicar por preco_alvo subestima o lucro em ~25-30%
+    quando os custos não-veículo são significativos (caso típico no Auto Avaliar).
+    """
+    if preco_giro <= 0 or score_roi <= 0:
+        return 0
+    return int(round(preco_giro * score_roi / (1.0 + score_roi)))
+
+
 def roi_anualizado(score_roi: float, dias_giro: Optional[int]) -> float:
     """Anualiza o ROI absoluto pelo tempo esperado de venda.
 

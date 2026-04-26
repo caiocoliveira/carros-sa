@@ -404,6 +404,26 @@ Já registrado:
   - `HistoricoStat` é cached por export — múltiplos exports na mesma sessão não veem Arrematados novos sem re-chamar `carregar_historico_stat`. Aceitável (export roda 1x por run).
   - Coluna descritiva — NÃO afeta ranking, NÃO filtra. Lotes com laudo pendente mostram Tese "—" pra evitar sinal enganoso (lance_max está "—" nesses casos).
 
+### U — Sanity check do precificador: 3 bugs corrigidos ✅
+- **Branch:** `claude/sleepy-wright-HDxiX`
+- **Arquivos:**
+  - [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py) — `avaliar()` ganha kwarg `auto_avaliar_ref` (passado pelo orquestrador) + função `_buscar_preco_referencia_aa` que faz fallback no `PrecoReferenciaAA` histórico (≤30 dias) quando o lote não trouxe ULTIMA AVALIAÇÃO embutida.
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_pipeline_lote` passa `lote.preco_referencia_aa` no chamado a `avaliar_mercado`. Antes, o campo era persistido em `Lote` mas descartado antes do precificador → `SinalMercado.auto_avaliar_ref` ficava SEMPRE None em produção.
+  - [`carros_sa/agents/calibracao_giro.py`](carros_sa/agents/calibracao_giro.py) — nova `lucro_absoluto_no_alvo(preco_giro, score_roi)` derivada algebricamente: `preco_giro × s / (1+s)`. Antes, `Lucro/mês` calculava `score_roi × preco_alvo`, subestimando em ~30% (porque score_roi é normalizado por `capital_alvo = preco_alvo + reforma + frete + taxas + custo_op`, não pelo preco_alvo isolado).
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `_calcular_roi_no_maximo` virou `_calcular_roi_no_alvo`: agora usa `score_roi` direto. Antes recomputava ROI no preco_max esquecendo `custo_op` (atribuía custo_op como lucro), inflando ROI artificialmente. Pior: ROI no max é tautologia (`margem_min / (1-margem_min)` constante por empresa, ver comentário no precificador.py:155-162). Ranking agora usa o sinal que de fato varia entre lotes (calibrado por fator_risco × fator_liquidez).
+  - [`carros_sa/precificador.py`](carros_sa/precificador.py) — docstring corrigida (formula real `webmotors_mediana × f_km`, não `min(FIPE × 0.95, webmotors_p25)` como o doc antigo dizia).
+  - [`carros_sa/cli.py`](carros_sa/cli.py) — `top` usa `lucro_absoluto_no_alvo` no cálculo de R$/mês (mesma fórmula correta).
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — invariante nova: `Lance Máximo > FIPE × 1.10` flagra (similares contaminados, f_km absurdo, ou FIPE errada). Tolerância de 10% absorve flutuações honestas.
+- **Diagnóstico (revisão da lógica em response ao usuário 2026-04-26):** Análise das relações entre colunas (`Lance Máximo`, `Giro FIPE`, `FIPE`, `Lucro/mês`, `ROI anualizado`) revelou 3 bugs concretos:
+  1. **Auto Avaliar ref desperdiçada:** `flags.preco_referencia_aa` raspado, persistido em `Lote.preco_referencia_aa` E em `PrecoReferenciaAA` (histórico), mas **nunca chegava em `SinalMercado.auto_avaliar_ref`** — `avaliar()` não aceitava o param. Consequência: `preco_giro_aa` sempre None em produção, comparação "menor entre FIPE e AA" do precificador nunca disparava. Atacado real (R$ -3 a -10% vs FIPE) ignorado.
+  2. **Lucro/mês 30% subestimado:** Sheet usava `int(score_roi × preco_alvo)`, mas `score_roi = retorno_alvo / capital_alvo` onde `capital_alvo = preco_alvo + reforma + frete + taxas + custo_op`. Identidade correta: `retorno_alvo = preco_giro × score_roi / (1 + score_roi)`. Validado em simulação: lote com preco_giro=30k retorna 5400 real vs 3753 mostrado → 30,5% pra menos.
+  3. **ROI no máximo era duplo-bug:** (a) esquecia `custo_op` na capital → atribuía custo_op como profit (overstate). (b) Mesmo se corrigido, vira tautologia `margem_min / (1 - margem_min)` por empresa — sem sinal entre lotes. Substituído por `score_roi` direto (varia via fator_risco/liquidez).
+- **Validação:** 337/337 testes passando (era 326). 11 testes novos: 3 em `test_avaliador_mercado.py` (auto_avaliar_ref explícito, fallback histórico ≤30d, histórico velho ignorado), 4 em `test_calibracao_giro.py` (`lucro_absoluto_no_alvo` consistente com precificador), 3 em `test_audit_columns.py` (Lance Máximo > FIPE×1.10 flaga / dentro de 10% silencioso / fipe=NULL não quebra), +1 em `test_exportar_sheets.py` ajustado pra nova semântica do ROI.
+- **Limitações conhecidas:**
+  - O nome `preco_giro_fipe` continua enganoso — ele é calculado a partir de `webmotors_mediana × f_km`, não FIPE. No caso vazio (sem similares), `webmotors_mediana = fipe × 0.97`, então o nome é "moralmente" correto. Renomear quebraria modelos persistidos — deixei como está e melhorei a docstring.
+  - `webmotors_km_mediana` ainda não é populado pelo pipeline (limitação herdada do workstream S — Webmotors scraping ao vivo é workstream G futuro). `f_km` continua = 1.0 em produção.
+  - A invariante `Lance Máximo > FIPE × 1.10` só dispara depois que a coluna FIPE estiver populada na avaliação (campos `fipe` e `webmotors_mediana` são NULL em registros pré-workstream K) — auditoria tolera NULL silenciosamente.
+
 ---
 
 ## Marcos (do plano arquitetural original)

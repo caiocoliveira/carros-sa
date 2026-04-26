@@ -64,7 +64,15 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
-        else None
+        else (
+            f"Lance Máximo > FIPE×1.10 (FIPE={r['fipe']}) — similares possivelmente "
+            f"contaminados por trim/versão errada, ou f_km inflado"
+            if (
+                v is not None and isinstance(v, (int, float)) and v > 0
+                and r.get("fipe") and v > r["fipe"] * 1.10
+            )
+            else None
+        )
     ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"

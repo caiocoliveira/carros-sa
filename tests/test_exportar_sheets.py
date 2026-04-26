@@ -18,7 +18,7 @@ from carros_sa.tools.sheets import (
     COLUMN_FORMATS,
     HEADER,
     SheetsExporter,
-    _calcular_roi_no_maximo,
+    _calcular_roi_no_alvo,
     _col_letter,
 )
 
@@ -110,23 +110,28 @@ def _exporter() -> SheetsExporter:
 # Testes
 # ---------------------------------------------------------------------------
 
-class TestCalcularRoiNoMaximo:
-    def test_roi_positivo(self):
-        """ROI se ganhar no lance máximo: (giro - capital_max) / capital_max."""
-        av = _avaliacao(preco_giro=35000, preco_max=25000)
-        av.reforma_estimada = 3000
-        av.frete_incluso = 1500
-        av.taxas_leilao = int(25000 * 0.08)  # 2000
-        # capital = 25000 + 3000 + 1500 + 2000 = 31500
-        # lucro = 35000 - 31500 = 3500
-        # roi = 3500 / 31500 * 100 ≈ 11.1
-        roi = _calcular_roi_no_maximo(av)
-        assert roi == pytest.approx(11.1, abs=0.5)
+class TestCalcularRoiNoAlvo:
+    def test_roi_no_alvo_e_score_roi_em_pontos_percentuais(self):
+        """A nova fórmula usa score_roi (já calibrado por risco/liquidez) direto.
 
-    def test_preco_max_zero_retorna_zero(self):
-        av = _avaliacao()
-        av.preco_max = 0
-        assert _calcular_roi_no_maximo(av) == 0.0
+        ROI no MÁXIMO seria tautologia (margem_min / (1-margem_min) constante por
+        empresa). O alvo varia entre lotes via fator_risco × fator_liquidez no
+        precificador, então é a métrica que diferencia lotes — alinhada com a
+        justificativa documentada em precificador.py.
+        """
+        av = _avaliacao(score_roi=0.3)
+        assert _calcular_roi_no_alvo(av) == pytest.approx(30.0, abs=0.05)
+
+    def test_score_roi_zero_retorna_zero(self):
+        av = _avaliacao(score_roi=0.0)
+        assert _calcular_roi_no_alvo(av) == 0.0
+
+    def test_score_roi_negativo_propaga_perda(self):
+        """ROI negativo (lote inviável que rodou pelo precificador) é mantido —
+        operador vê o sinal. Não silenciar com 0 evita confundir 'inviável caro'
+        com 'inviável estranho'."""
+        av = _avaliacao(score_roi=-0.15)
+        assert _calcular_roi_no_alvo(av) == pytest.approx(-15.0, abs=0.05)
 
 
 class TestSheetsExporterQuery:
@@ -521,11 +526,18 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
-    def test_exportar_roi_baseado_no_lance_maximo(self):
-        """ROI anualizado deve ser calculado sobre o lance máximo, não sobre lance_atual."""
+    def test_exportar_roi_baseado_em_score_roi_no_alvo(self):
+        """ROI anualizado deve usar score_roi (no alvo), não recompute no máximo.
+
+        Justificativa: ROI no máximo é constante por empresa (margem_min /
+        (1-margem_min)) por construção do precificador — vira tautologia.
+        score_roi varia entre lotes via fator_risco × fator_liquidez, então é
+        a métrica útil de ranking. Ver docstring de _calcular_roi_no_alvo.
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=20000))
+            # score_roi=0.3 (default do helper) → ROI no alvo = 30%
             av = _avaliacao("L001", preco_giro=35000, preco_max=25000)
             session.add(av)
             session.add(_laudo("L001"))
@@ -542,13 +554,11 @@ class TestSheetsExporterQuery:
             with Session(engine) as session:
                 exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
+        rows = mock_ws.update.call_args_list[0][0][0]
         idx_roi = HEADER.index("ROI anualizado (%)")
         roi_val = rows[2][idx_roi]
-        # ROI no máximo ≈ 11%; sem dias_giro preenchido, fallback = 90d
-        # ROI anualizado ≈ 11 × 365/90 ≈ 44%. Faixa larga pra acomodar pequenas
-        # variações do preco_alvo/fator_risco.
-        assert 20 < roi_val < 80
+        # score_roi=0.30; sem dias_giro → fallback 90d → 0.30 × 365/90 ≈ 121.7%
+        assert 100 < roi_val < 140
 
 
 class TestSheetsExporterFimEmObrigatorio:

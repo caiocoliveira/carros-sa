@@ -191,3 +191,81 @@ def test_fallback_sem_similares(fipe_responses, in_memory_session):
     # Fiesta 2013 → hatch VELHO → prior 100d.
     # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → prior puro.
     assert sinal.dias_giro_estimado == 100
+
+
+def test_auto_avaliar_ref_explicito_chega_em_sinal_mercado(fipe_responses, in_memory_session):
+    """Bug fix: parametro auto_avaliar_ref do orquestrador deve chegar em
+    SinalMercado.auto_avaliar_ref. Antes, avaliar() não aceitava o param e o
+    sinal saía sempre None — `preco_giro_aa` ficava sempre None em produção
+    e a comparação 'menor entre FIPE e AA' do precificador nunca disparava.
+    """
+    fake = FakeFipeClient(fipe_responses)
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=None,
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+        auto_avaliar_ref=24_500,  # ULTIMA AVALIAÇÃO observada no anúncio
+    )
+    assert sinal.auto_avaliar_ref == 24_500
+
+
+def test_auto_avaliar_ref_fallback_no_historico_recente(fipe_responses, in_memory_session):
+    """Quando o lote atual não traz ULTIMA AVALIAÇÃO embutida, avaliar() faz
+    lookup em PrecoReferenciaAA pra preencher do histórico (mesmo modelo+ano,
+    ≤30d). Útil pra modelos que aparecem em raio mas só uma cidade traz o
+    preço-referência cravado."""
+    from datetime import datetime, timedelta
+
+    from carros_sa.models import PrecoReferenciaAA
+
+    fake = FakeFipeClient(fipe_responses)
+    # Histórico recente — 5 dias atrás
+    in_memory_session.add(PrecoReferenciaAA(
+        marca="Ford", modelo="Fiesta 1.6 SE Hatch", ano=2013,
+        preco=23_900,
+        coletado_em=datetime.utcnow() - timedelta(days=5),
+    ))
+    in_memory_session.commit()
+
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=None,
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+        # auto_avaliar_ref ausente → deve cair no histórico
+    )
+    assert sinal.auto_avaliar_ref == 23_900
+
+
+def test_auto_avaliar_ref_historico_velho_ignorado(fipe_responses, in_memory_session):
+    """Histórico > 30d é considerado stale e descartado. Auto Avaliar reprecifica
+    modelos com frequência — referência velha polui mais que ajuda."""
+    from datetime import datetime, timedelta
+
+    from carros_sa.models import PrecoReferenciaAA
+
+    fake = FakeFipeClient(fipe_responses)
+    in_memory_session.add(PrecoReferenciaAA(
+        marca="Ford", modelo="Fiesta 1.6 SE Hatch", ano=2013,
+        preco=23_900,
+        coletado_em=datetime.utcnow() - timedelta(days=60),
+    ))
+    in_memory_session.commit()
+
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=None,
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+    )
+    assert sinal.auto_avaliar_ref is None

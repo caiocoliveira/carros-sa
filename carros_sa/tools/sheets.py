@@ -78,17 +78,20 @@ def _col_letter(idx_0based: int) -> str:
             return letters
 
 
-def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
-    """ROI garantido se ganhar o lote exatamente pelo lance máximo.
+def _calcular_roi_no_alvo(av: AvaliacaoLote) -> float:
+    """ROI esperado no preço-alvo (não no teto) — em pontos percentuais.
 
-    = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    Usa `score_roi` direto da Avaliacao, que é calibrado por risco e liquidez
+    no preço-alvo e varia entre lotes. ROI no máximo seria tautologia
+    (`margem_min / (1 - margem_min)` constante por empresa); por isso tomamos
+    a métrica do alvo, alinhada com a justificativa documentada em
+    [precificador.py](../precificador.py).
     """
-    if av.preco_max <= 0:
-        return 0.0
-    capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
-    lucro = av.preco_giro - capital
-    return round(lucro / max(capital, 1) * 100, 1)
+    return round(av.score_roi * 100.0, 1)
+
+
+# Backward-compat alias — auditoria importa por nome antigo.
+_calcular_roi_no_maximo = _calcular_roi_no_alvo
 
 
 class SheetsExporter:
@@ -169,15 +172,17 @@ class SheetsExporter:
             viavel = av.preco_max > (lote.lance_atual or 0)
 
             from carros_sa.agents.calibracao_giro import (
-                lucro_reais_por_mes, roi_anualizado,
+                lucro_absoluto_no_alvo, lucro_reais_por_mes, roi_anualizado,
             )
             roi_max = _calcular_roi_no_maximo(av)
             roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
             # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
-            # score_roi × preco_alvo (lucro no caso médio do bid).
+            # "esse lote rende R$X/mês enquanto no pátio". Lucro absoluto no
+            # alvo = preco_giro * score_roi / (1+score_roi) — fórmula correta
+            # (score_roi é normalizado pelo capital_total, não pelo preco_alvo).
             lucro_mes = lucro_reais_por_mes(
-                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
+                lucro_absoluto_no_alvo(av.preco_giro, av.score_roi),
+                av.dias_giro_estimado,
             )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -499,14 +504,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto = preco_giro × score_roi ÷ (1 + score_roi) — derivação algébrica do score_roi normalizado pelo capital total.",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+                "score_roi × 365 / dias_giro (floor 30d; fallback 90d). score_roi é o ROI ESPERADO no preço-ALVO (não no teto): margem.base ajustada por fator_risco (laudo) × fator_liquidez (mercado), normalizada pelo capital total (lance + reforma + frete + taxas + custo_op).",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Usa o alvo (não o teto) porque ROI no teto cai em 'margem_min / (1 - margem_min)' constante por empresa — vira tautologia, perde sinal entre lotes.",
             ],
             [
                 "Reforma (R$)",

@@ -589,6 +589,12 @@ async def _pipeline_lote(
                 categoria=categoria,
                 session=session,
                 empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
+                # Preço-referência da Tabela Auto Avaliar embutido no anúncio
+                # (atacado real). Sem isso, `preco_giro_aa` ficava sempre None
+                # em produção e o conservadorismo "menor entre FIPE e AA" não
+                # acionava nunca. Quando não está embutido, avaliar() faz
+                # fallback no PrecoReferenciaAA histórico (≤30d) via session.
+                auto_avaliar_ref=lote.preco_referencia_aa,
             )
         except LookupError as exc:
             # FIPE Parallelum não tem catálogo de motos (Dafra, Triumph, Harley…)

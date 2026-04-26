@@ -43,6 +43,13 @@ def _lote(
         km=km,
         lance_atual=lance_atual,
         fim_em=fim_em or (datetime.now() + timedelta(days=3)),
+        # Simula raw_json igual ao que o orquestrador real salvaria — com
+        # `detalhe.laudo_pdf_url` num host válido. Sem isso, o novo guard de
+        # `auditar_laudos_pendentes` (chamado dentro de `audit()`) flagaria
+        # todos os lotes do test como "sem_detalhe_raspado".
+        raw_json={"detalhe": {
+            "laudo_pdf_url": f"https://storage.googleapis.com/doc-b2b/{lote_id}.pdf",
+        }},
         scraped_at=datetime.utcnow(),
     )
 
@@ -192,6 +199,28 @@ class TestAuditDeteccao:
 # ---------------------------------------------------------------------------
 # Agregação por coluna (várias linhas → uma única violação com contagem)
 # ---------------------------------------------------------------------------
+
+class TestAuditIncluiLaudosPendentes:
+    """Guarda que `audit()` carrega o relatório de `auditar_laudos_pendentes`
+    junto das violações de coluna. Sem isso, lotes ⚠ LAUDO NÃO ANALISADO
+    ficavam invisíveis no hook do SessionEnd e acumulavam em silêncio.
+    """
+
+    def test_lote_sem_detalhe_raspado_aparece_em_audit(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # Lote ativo, válido, com avaliação — mas sem `detalhe` no raw_json:
+            # cenário em que o orquestrador interrompeu antes de raspar a página.
+            lote = _lote("L_PEND")
+            lote.raw_json = {}  # zera o detalhe que o helper injeta
+            session.add(lote)
+            session.add(_avaliacao("L_PEND"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Laudo pendente" in v and "sem_detalhe_raspado" in v for v in violacoes), (
+            f"Esperava aviso de laudo pendente em {violacoes}"
+        )
+
 
 class TestAuditAgregacao:
     def test_multiplas_linhas_problema_mesma_coluna_agrupadas(self):

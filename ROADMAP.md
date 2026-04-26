@@ -236,6 +236,21 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Guard do DB real faz `dry_run` mas não auto-corrige durante o `pytest` — exige intervenção (`make limpar-decoys`). Intencional: teste não deve mutar estado de produção silenciosamente.
   - Se um novo padrão de decoy aparecer no Auto Avaliar e o `is_laudo_pdf_url()` aceitar incorretamente, ambos scraper E limpeza deixam passar. Defesa secundária fica com `_pdf_eh_laudo_valido()` no orquestrador (inspeciona o PDF baixado).
 
+### R.2 — Diagnóstico de laudos pendentes no audit hook ✅
+- **Branch:** `claude/great-turing-HhwCn`
+- **Arquivos:**
+  - [`carros_sa/tools/laudos_status.py`](carros_sa/tools/laudos_status.py) — novo `auditar_laudos_pendentes(session, empresa_id=...)` classifica cada lote ativo sem laudo analisado em 4 motivos acionáveis: `SEM_DETALHE_RASPADO`, `SCRAPER_NAO_ACHOU_PDF_URL`, `URL_DECOY_PERSISTIDO`, `FALLBACK_SEM_PDF`. Cada motivo aponta o comando concreto que destrava (triagem / retry / limpar-decoys). `formatar_relatorio()` agrupa por motivo + amostra de 3 IDs.
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — `audit()` agora carrega o relatório de pendentes junto das violações de coluna. SessionEnd hook surface `⚠ Laudo pendente (motivo): N lote(s) — <ação>`.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — comentário em `_write_sheet` apontava pra `scripts/retry_laudos_pendentes.py` (renomeado pra `reprocessar_lotes_do_db.py --somente-laudo-pendente`); atualizado + referência ao `auditar_laudos_pendentes` pra futuros leitores entenderem a malha.
+  - [`tests/test_laudos_status.py`](tests/test_laudos_status.py) — 14 testes cobrindo cada motivo, prioridade decoy > fallback, lotes excluídos da planilha (encerrados/sem fim_em), filtro por empresa, formatação.
+  - [`tests/test_setup_cron.py`](tests/test_setup_cron.py) — guard contra rename: cron quebra silenciosamente se algum `scripts/*.py` referenciado some, ou se uma flag obrigatória (`--somente-ativos`, `--somente-laudo-pendente`) sai do script. Falha no `make test` antes do dano.
+  - [`tests/test_audit_columns.py`](tests/test_audit_columns.py) — fixture do `_lote` agora popula `raw_json.detalhe.laudo_pdf_url` válido (alinhado ao que o orquestrador real persiste); novo `TestAuditIncluiLaudosPendentes` garante que o audit() carrega pendência quando há.
+- **Motivação:** R fechou a porta de entrada do decoy e R.1 limpou o legado, mas faltava o **observability layer**: quando algum lote escapasse pra "⚠ LAUDO NÃO ANALISADO" (modal lazy do scraper, rate-limit do download, regressão de seletor), o usuário só descobria abrindo a planilha — sem motivo classificado nem ação sugerida. O hook do audit agora expõe a fila pendente com a causa raiz E o comando que resolve, em cada SessionEnd.
+- **Cobertura:** **343 testes verde** (326 baseline + 17 novos). Inclui guard contra falso-positivo (lotes encerrados / sem `fim_em` ficam fora) e contra mismatch de prioridade (lote com decoy + fallback é classificado como decoy, não como fallback — a ação correta é `make limpar-decoys`).
+- **Limitações conhecidas:**
+  - `auditar_laudos_pendentes` mostra a foto AGORA — não traça histórico de quantos ciclos um lote já está pendente. Se a próxima dor for "lote X tá pendente há 3 dias", precisa adicionar coluna `tentativas_laudo` em LaudoCache e contador no `_pipeline_lote`.
+  - Não auto-executa `make limpar-decoys` durante o audit; exige intervenção humana (intencional, igual ao guard de R.1 — teste/audit não deve mutar produção sozinho).
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

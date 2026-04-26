@@ -289,8 +289,12 @@ class SheetsExporter:
             # falhou), NÃO exibimos preço-alvo, ROI nem reforma — seriam chutes
             # baseados em laudo vazio e induziriam o operador a dar lance no
             # escuro. Mantemos identificação do lote + link pra ele resolver
-            # manualmente. O retry automático (scripts/retry_laudos_pendentes.py)
-            # tenta preencher esses campos na próxima passada.
+            # manualmente. O retry automático
+            # (`scripts/reprocessar_lotes_do_db.py --somente-laudo-pendente`,
+            # disparado pelo cron em setup_cron.sh) tenta preencher esses
+            # campos na próxima passada. O motivo da pendência é classificado
+            # por `carros_sa.tools.laudos_status.auditar_laudos_pendentes` e
+            # impresso pelo hook do audit ao final de cada sessão.
             if nao_analisado:
                 preco_max_cell = "—"
                 lucro_mes_cell = "—"

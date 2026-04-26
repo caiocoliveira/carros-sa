@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.tools.laudos_status import auditar_laudos_pendentes, formatar_relatorio
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -218,12 +219,25 @@ def audit(engine, sample_size: int = 20) -> List[str]:
 
     Cada violação é uma string pronta pra impressão no formato:
         "⚠ <Coluna>: N linha(s) — <motivo> (ex: lote <id> valor=<v>)"
+
+    Inclui também o relatório de `laudos_status.auditar_laudos_pendentes` —
+    cada motivo de pendência (sem detalhe / scraper falhou / decoy / fallback)
+    vira UMA linha agregada com a ação recomendada. Sem isso, lotes ficavam
+    silenciosamente em "⚠ LAUDO NÃO ANALISADO" na planilha sem visibilidade
+    no audit hook, acumulando até o usuário notar manualmente.
     """
     with Session(engine) as session:
         rows = _build_rows(session, sample_size)
+        # Pendências de laudo são auditadas em CIMA da base inteira (não só
+        # do sample), porque cada lote ativo importa — não dá pra "amostrar"
+        # uma pendência operacional. Dois lotes pendentes ainda são dois
+        # alertas.
+        pendentes = auditar_laudos_pendentes(session)
+
+    saida_pendentes = formatar_relatorio(pendentes)
 
     if not rows:
-        return []
+        return saida_pendentes
 
     # Agrega por (coluna, motivo): N linhas + primeiro exemplo.
     # Dois motivos diferentes na mesma coluna viram DUAS entradas agrupadas
@@ -249,7 +263,7 @@ def audit(engine, sample_size: int = 20) -> List[str]:
             else:
                 agregador[chave]["count"] += 1
 
-    saida: List[str] = []
+    saida: List[str] = list(saida_pendentes)
     for (coluna, motivo), info in agregador.items():
         suffix = "" if info["count"] == 1 else "s"
         saida.append(

@@ -263,7 +263,14 @@ class SheetsExporter:
         for rank, r in enumerate(rows, start=1):
             nao_analisado = not r["laudo_analisado"]
             if nao_analisado:
-                situacao = "⚠ LAUDO NÃO ANALISADO"
+                # "NÃO CAPTURADO" descreve o sintoma com honestidade: o laudo
+                # quase sempre EXISTE no Auto Avaliar (status="Aprovado" no
+                # body_text), mas o scraper não conseguiu extrair a URL do PDF
+                # (modal lazy não rendeu, HTTP 429, etc — ver coletar_detalhe).
+                # Antes era "NÃO ANALISADO", o que sugeria que o laudo não
+                # existia — passou a impressão errada e levava operador a
+                # ignorar lotes recuperáveis.
+                situacao = "⚠ LAUDO NÃO CAPTURADO"
             elif r["viavel"]:
                 situacao = "✓ Viável"
             else:
@@ -451,8 +458,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO ANALISADO quando o PDF não foi extraído. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠, não dê lance — os números numéricos ficam '—' até o retry do laudo rodar.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO quando o scraper não conseguiu extrair a URL do PDF (modal lazy, 429, etc). Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
+                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Os números numéricos ficam '—' até o retry do laudo rodar.",
             ],
             [
                 "Modelo",

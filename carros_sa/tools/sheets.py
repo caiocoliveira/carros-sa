@@ -33,6 +33,7 @@ from carros_sa.tools.tese import (
 HEADER = [
     "Rank",
     "Situação",
+    "Marca",
     "Modelo",
     "Ano",
     "Cidade",
@@ -221,7 +222,8 @@ class SheetsExporter:
 
             rows.append({
                 "lote_id": av.lote_id,
-                "modelo": f"{lote.marca} {lote.modelo}",
+                "marca": lote.marca,
+                "modelo": lote.modelo,
                 "ano": lote.ano,
                 "cidade": lote.origem_cidade or "—",
                 "fim_em": fim_em_str,
@@ -310,6 +312,7 @@ class SheetsExporter:
             sheet_rows.append([
                 rank,
                 situacao,
+                r["marca"],
                 r["modelo"],
                 r["ano"],
                 r["cidade"],
@@ -455,9 +458,15 @@ class SheetsExporter:
                 "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠, não dê lance — os números numéricos ficam '—' até o retry do laudo rodar.",
             ],
             [
+                "Marca",
+                "Auto Avaliar (listagem)",
+                "Marca (`lote.marca`) extraída do card via regex",
+                "Coluna dedicada permite filtro/ordenação por fabricante sem depender de string composta",
+            ],
+            [
                 "Modelo",
                 "Auto Avaliar (listagem)",
-                "Marca + modelo extraídos do card via regex (ano fica em coluna separada)",
+                "Modelo (`lote.modelo`) extraído do card via regex; marca fica em coluna separada e ano em outra",
                 "Identificação humana do veículo",
             ],
             [

@@ -42,10 +42,14 @@ CHECKS: Dict[str, Validator] = {
         None if v in SITUACOES_VALIDAS
         else f"Situação '{v}' fora do domínio {SITUACOES_VALIDAS}"
     ),
+    "Marca": lambda v, r: (
+        "Marca string vazia — scraper não capturou fabricante do card"
+        if not v or not str(v).strip()
+        else None
+    ),
     "Modelo": lambda v, r: (
-        "Modelo string vazia" if not v or not str(v).strip()
-        else "Modelo sem marca e sem nome — scraper falhou em capturar campos"
-        if not r.get("marca") or not r.get("modelo_raw")
+        "Modelo string vazia — scraper não capturou nome do modelo"
+        if not v or not str(v).strip()
         else None
     ),
     "Ano": lambda v, r: (
@@ -96,7 +100,8 @@ CHECKS: Dict[str, Validator] = {
 COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
-    "Modelo": lambda r: r["modelo"],
+    "Marca": lambda r: r["marca"],
+    "Modelo": lambda r: r["modelo_raw"],
     "Ano": lambda r: r["ano"],
     "Cidade": lambda r: r["cidade"],
     "Fim do Leilão": lambda r: r["fim_em"],

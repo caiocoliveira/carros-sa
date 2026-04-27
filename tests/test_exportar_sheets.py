@@ -160,6 +160,33 @@ class TestSheetsExporterQuery:
         assert "Última atualização" in call_args[0][0]
         assert call_args[1] == HEADER
 
+    def test_exportar_marca_e_modelo_em_colunas_separadas(self):
+        """Marca e Modelo são colunas dedicadas — operador filtra por fabricante
+        sem depender de string composta. Modelo cell guarda só `lote.modelo`."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", marca="Ford", modelo="Fiesta"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_marca = HEADER.index("Marca")
+        idx_modelo = HEADER.index("Modelo")
+        assert rows[2][idx_marca] == "Ford"
+        assert rows[2][idx_modelo] == "Fiesta"
+
     def test_exportar_viaveis_aparecem_primeiro(self):
         """Lotes com preco_max > lance_atual (viáveis) devem vir antes dos inviáveis."""
         engine = _engine_mem()

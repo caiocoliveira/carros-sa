@@ -41,6 +41,7 @@ HEADER = [
     "KM",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
+    "FIPE (R$)",
     "Lucro/mês (R$)",
     "ROI anualizado (%)",
     "Reforma (R$)",
@@ -62,6 +63,7 @@ COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
+    "FIPE (R$)": _NUMBER_INTEIRO,
     "Lucro/mês (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
@@ -230,6 +232,7 @@ class SheetsExporter:
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
+                "fipe": av.fipe,
                 "roi_anualizado": round(roi_anual, 1),
                 "lucro_mes": lucro_mes,
                 "reforma_estimada": av.reforma_estimada,
@@ -309,6 +312,11 @@ class SheetsExporter:
                 reforma_cell = r["reforma_estimada"]
                 tese_cell = r["tese"]
 
+            # FIPE é referência de mercado, NÃO depende do laudo — sempre mostra
+            # quando a avaliação tem o valor (registros pré-workstream K podem
+            # estar com fipe=NULL; nesses casos cai pro placeholder).
+            fipe_cell = r["fipe"] if r["fipe"] is not None else "—"
+
             sheet_rows.append([
                 rank,
                 situacao,
@@ -320,6 +328,7 @@ class SheetsExporter:
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
                 preco_max_cell,
+                fipe_cell,
                 lucro_mes_cell,
                 roi_anual_cell,
                 reforma_cell,
@@ -504,6 +513,12 @@ class SheetsExporter:
                 "Precificador",
                 "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo.",
                 "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
+            ],
+            [
+                "FIPE (R$)",
+                "API FIPE (cache `modelo_fipe_cache`)",
+                "Valor da Tabela FIPE pra (marca, modelo, ano) consultado no momento da avaliação. Persistido em `avaliacao_lote.fipe` pra não depender de re-consulta. '—' em registros pré-workstream K (NULL).",
+                "Âncora bruta de mercado pro operador comparar lance atual e máximo contra a referência pública. Não depende do laudo.",
             ],
             [
                 "Lucro/mês (R$)",

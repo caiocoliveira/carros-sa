@@ -70,6 +70,14 @@ CHECKS: Dict[str, Validator] = {
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
         else None
     ),
+    # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
+    # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
+    # de scraping/cache do client FIPE.
+    "FIPE (R$)": lambda v, r: (
+        "FIPE não-positivo — provável falha do client FIPE ou cache stale"
+        if isinstance(v, (int, float)) and v <= 0
+        else None
+    ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"
         if v is not None and v > 1000
@@ -108,6 +116,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
+    "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
     "Reforma (R$)": lambda r: r["reforma_estimada"],

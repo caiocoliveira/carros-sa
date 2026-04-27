@@ -108,6 +108,38 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - **NÃO** alterar `carros_sa/models.py` sem discutir — quebra outras sessões em paralelo.
 - **NÃO** rodar chamadas de LLM dentro de testes — usar fixture salva em `tests/fixtures/`.
 
+## Sanity econômico do precificador (invariantes não-negociáveis)
+
+Premissa do operador: **"vende próximo da FIPE"**. Daí seguem três inequações que devem se sustentar **sempre**:
+
+1. **`preco_giro ≤ FIPE`** — âncora de venda nunca passa da FIPE. Cap explícito em [`carros_sa/precificador.py`](carros_sa/precificador.py).
+2. **`preco_max ≤ FIPE`** — Lance Máximo nunca passa da FIPE. Cap em precificador + invariante de auditoria em [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py).
+3. **`preco_alvo ≤ preco_max ≤ FIPE`** — preço-alvo (lance médio) é o mais conservador, sempre.
+
+**Por que cap em FIPE e não na mediana ou no AA?**
+- `webmotors_mediana` na prática hoje é a mediana dos similares do AA detalhe ("Talvez se interesse por") — heterogênea (modelos próximos mas mais novos/caros). Pode inflar.
+- `auto_avaliar_ref` pode estar desatualizado ou bater num modelo errado.
+- `f_km > 1.0` (lote com km baixa) também pode inflar a âncora.
+- FIPE é o único valor objetivo + alinhado com a premissa do operador.
+
+**Quando mudar a fórmula do precificador, atualize 4 lugares casados:**
+1. [`carros_sa/precificador.py`](carros_sa/precificador.py) — docstring no topo + cálculo
+2. [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — linhas do Glossário das colunas afetadas (Lance Máximo, ROI, Lucro/mês)
+3. [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — invariantes derivadas (preco_max ≤ FIPE×1.05, etc.)
+4. Testes em `tests/test_precificador.py` + `tests/test_exportar_sheets.py` + `tests/test_audit_columns.py`
+
+## Métricas derivadas (cuidado com erros de fórmula)
+
+- **ROI no preço-MÁXIMO é tautológico** — por construção da equação do precificador, sempre cai em ~`margem.minima_absoluta` da empresa (10% em Uberlândia). Não usar para ranking. Use o ROI no ALVO (`Avaliacao.score_roi`).
+- **Lucro absoluto exato a partir do `score_roi`**:
+  ```
+  lucro_alvo = preco_giro × score_roi / (1 + score_roi)
+  ```
+  (derivação: `score_roi = (preco_giro - capital_alvo) / capital_alvo` ⇒ `capital_alvo = preco_giro / (1 + score_roi)` ⇒ `lucro = preco_giro - capital_alvo`).
+  
+  **Não usar** `score_roi × preco_alvo` — `preco_alvo` é só um pedaço do capital investido (falta reforma + frete + taxas + custo_op).
+- **Coluna FIPE na planilha** existe pra dar sanity comparativa: o operador deve conseguir bater olho e validar "Lance Máximo < FIPE? Faz sentido?".
+
 ## Dado real de referência
 
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.

@@ -1,21 +1,29 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
+Fórmula efetiva (atualizada após calibração 2026-04 + sanity FIPE 2026-04-27):
+    fipe_teto        = mercado.fipe                         # FIPE é o TETO da âncora
+    mediana_aj       = mercado.webmotors_mediana * f_km     # ajuste por km do lote
+    preco_giro_fipe  = min(mediana_aj, fipe_teto)            # ancorado em mediana, capado em FIPE
+    preco_giro_aa    = min(auto_avaliar_ref*f_km, mediana_aj, fipe_teto)   # quando AA presente
     preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
     margem_min       = margem_base * fator_risco * fator_liquidez
     preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
+    preco_max        = min(preco_max_calculado, fipe_teto)   # nunca acima da FIPE (sanidade)
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
-Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
-- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
-  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
-  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
-  de giro consolidado.
+Sobre as âncoras:
+- FIPE é sempre disponível (API pública) e é o teto absoluto da âncora — usuário
+  vende próximo da FIPE, então faz pouco sentido tratar lotes de leilão como
+  candidatos a venda *acima* da FIPE. Cap explícito blindando a âncora contra
+  similares "Talvez se interesse por" inflados (modelos próximos mas mais novos
+  podem inflar a mediana) ou contra `auto_avaliar_ref` desatualizado.
+- `webmotors_mediana` na prática hoje é a mediana dos similares do AA detalhe.
+  Quando ausente, é fipe×0.97 (no `avaliador_mercado.py`). f_km calibra pela
+  km do lote vs mediana do mercado (`ajuste_km.fator_km`).
+- Tabela Auto Avaliar (`auto_avaliar_ref`) é a "ULTIMA AVALIAÇÃO" embutida na
+  página do lote — reflete atacado real e costuma ser mais baixo que FIPE.
 """
 
 from __future__ import annotations
@@ -102,19 +110,19 @@ def precificar(
     Não decide se lance atual é aceitável — só retorna o target. Orquestrador
     compara `lote.lance_atual` vs `avaliacao.preco_alvo` pra descartar.
     """
-    # 1. Preço de venda âncora — usamos a mediana de mercado como estimativa de
-    #    revenda (usuário confirmou que vende próximo da FIPE; mediana fallback=97%).
-    #    Quando Webmotors (workstream B) chegar, webmotors_mediana terá dado real.
-    #    Auto Avaliar ref: preço de referência da própria plataforma quando disponível.
-    #    fator_km calibra a âncora pela km do lote vs km mediana do mercado:
-    #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
+    # 1. Preço de venda âncora — mediana do mercado calibrada pela km do lote,
+    #    cap'ada na FIPE (teto absoluto). Cap evita que similares heterogêneos
+    #    do "Talvez se interesse por" (modelos próximos mas mais novos / mais
+    #    caros) ou `auto_avaliar_ref` desatualizado inflem a âncora acima do que
+    #    o operador efetivamente consegue vender (premissa: vende próximo da FIPE).
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
-    preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
+    fipe_teto = mercado.fipe
+    mediana_aj = int(round(mercado.webmotors_mediana * f_km))
+    preco_giro_fipe = min(mediana_aj, fipe_teto)
     preco_giro_aa: Optional[int] = None
     if mercado.auto_avaliar_ref is not None:
-        preco_giro_aa = int(round(
-            min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km
-        ))
+        aa_aj = int(round(mercado.auto_avaliar_ref * f_km))
+        preco_giro_aa = min(aa_aj, mediana_aj, fipe_teto)
     # Consolidado = o mais conservador entre os dois (mais baixo preço de giro
     # => preço-alvo de lance também mais baixo => decisão mais cautelosa).
     preco_giro = min(preco_giro_fipe, preco_giro_aa) if preco_giro_aa is not None else preco_giro_fipe
@@ -144,6 +152,10 @@ def precificar(
     margem_reais_min = int(preco_giro * empresa.margem.minima_absoluta)
     bruto_max = preco_giro - reforma.custo_total - frete_incluso - custo_op - margem_reais_min
     preco_max = int(max(bruto_max - taxa_leilao_fixa, 0) / (1 + taxa_leilao_pct))
+    # Sanity cap: o lance máximo nunca pode ser maior que a FIPE. Preço-giro já é
+    # cap'ado em FIPE acima, mas mantemos a defesa em profundidade aqui pra
+    # blindar contra qualquer valor anômalo de margem mínima ou taxa.
+    preco_max = min(preco_max, fipe_teto)
     taxas_leilao_max = int(preco_max * taxa_leilao_pct) + taxa_leilao_fixa
 
     # 6. Preço-alvo de lance (margem calculada = mais exigente que a mínima)

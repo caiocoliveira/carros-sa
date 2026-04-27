@@ -20,6 +20,7 @@ from carros_sa.tools.sheets import (
     SheetsExporter,
     _calcular_roi_no_maximo,
     _col_letter,
+    _lucro_absoluto_alvo,
 )
 
 
@@ -63,6 +64,7 @@ def _avaliacao(
     preco_max: int = 30000,
     preco_giro_fipe: int = 35000,
     preco_giro_aa=None,
+    fipe: int = 36000,
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
         empresa_id=empresa_id,
@@ -79,6 +81,8 @@ def _avaliacao(
         preco_giro=preco_giro,
         preco_giro_fipe=preco_giro_fipe,
         preco_giro_aa=preco_giro_aa,
+        fipe=fipe,
+        webmotors_mediana=preco_giro_fipe,
         justificativa="Laudo leve, FIPE R$30k, giro estimado 30 dias.",
         criado_em=datetime.utcnow(),
     )
@@ -127,6 +131,29 @@ class TestCalcularRoiNoMaximo:
         av = _avaliacao()
         av.preco_max = 0
         assert _calcular_roi_no_maximo(av) == 0.0
+
+
+class TestLucroAbsolutoAlvo:
+    """Lucro absoluto esperado se a empresa comprar pelo preco_alvo.
+
+    Algebricamente exato a partir do score_roi: lucro = preco_giro × score_roi / (1+score_roi).
+    """
+
+    def test_score_roi_zero_lucro_zero(self):
+        av = _avaliacao(score_roi=0.0, preco_giro=30000)
+        assert _lucro_absoluto_alvo(av) == 0
+
+    def test_score_roi_25pct(self):
+        # preco_giro=30000, score_roi=0.25 → capital_alvo = 30000/1.25 = 24000
+        # lucro = 30000 - 24000 = 6000
+        av = _avaliacao(score_roi=0.25, preco_giro=30000)
+        assert _lucro_absoluto_alvo(av) == 6000
+
+    def test_score_roi_negativo_clipa_zero(self):
+        # Defesa contra divisão por número ≤ 0 (score_roi ≤ -1 não deveria existir
+        # mas se acontecer, retornar 0 evita crash do exportador)
+        av = _avaliacao(score_roi=-1.0, preco_giro=30000)
+        assert _lucro_absoluto_alvo(av) == 0
 
 
 class TestSheetsExporterQuery:
@@ -521,12 +548,69 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
-    def test_exportar_roi_baseado_no_lance_maximo(self):
-        """ROI anualizado deve ser calculado sobre o lance máximo, não sobre lance_atual."""
+    def test_coluna_fipe_renderiza_valor_da_avaliacao(self):
+        """Coluna 'FIPE (R$)' deve mostrar `AvaliacaoLote.fipe` direto, sem
+        transformação. Permite ao operador comparar Lance Máximo vs FIPE
+        rapidamente."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", fipe=42_000))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_fipe = HEADER.index("FIPE (R$)")
+        assert rows[2][idx_fipe] == 42_000
+
+    def test_coluna_fipe_ausente_vira_traco(self):
+        """AvaliacaoLote pré-workstream K pode ter fipe=None — célula vira '—'."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            av = _avaliacao("L001")
+            av.fipe = None  # registro legado
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_fipe = HEADER.index("FIPE (R$)")
+        assert rows[2][idx_fipe] == "—"
+
+    def test_exportar_roi_anualizado_usa_score_roi_alvo(self):
+        """ROI anualizado deve ser score_roi (ROI no preço-alvo) anualizado pelo
+        dias_giro, NÃO o ROI no lance máximo (que é tautológico ~margem mínima).
+
+        Mudança 2026-04-27: usar score_roi diferencia lotes pelo fator_risco e
+        fator_liquidez. ROI no max é constante por construção (~10% sempre).
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=20000))
-            av = _avaliacao("L001", preco_giro=35000, preco_max=25000)
+            av = _avaliacao("L001", preco_giro=35000, preco_max=25000, score_roi=0.30)
             session.add(av)
             session.add(_laudo("L001"))
             session.commit()
@@ -545,10 +629,8 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         idx_roi = HEADER.index("ROI anualizado (%)")
         roi_val = rows[2][idx_roi]
-        # ROI no máximo ≈ 11%; sem dias_giro preenchido, fallback = 90d
-        # ROI anualizado ≈ 11 × 365/90 ≈ 44%. Faixa larga pra acomodar pequenas
-        # variações do preco_alvo/fator_risco.
-        assert 20 < roi_val < 80
+        # score_roi=0.30, dias_giro=None → fallback 90d. roi_anual = 0.30 × 365/90 ≈ 121.7%
+        assert 100 < roi_val < 140
 
 
 class TestSheetsExporterFimEmObrigatorio:

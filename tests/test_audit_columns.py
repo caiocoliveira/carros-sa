@@ -188,6 +188,37 @@ class TestAuditDeteccao:
         violacoes = audit(engine)
         assert any("Modelo" in v for v in violacoes), f"Violacoes: {violacoes}"
 
+    def test_lance_maximo_acima_da_fipe_reportado(self):
+        """preco_max > FIPE×1.05 viola o cap aplicado pelo precificador.
+
+        Cenário improvável (cap explícito em precificar()), mas o invariante
+        protege contra alguém persistir AvaliacaoLote pulando o precificador
+        ou mexer na fórmula sem reaplicar o cap.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            # FIPE 30k mas preco_max 50k → 1.67x FIPE, viola
+            session.add(_avaliacao("L001", fipe=30_000, preco_max=50_000,
+                                   preco_giro=50_000, reforma_estimada=0,
+                                   frete_incluso=0))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Lance Máximo" in v and "FIPE" in v for v in violacoes), (
+            f"Esperava violação de Lance Máximo > FIPE, obtive: {violacoes}"
+        )
+
+    def test_fipe_ausente_reportada(self):
+        """Avaliação sem FIPE persistida (registro pré-K) deve ser sinalizada
+        — sem âncora não dá pra confiar no Lance Máximo."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", fipe=None))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("FIPE" in v for v in violacoes), f"Violacoes: {violacoes}"
+
 
 # ---------------------------------------------------------------------------
 # Agregação por coluna (várias linhas → uma única violação com contagem)

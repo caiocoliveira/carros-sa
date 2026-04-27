@@ -340,6 +340,66 @@ def test_auto_avaliar_ref_zero_rejeitado_pela_validacao():
 
 
 # =============================================================================
+# Sanity FIPE — preco_giro nunca passa da FIPE; preco_max nunca passa da FIPE
+# =============================================================================
+
+def test_mediana_inflada_capa_em_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """Quando os 'similares' do AA têm mediana > FIPE (modelos próximos mais caros),
+    a âncora deve cap'ar em FIPE — operador não vende acima da FIPE."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    # Mediana 40k > FIPE 28k (cenário real: similares heterogêneos)
+    mercado_inflado = SinalMercado(
+        fipe=28_000, webmotors_mediana=40_000, webmotors_p25=35_000,
+        n_anuncios_competidores=10, dias_giro_estimado=30,
+    )
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_inflado, gol_2015_reforma, frete, empresa)
+    assert av.preco_giro_fipe == 28_000, "preco_giro_fipe deve cap'ar em FIPE"
+    assert av.preco_giro == 28_000
+    # Lance Máximo nunca passa da FIPE
+    assert av.preco_max <= 28_000
+
+
+def test_auto_avaliar_inflado_capa_em_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """auto_avaliar_ref desatualizado/inflado também deve cap'ar em FIPE."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    # AA 35k > FIPE 28k > mediana 25k. Resultado esperado: AA cap'a na mediana,
+    # ambos cap'am na FIPE como teto absoluto. preco_giro_aa = min(35k, 25k, 28k) = 25k.
+    mercado_aa_inflado = SinalMercado(
+        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=24_000,
+        n_anuncios_competidores=10, dias_giro_estimado=30,
+        auto_avaliar_ref=35_000,
+    )
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_aa_inflado, gol_2015_reforma, frete, empresa)
+    assert av.preco_giro_aa == 25_000
+    assert av.preco_max <= 28_000
+
+
+def test_preco_max_nunca_excede_fipe(
+    gol_2015_lote, gol_2015_laudo, gol_2015_reforma,
+):
+    """Defesa em profundidade: mesmo combinando f_km > 1 + mediana inflada,
+    preco_max não pode passar da FIPE."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    # Lote com km muito baixa (f_km=1.15) + mediana acima da FIPE
+    lote_km_baixa = gol_2015_lote.model_copy(update={"km": 30_000})
+    mercado = SinalMercado(
+        fipe=28_000, webmotors_mediana=35_000, webmotors_p25=32_000,
+        n_anuncios_competidores=5, dias_giro_estimado=20,
+        webmotors_km_mediana=120_000,  # f_km saturado em 1.15
+    )
+    av = precificar(lote_km_baixa, gol_2015_laudo, mercado, gol_2015_reforma, frete, empresa)
+    assert av.preco_max <= 28_000
+    assert av.preco_giro <= 28_000
+
+
+# =============================================================================
 # Bloco A — Calibração com dados reais do operador (Polo Track 2024)
 # =============================================================================
 
@@ -573,7 +633,7 @@ def test_ajuste_km_lote_com_km_alta_reduz_preco_alvo(
 def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
     gol_2015_lote, gol_2015_laudo, gol_2015_reforma
 ):
-    """Lote com km abaixo da mediana → f_km > 1 → preço-alvo sobe."""
+    """Lote com km abaixo da mediana → f_km > 1 → preço-alvo sobe (até bater no teto FIPE)."""
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
 
@@ -592,8 +652,10 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
         lote_km_baixa, gol_2015_laudo, mercado_com_km, gol_2015_reforma, frete, empresa,
     )
 
-    # preco_giro: 25000 * 1.15 = 28_750
-    assert av_com_ajuste.preco_giro == 28_750
-    # preço-alvo sobe com f_km > 1
+    # preco_giro = min(mediana_aj, fipe_teto) = min(25000*1.15, 28000) = 28_000.
+    # Sem o cap, mediana ajustada (28_750) excederia a FIPE — premissa do
+    # operador é "vendo na FIPE", então FIPE é teto absoluto da âncora.
+    assert av_com_ajuste.preco_giro == 28_000
+    # preço-alvo ainda sobe vs baseline (mediana 25k → âncora 28k é mais alta)
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
     assert "f_km=1.15" in av_com_ajuste.justificativa

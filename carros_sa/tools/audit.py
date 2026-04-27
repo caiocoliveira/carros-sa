@@ -64,6 +64,16 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
+        # Sanity FIPE: âncora de venda é cap'ada em FIPE no precificador, então
+        # preco_max não pode passar da FIPE. Tolerância de 5% acomoda
+        # arredondamentos de centavos / múltiplas raspagens FIPE no mesmo dia.
+        else f"Lance Máximo R${v} > FIPE R${r['fipe']} — cap deveria ter sido aplicado"
+        if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
+        else None
+    ),
+    "FIPE (R$)": lambda v, r: (
+        "FIPE não-positiva ou ausente — precificador rodou sem âncora?"
+        if v is None or not isinstance(v, (int, float)) or v <= 0
         else None
     ),
     "ROI anualizado (%)": lambda v, r: (
@@ -102,6 +112,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
+    "FIPE (R$)": lambda r: r.get("fipe"),
     "Lance Máximo (R$)": lambda r: r["preco_max"],
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),

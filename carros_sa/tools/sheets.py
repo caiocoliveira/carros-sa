@@ -39,6 +39,7 @@ HEADER = [
     "Fim do Leilão",
     "KM",
     "Lance Atual (R$)",
+    "FIPE (R$)",
     "Lance Máximo (R$)",
     "Lucro/mês (R$)",
     "ROI anualizado (%)",
@@ -60,6 +61,7 @@ _NUMBER_DECIMAL_1 = {"numberFormat": {"type": "NUMBER", "pattern": "0.0"}}
 COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
+    "FIPE (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
     "Lucro/mês (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
@@ -82,13 +84,40 @@ def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
     """ROI garantido se ganhar o lote exatamente pelo lance máximo.
 
     = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    onde capital_total = preco_max + reforma + frete + taxas + custo_op
+
+    Nota: por construção do precificador, esse ROI fica próximo da margem
+    mínima absoluta da empresa (10% em Uberlândia) — é um indicador "vou
+    respeitar o piso?" mais do que um sinal de ranking. Ranking deveria
+    olhar `score_roi` (ROI no preço-alvo).
     """
     if av.preco_max <= 0:
         return 0.0
+    # custo_op não está persistido em AvaliacaoLote; aproximamos como o gap
+    # entre preco_giro e (preco_max + reforma + frete + taxas + margem_min).
+    # Valor positivo é o custo_op embutido pelo precificador — derivar daqui é
+    # exato porque as duas pontas usam a mesma fórmula.
     capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
     lucro = av.preco_giro - capital
     return round(lucro / max(capital, 1) * 100, 1)
+
+
+def _lucro_absoluto_alvo(av: AvaliacaoLote) -> int:
+    """Lucro esperado em R$ se a empresa comprar pelo `preco_alvo`.
+
+    Algebricamente exato a partir do `score_roi` salvo:
+        score_roi = (preco_giro - capital_alvo) / capital_alvo
+        => capital_alvo = preco_giro / (1 + score_roi)
+        => lucro = preco_giro - capital_alvo = preco_giro * score_roi / (1 + score_roi)
+
+    Substitui o cálculo antigo `score_roi × preco_alvo`, que era enganoso
+    porque o capital investido não é só o preço-alvo (inclui reforma, frete,
+    taxas e custo operacional).
+    """
+    denom = 1.0 + av.score_roi
+    if denom <= 0:
+        return 0
+    return int(round(av.preco_giro * av.score_roi / denom))
 
 
 class SheetsExporter:
@@ -171,13 +200,19 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
-            roi_max = _calcular_roi_no_maximo(av)
-            roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+            # ROI anualizado usa o ROI no PREÇO-ALVO (`score_roi`), não o ROI
+            # no lance máximo. O ROI no máximo é tautológico por construção do
+            # precificador — sempre próximo da margem mínima absoluta da empresa
+            # (10%) — então ranquear por ele é cego. ROI no alvo varia com
+            # fator_risco/liquidez e é o sinal real de "qual lote rende mais".
+            roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
             # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
-            # score_roi × preco_alvo (lucro no caso médio do bid).
+            # "esse lote rende R$X/mês enquanto no pátio". Baseado no LUCRO
+            # ABSOLUTO no alvo (preco_giro - capital_alvo), não em
+            # score_roi × preco_alvo (que era um produto sem unidade física,
+            # subestimava o lucro porque preco_alvo é só um pedaço do capital).
             lucro_mes = lucro_reais_por_mes(
-                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
+                _lucro_absoluto_alvo(av), av.dias_giro_estimado,
             )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -227,6 +262,7 @@ class SheetsExporter:
                 "fim_em": fim_em_str,
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
+                "fipe": av.fipe,                 # FIPE bruto (registros pré-K podem ser None)
                 "preco_max": av.preco_max,
                 "roi_anualizado": round(roi_anual, 1),
                 "lucro_mes": lucro_mes,
@@ -316,6 +352,7 @@ class SheetsExporter:
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
+                r["fipe"] if r["fipe"] is not None else "—",
                 preco_max_cell,
                 lucro_mes_cell,
                 roi_anual_cell,
@@ -491,22 +528,28 @@ class SheetsExporter:
                 "Piso que precisamos cobrir pra entrar no leilão",
             ],
             [
+                "FIPE (R$)",
+                "Tabela FIPE (Parallelum v2)",
+                "Valor da Tabela FIPE para (marca, modelo, ano) no momento da avaliação. Cacheado por 20 dias. Premissa do operador: o carro é vendido próximo da FIPE — então FIPE é também o TETO da âncora de venda no precificador.",
+                "Sanity comparativo direto: 'esse lance máximo faz sentido frente à FIPE?'. Lance Máximo nunca pode passar da FIPE.",
+            ],
+            [
                 "Lance Máximo (R$)",
                 "Precificador",
-                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo.",
-                "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
+                "(preco_giro − reforma − frete − custo_op − margem_min×giro − taxa_fixa) ÷ (1 + taxa_pct), cap'ado em FIPE. preco_giro = min(mediana_mercado×f_km, FIPE) e — quando AA presente — também min com auto_avaliar_ref. Equação resolve circularidade da taxa percentual cobrada sobre o próprio lance vencedor.",
+                "Teto ABSOLUTO — acima disso ou a margem mínima da empresa não é respeitada, ou a âncora de venda fica acima da FIPE (impossível pela premissa do operador).",
             ],
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d). lucro_absoluto = preco_giro × score_roi ÷ (1+score_roi) — derivação algébrica exata do lucro esperado se ganhar pelo preço-alvo.",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+                "score_roi × 365 / dias_giro (floor 30d; fallback 90d). score_roi = ROI no PREÇO-ALVO = (preco_giro − capital_alvo) / capital_alvo. Antes usávamos ROI no máximo, mas por construção do precificador esse valor é tautológico (~margem_min absoluta da empresa) — não diferencia lotes.",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Usa o ROI no alvo (caso esperado), que varia com fator_risco e fator_liquidez do lote.",
             ],
             [
                 "Reforma (R$)",

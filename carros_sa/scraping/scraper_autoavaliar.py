@@ -134,12 +134,28 @@ _EXTRACT_PDF_URL_JS = """
 # sequer renderizada porque o click não acontecia. Afrouxamos pra qualquer
 # clicável curto contendo "laudo" e confiamos no `_EXTRACT_PDF_URL_JS` (pós-
 # click) pra rejeitar URLs que não sejam laudo real.
+#
+# 2026-04-27: 2/10 lotes da listagem de Uberlândia ficaram com laudo_pdf_url
+# = None mesmo tendo `STATUS DO LAUDO: Laudo Aprovado` no innerText. Bug:
+# nessas variantes o trigger do modal é só "Acessar" — sem a palavra "laudo"
+# no texto. O filtro de "laudo" rejeitava esses botões e o pipeline caía em
+# `_laudo_sem_pdf` (confidence=0.5 → "⚠ LAUDO NÃO ANALISADO" na planilha).
+# Fix: também aceitamos clicáveis curtos como "Acessar"/"Ver"/"Abrir" desde
+# que vivam dentro de um container cujo texto mencione um cabeçalho de laudo
+# (STATUS DO LAUDO / LAUDO DO VEÍCULO / LAUDO CAUTELAR). Sobe até 5 níveis
+# de pai pra encontrar o cabeçalho — suficiente pro DOM real do Auto Avaliar
+# e curto o bastante pra não sair do card e clicar "Acessar" do bloco de
+# documentação por engano.
 _ABRIR_MODAL_LAUDO_JS = """
 () => {
     function norm(s) {
         return (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').trim();
     }
+    const HEADERS_RE = /(status do laudo|laudo do ve[ií]culo|laudo cautelar)/;
+    const ACESSAR_RE = /^(acessar|ver|abrir|visualizar|baixar)\\b/;
+
     const alvos = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+    // Passada 1: clicáveis com "laudo" no próprio texto (caminho original).
     for (const el of alvos) {
         const txt = norm(el.textContent);
         if (txt.length === 0 || txt.length > 50) continue;
@@ -147,6 +163,27 @@ _ABRIR_MODAL_LAUDO_JS = """
         // Rejeita rótulo do decoy institucional (Relatório de Transparência Salarial)
         if (txt.includes('transparencia') || txt.includes('salarial')) continue;
         try { el.click(); return true; } catch (e) {}
+    }
+    // Passada 2: clicáveis tipo "Acessar"/"Ver"/"Abrir" que vivem dentro
+    // de um container cujo texto menciona um header de laudo. Cobre o caso
+    // "STATUS DO LAUDO\\nLaudo Aprovado\\nAcessar" sem a palavra "laudo" no
+    // próprio botão.
+    for (const el of alvos) {
+        const txt = norm(el.textContent);
+        if (txt.length === 0 || txt.length > 30) continue;
+        if (!ACESSAR_RE.test(txt)) continue;
+        let parent = el.parentElement;
+        let depth = 0;
+        while (parent && depth < 5) {
+            const ptxt = norm(parent.textContent || '');
+            if (HEADERS_RE.test(ptxt)) {
+                if (ptxt.includes('transparencia') || ptxt.includes('salarial')) break;
+                try { el.click(); return true; } catch (e) {}
+                break;
+            }
+            parent = parent.parentElement;
+            depth++;
+        }
     }
     return false;
 }

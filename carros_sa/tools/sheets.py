@@ -289,8 +289,10 @@ class SheetsExporter:
             # falhou), NÃO exibimos preço-alvo, ROI nem reforma — seriam chutes
             # baseados em laudo vazio e induziriam o operador a dar lance no
             # escuro. Mantemos identificação do lote + link pra ele resolver
-            # manualmente. O retry automático (scripts/retry_laudos_pendentes.py)
-            # tenta preencher esses campos na próxima passada.
+            # manualmente. O orquestrador reprocessa automaticamente na próxima
+            # triagem via short-circuit de LaudoCache.confidence < 0.6
+            # (ver `_pipeline_lote` em carros_sa/orquestrador.py); pra ver
+            # quais lotes estão nesse limbo, rodar `make auditar-laudos`.
             if nao_analisado:
                 preco_max_cell = "—"
                 lucro_mes_cell = "—"

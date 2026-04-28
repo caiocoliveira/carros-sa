@@ -13,6 +13,7 @@ PYTHON="$REPO_DIR/.venv/bin/python3"
 SCRIPT="$REPO_DIR/scripts/triagem_diaria.py"
 RETRY_SCRIPT="$REPO_DIR/scripts/reprocessar_lotes_do_db.py"
 DECOY_SCRIPT="$REPO_DIR/scripts/limpar_decoys_laudo.py"
+AUDIT_LAUDOS_SCRIPT="$REPO_DIR/scripts/auditar_laudos.py"
 LOG="/tmp/carros_sa_triagem.log"
 CRON_MARK="carros-sa-triagem"
 # Pipeline diário: (1) triagem completa → (2) limpeza de decoys de laudo →
@@ -31,7 +32,14 @@ CRON_MARK="carros-sa-triagem"
 # `_laudo_sem_pdf` com confidence=0.5. Sem esse passe, o lote ia pra planilha
 # como "LAUDO NÃO ANALISADO" até a próxima coleta. Cheap — pula listagem e
 # só visita a URL dos lotes pendentes (inclui os que o limpar_decoys marcou).
-CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1 # $CRON_MARK"
+#
+# (4) auditar_laudos --auto-heal: relatório final dos 3 eixos (PDF baixado /
+# revisado / link na planilha). Re-extrai laudo offline de PDFs locais válidos
+# que ainda têm confidence baixa (ex.: visão Gemini caiu no run anterior, mas
+# o PDF está bom no disco). Imprime contagem por motivo no log — operador
+# enxerga "X lotes sem URL, Y sem PDF, Z com extração falhada" sem precisar
+# entrar no SQLite.
+CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$AUDIT_LAUDOS_SCRIPT\" --empresa carros_uberlandia --auto-heal --no-fail >> \"$LOG\" 2>&1 # $CRON_MARK"
 
 if [[ "${1:-}" == "--remove" ]]; then
     echo "Removendo entrada do cron..."
@@ -58,7 +66,7 @@ fi
 
 echo "✓ Cron configurado:"
 echo "  Horário: todo dia às 07:00 e 13:00"
-echo "  Comando: triagem_diaria.py + limpar_decoys_laudo.py + retry de laudos pendentes"
+echo "  Comando: triagem + limpar_decoys + retry de laudos pendentes + auditar_laudos --auto-heal"
 echo "  Log:     $LOG"
 echo ""
 echo "Para verificar: crontab -l | grep carros-sa"

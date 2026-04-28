@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -88,7 +89,18 @@ CHECKS: Dict[str, Validator] = {
         else None
     ),
     "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
-    "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
+    # Quando o lote tem laudo analisado de verdade (PDF baixado + visão extraída,
+    # confidence >= 0.6) o link CLICÁVEL precisa estar lá — sem isso o operador
+    # confia no "✓ Viável" sem ter como abrir o laudo pra conferir a Reforma. Se
+    # o pipeline marcou laudo_analisado=True mas a célula é "—", houve dessincronia
+    # entre PDF e URL persistida (corrigível por `scripts/auditar_laudos.py`).
+    # Lotes não analisados ("⚠ LAUDO NÃO ANALISADO") seguem aceitando "—".
+    "Laudo": lambda v, r: (
+        "Laudo analisado mas link ausente/inválido — rodar `make auditar-laudos` "
+        "pra diagnosticar (URL no DB pode ter sido filtrada como decoy)"
+        if r.get("laudo_analisado") and (v == "—" or v is None)
+        else None
+    ),
 }
 
 
@@ -167,6 +179,15 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
                 scraped_at_str = str(lote.scraped_at)
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
+
+        # Espelha as decisões do exporter pra os checks ficarem coerentes:
+        # `laudo_analisado` controla se a planilha mostra "✓ Viável" ou "⚠ LAUDO
+        # NÃO ANALISADO"; `laudo_url` é o que vira HYPERLINK na coluna Laudo
+        # (ou "—" se filtrado como decoy / ausente).
+        laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
+        laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
+        laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
+
         rows.append({
             "lote_id": av.lote_id,
             "modelo": f"{lote.marca} {lote.modelo}".strip(),
@@ -198,6 +219,8 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro": av.preco_giro,
             "viavel": viavel,
             "encerrado": encerrado,
+            "laudo_analisado": laudo_analisado,
+            "laudo_url": laudo_url,
         })
 
     # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis

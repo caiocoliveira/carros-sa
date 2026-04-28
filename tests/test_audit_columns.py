@@ -133,7 +133,13 @@ class TestAuditHappyPath:
     def test_linha_valida_nao_gera_violacoes(self):
         engine = _engine_mem()
         with Session(engine) as session:
-            session.add(_lote("L001"))
+            lote = _lote("L001")
+            # URL válida de laudo no raw_json — sem isso, o invariante "Laudo
+            # analisado ⇒ link presente" dispararia (confidence default 0.95).
+            lote.raw_json = {"detalhe": {
+                "laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/abc.pdf",
+            }}
+            session.add(lote)
             session.add(_avaliacao("L001"))
             session.add(_laudo("L001"))
             session.commit()
@@ -223,3 +229,82 @@ class TestAuditAgregacao:
         assert "KM" in texto
         assert "Reforma" in texto
         assert "Ano" in texto
+
+
+class TestLaudoLinkInvariante:
+    """Coluna 'Laudo' deve flagear quando o lote tem laudo analisado mas o link
+    está '—'. Esse era o gap silencioso: laudo_analisado=True (status ✓ Viável
+    no exporter) sem `laudo_url` válido = operador confia em ROI/Reforma sem
+    ter como abrir o PDF do laudo."""
+
+    def test_laudo_analisado_sem_url_e_reportado(self):
+        """Lote com LaudoCache confidence=0.95 e raw_json sem laudo_pdf_url
+        (URL nunca foi achada pelo scraper) deve gerar violação."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L_NOLINK")
+            lote.raw_json = {"detalhe": {}}  # sem laudo_pdf_url
+            session.add(lote)
+            session.add(_avaliacao("L_NOLINK"))
+            session.add(_laudo("L_NOLINK"))  # confidence default 0.95
+            session.commit()
+        violacoes = audit(engine)
+        laudo_violacoes = [v for v in violacoes if v.startswith("⚠ Laudo:")]
+        assert laudo_violacoes, f"Esperava violação na coluna Laudo. Obteve: {violacoes}"
+
+    def test_laudo_analisado_com_url_decoy_tambem_e_reportado(self):
+        """URL existe no DB mas não passa em is_laudo_pdf_url → exporter mostra
+        '—' → invariante deve flagear."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L_DECOY")
+            lote.raw_json = {"detalhe": {
+                "laudo_pdf_url": (
+                    "https://repo-site-aav-production.storage.googleapis.com/"
+                    "app/uploads/Relatorio-de-Transparencia.pdf"
+                )
+            }}
+            session.add(lote)
+            session.add(_avaliacao("L_DECOY"))
+            session.add(_laudo("L_DECOY"))
+            session.commit()
+        violacoes = audit(engine)
+        laudo_violacoes = [v for v in violacoes if v.startswith("⚠ Laudo:")]
+        assert laudo_violacoes, f"Esperava violação na coluna Laudo. Obteve: {violacoes}"
+
+    def test_laudo_nao_analisado_com_link_ausente_nao_dispara(self):
+        """Quando o laudo NÃO foi analisado (confidence baixa), '—' no link
+        é estado esperado — não deve flagear (caso contrário inundaria o log
+        com falso positivos durante runs incompletos)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L_PEND")
+            lote.raw_json = {"detalhe": {}}
+            session.add(lote)
+            session.add(_avaliacao("L_PEND"))
+            session.add(_laudo("L_PEND", severidade="nenhuma"))
+            # confidence baixa simula fallback _laudo_sem_pdf
+            from sqlmodel import select
+            laudo_obj = session.exec(select(LaudoCache).where(LaudoCache.lote_id == "L_PEND")).first()
+            laudo_obj.confidence = 0.5
+            session.add(laudo_obj)
+            session.commit()
+        violacoes = audit(engine)
+        laudo_violacoes = [v for v in violacoes if v.startswith("⚠ Laudo:")]
+        assert not laudo_violacoes, f"Não deveria flagear quando laudo_analisado=False: {laudo_violacoes}"
+
+    def test_laudo_analisado_com_url_valida_passa_silencioso(self):
+        """Caminho feliz: laudo analisado + URL válida → nada na coluna Laudo."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L_OK")
+            lote.raw_json = {"detalhe": {
+                "laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/abc.pdf"
+            }}
+            session.add(lote)
+            session.add(_avaliacao("L_OK"))
+            session.add(_laudo("L_OK"))
+            session.commit()
+        violacoes = audit(engine)
+        laudo_violacoes = [v for v in violacoes if v.startswith("⚠ Laudo:")]
+        assert not laudo_violacoes, f"Caminho feliz não deveria flagear: {laudo_violacoes}"

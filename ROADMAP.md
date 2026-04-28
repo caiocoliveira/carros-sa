@@ -236,6 +236,24 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
   - Guard do DB real faz `dry_run` mas não auto-corrige durante o `pytest` — exige intervenção (`make limpar-decoys`). Intencional: teste não deve mutar estado de produção silenciosamente.
   - Se um novo padrão de decoy aparecer no Auto Avaliar e o `is_laudo_pdf_url()` aceitar incorretamente, ambos scraper E limpeza deixam passar. Defesa secundária fica com `_pdf_eh_laudo_valido()` no orquestrador (inspeciona o PDF baixado).
 
+### R.2 — Auditoria 3 eixos do laudo + auto-heal offline ✅
+- **Branch:** `claude/great-turing-NhzV9`
+- **Arquivos:**
+  - [`carros_sa/tools/auditor_laudos.py`](carros_sa/tools/auditor_laudos.py) — NOVO. `auditar(session, empresa_id) → ResultadoAuditoria`, classifica cada lote ATIVO em **um** motivo único — o mais a montante na cadeia: `URL_AUSENTE_NO_DB → URL_FILTRADA_DECOY → PDF_NAO_BAIXADO → PDF_LOCAL_INVALIDO → LAUDO_CACHE_AUSENTE → EXTRACAO_BAIXA_CONFIANCA → OK`. `auto_heal_local(session, resultado)` re-extrai laudo dos PDFs locais válidos com confidence baixa **sem rede** (cobre Gemini-503-no-run-anterior). `render_relatorio()` produz texto pro log com ação acionável por motivo.
+  - [`scripts/auditar_laudos.py`](scripts/auditar_laudos.py) — CLI (`--auto-heal`, `--formato=json|texto`, `--no-fail`). Imprime relatório em stderr e sai com código 1 quando há lote sem laudo (gating em CI/cron).
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — invariante "Laudo" reforçada: lote com `laudo_analisado=True` mas célula "—" agora dispara violação (era ponto cego: `✓ Viável` sem o link clicável pro PDF). Linha enriquecida com `laudo_analisado` + `laudo_url` (espelha `sheets._query`).
+  - [`Makefile`](Makefile) — `make auditar-laudos` + `make auditar-laudos-heal`.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — cron 7h/13h vira `triagem → limpar_decoys → retry-laudo-pendente → auditar_laudos --auto-heal`. Operador vê o estado dos 3 eixos no log de cada ciclo.
+  - [`tests/test_auditor_laudos.py`](tests/test_auditor_laudos.py) — 17 testes: caminho feliz silencioso, filtros (encerrado/sem fim_em/outra empresa), classificação isolada de cada motivo, agregação multi-motivo, render textual, auto-heal re-extrai com cliente novo + não toca PDFs inválidos, **guard de DB real** (skippa sem `carros_sa.db`, falha `make test` se houver lote ativo sem laudo na próxima execução).
+  - [`tests/test_audit_columns.py`](tests/test_audit_columns.py) — 4 testes novos pra a invariante "Laudo": dispara em URL ausente, dispara em URL decoy, NÃO dispara em laudo não analisado (estado esperado), passa silencioso quando tudo ok.
+- **Motivação:** R/R.1 fecharam o vetor "URL decoy", mas a planilha continuava aceitando lote ativo com Laudo "—" em silêncio sempre que (a) scraper não achou URL no DOM (modal lazy do Auto Avaliar nos casos Gol/Cruze), (b) PDF não baixou (HTTP 429 rate-limit), (c) extração caiu no fallback (Gemini 503). Não havia visibilidade de **por que** cada lote estava incompleto, e o operador descobria abrindo lote a lote.
+- **Como funciona:** classificação em motivo único garante que o operador veja a CAUSA RAIZ — se URL nem está no DB, não adianta tentar baixar PDF. Auto-heal só ataca o que dá pra remediar offline (re-extração de PDF local válido); cenários que precisam re-scrape ficam pro retry no cron. CLI sai com exit code 1 (`--fail-se-problemas` default) pra cron/CI gritar; `--no-fail` no cron evita matar a chain de comandos. Hygiene test do DB real faz o mesmo padrão do `test_decoy_laudo_guard`: skippa gracefully em CI, falha vermelho na máquina do operador na próxima `make test` se o estado de produção tem lote sem laudo.
+- **Cobertura:** 21 testes novos (17 + 4). Suite: **346/346 verde**.
+- **Limitações conhecidas:**
+  - Auto-heal só atua sobre `EXTRACAO_BAIXA_CONFIANCA` e `LAUDO_CACHE_AUSENTE` quando o PDF local é válido. `URL_AUSENTE_NO_DB`, `URL_FILTRADA_DECOY`, `PDF_NAO_BAIXADO`, `PDF_LOCAL_INVALIDO` continuam dependendo do retry com rede (próximo ciclo do cron).
+  - `_pdf_eh_laudo_valido` é duplicada entre `orquestrador.py` e `tools/auditor_laudos.py` pra evitar puxar Playwright na cadeia de import só pra auditar. Se a heurística evoluir num lado, sincronizar manualmente — não há teste de paridade.
+  - Hygiene test bloqueia `make test` se houver QUALQUER lote ativo sem laudo. Em janelas de manutenção (Gemini fora do ar há horas), isso pode ficar cronicamente vermelho — usar `pytest -k 'not TestHygieneDBReal'` pra escapar enquanto resolve a causa.
+
 ### I — Exportador Google Sheets ✅
 - **Branch:** `claude/laughing-dewdney`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py), [`scripts/exportar_sheets.py`](scripts/exportar_sheets.py)

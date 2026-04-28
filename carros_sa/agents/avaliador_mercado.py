@@ -121,14 +121,32 @@ def avaliar(
     fipe = fipe_client or FipeClient()
     fipe_valor = _consultar_fipe_com_cache(fipe, marca, modelo, ano, session)
 
+    # `similares_precos` vem de "Talvez se interesse por" no Auto Avaliar — um
+    # widget de recomendação que mistura modelos e anos diferentes (ex.: lote
+    # S10 2023 retorna preços de Cruze, Vectra, Onix). Quando a mediana cai
+    # MUITO fora de FIPE significa que o widget contaminou a amostra com lotes
+    # não-comparáveis; nesse caso ignoramos e voltamos pro fallback FIPE×0.97.
+    # Limite calibrado pra deixar passar variação plausível (FIPE varejo vs
+    # mediana atacado de mesmo modelo) sem aceitar contaminação grosseira.
+    _LIMITE_INFERIOR_PCT = 0.70   # mediana < 70% FIPE → suspeito (sub-anchor)
+    _LIMITE_SUPERIOR_PCT = 1.10   # mediana > 110% FIPE → suspeito (super-anchor)
     sim = [p for p in (similares_precos or []) if p > 0]
+    similares_confiaveis = False
     if sim:
-        mediana = int(round(statistics.median(sim)))
-        p25 = _percentil_25(sim)
-        n = len(sim)
-    else:
-        # sem dados de competidores: usa FIPE como referência de revenda.
-        # O usuário confirmou que vende próximo da FIPE — então mediana≈97%
+        mediana_raw = int(round(statistics.median(sim)))
+        p25_raw = _percentil_25(sim)
+        if (
+            _LIMITE_INFERIOR_PCT * fipe_valor
+            <= mediana_raw
+            <= _LIMITE_SUPERIOR_PCT * fipe_valor
+        ):
+            mediana = mediana_raw
+            p25 = p25_raw
+            n = len(sim)
+            similares_confiaveis = True
+    if not similares_confiaveis:
+        # Sem dados de competidores confiáveis: usa FIPE como referência de
+        # revenda. O usuário confirmou que vende próximo da FIPE — mediana≈97%
         # (margem de negociação de ~3%). p25≈88% é conservador pra ranking.
         # Webmotors (workstream B) substituirá esses fallbacks por dados reais.
         mediana = int(round(fipe_valor * 0.97))

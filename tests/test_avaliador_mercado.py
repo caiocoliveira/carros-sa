@@ -191,3 +191,57 @@ def test_fallback_sem_similares(fipe_responses, in_memory_session):
     # Fiesta 2013 → hatch VELHO → prior 100d.
     # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → prior puro.
     assert sinal.dias_giro_estimado == 100
+
+
+def test_similares_contaminados_por_modelos_diferentes_caem_no_fallback_fipe(
+    fipe_responses, in_memory_session,
+):
+    """Bug observado em produção (data/detalhes/21865222.json — S10 2023):
+    a seção 'Talvez se interesse por' do Auto Avaliar mistura modelos e anos
+    diferentes. Para o S10 retornava preços de Cruze/Vectra/Onix com mediana
+    R$ 62k, enquanto a FIPE do S10 fica acima de R$ 150k. Usar essa mediana
+    como âncora de revenda jogava o `preco_max` pra ~R$ 58k e descartava lotes
+    bons. Agora o avaliador detecta a contaminação (mediana fora de
+    [70%, 110%] da FIPE) e cai no fallback FIPE × 0.97.
+    """
+    fake = FakeFipeClient(fipe_responses)
+    # FIPE Fiesta 2013 = R$ 30.876. Similares "intrusos" com mediana ≈ R$ 12k
+    # (38% da FIPE) — fora do intervalo de confiança (70%-110%).
+    intrusos = [10000, 11000, 12000, 13000, 14000]
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=intrusos,
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+    )
+    # Caiu no fallback — mediana ≈ FIPE × 0.97
+    assert sinal.webmotors_mediana == round(30876 * 0.97)
+    # Marcador `n_anuncios_competidores=0` sinaliza pro precificador que não temos
+    # amostra confiável → fator_liquidez vai responder mais conservadoramente.
+    assert sinal.n_anuncios_competidores == 0
+
+
+def test_similares_super_anchored_acima_da_fipe_caem_no_fallback(
+    fipe_responses, in_memory_session,
+):
+    """Caso simétrico: mediana acima de 110% da FIPE também é contaminação
+    (típico quando o widget mistura modelo recente — ex.: Cruze 2012 lance
+    onde aparecem Cruze 2018-2019 a R$ 65k+ em widget enquanto FIPE 2012
+    está em R$ 38k)."""
+    fake = FakeFipeClient(fipe_responses)
+    # FIPE = R$ 30.876. Mediana R$ 60k (194% da FIPE) → fora do limite superior.
+    super_anchor = [55000, 58000, 60000, 65000, 70000]
+    sinal = avaliar(
+        marca="Ford",
+        modelo="Fiesta 1.6 SE Hatch",
+        ano=2013,
+        similares_precos=super_anchor,
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake,
+        session=in_memory_session,
+    )
+    assert sinal.webmotors_mediana == round(30876 * 0.97)
+    assert sinal.n_anuncios_competidores == 0

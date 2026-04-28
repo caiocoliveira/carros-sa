@@ -108,6 +108,41 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - **NÃO** alterar `carros_sa/models.py` sem discutir — quebra outras sessões em paralelo.
 - **NÃO** rodar chamadas de LLM dentro de testes — usar fixture salva em `tests/fixtures/`.
 
+## Quirks já mapeados (não redescobrir)
+
+- **`similares_precos` em `parsers._extrai_precos_similares` é LIXO** quando
+  consumido cego: vem da seção "Talvez se interesse por" do Auto Avaliar, que é
+  um widget de recomendação misturando modelos e anos diferentes (S10 2023 traz
+  preços de Cruze/Vectra/Onix; Saveiro 2010 traz Saveiro 2025 zero-km). Em
+  amostra real (data/detalhes/), 80% dos lotes têm mediana de similares fora do
+  intervalo [70%, 110%] de qualquer âncora plausível. **Por isso o
+  `avaliador_mercado.avaliar` clampa a mediana contra a FIPE e, fora do
+  intervalo, cai pro fallback `FIPE × 0.97`** (ver `_LIMITE_INFERIOR_PCT`/
+  `_LIMITE_SUPERIOR_PCT`). Workstream B (Webmotors real) deve substituir a
+  fonte e dispensar o clamp.
+- **`auto_avaliar_ref` (ULTIMA AVALIAÇÃO) é ATACADO, não varejo.** Usá-la como
+  âncora de revenda (preço de giro) sub-anchora 20-30%. Mantemos como sinal pra
+  `preco_giro_aa` mas a coluna é primariamente para auditoria humana — o
+  `preco_giro` consolidado fica dominado pelo `preco_giro_fipe = mediana × f_km`.
+- **`score_roi` é o ROI no preço-ALVO, não no MAX.** ROI no MAX é tautologia
+  por construção do precificador (cai sempre em `margem_min/(1−margem_min)`) e
+  não diferencia lotes — não usar como ranking. A planilha exibe `score_roi`
+  anualizado.
+- **Lucro absoluto correto = `score_roi × preco_giro / (1 + score_roi)`**, não
+  `score_roi × preco_alvo`. Derivado algebricamente de `capital_alvo = giro − retorno`.
+  Helper em `sheets._lucro_alvo_absoluto`.
+- **`_calcular_roi_no_maximo` foi REMOVIDO** (estava bugado, omitia `custo_op`,
+  e mesmo correto seria tautologia). Usar `_roi_alvo_pct` ou `score_roi` direto.
+
+## Workflow de revisão / aprendizado por dia
+
+- Quando achar bug significativo num review (especialmente em fórmula de
+  precificação ou em parsing de fonte externa), atualizar este CLAUDE.md na
+  seção "Quirks já mapeados" — assim a próxima sessão não começa do zero.
+- Toda invariante econômica encontrada em produção deve virar `CHECKS` em
+  `carros_sa/tools/audit.py` (paridade HEADER↔CHECKS é teste obrigatório). Se
+  o operador conseguiu apontar manualmente, a auditoria também consegue.
+
 ## Dado real de referência
 
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.

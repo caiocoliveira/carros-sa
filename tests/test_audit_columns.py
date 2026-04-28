@@ -60,6 +60,7 @@ def _avaliacao(
     webmotors_mediana: Optional[int] = 34000,
     preco_giro_fipe: int = 30000,
     preco_giro_aa: Optional[int] = None,
+    score_roi: float = 0.3,
     justificativa: str = "Laudo leve, FIPE R$30k, giro estimado 90 dias.",
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
@@ -67,7 +68,7 @@ def _avaliacao(
         lote_id=lote_id,
         preco_alvo=25000,
         preco_max=preco_max,
-        score_roi=0.3,
+        score_roi=score_roi,
         fator_risco=fator_risco,
         fator_liquidez=1.0,
         margem_aplicada=0.15,
@@ -147,15 +148,17 @@ class TestAuditHappyPath:
 
 class TestAuditDeteccao:
     def test_roi_absurdo_reportado(self):
-        """ROI anualizado > 1000% sugere erro de cálculo — fora do racional econômico."""
+        """ROI anualizado > 1000% sugere erro de cálculo — fora do racional econômico.
+
+        Agora a coluna 'ROI anualizado (%)' usa `score_roi` direto (não mais ROI no
+        max bugado). Pra disparar a invariante, o score_roi tem que estar absurdo —
+        cenário típico só aparece em bugs do precificador (ex: preco_giro alucinado).
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=1000))
-            # preco_giro enorme vs preco_max minúsculo → ROI no máximo explode,
-            # anualizado com dias_giro=30 vira ~5 dígitos.
-            session.add(_avaliacao("L001", preco_max=1000, preco_giro=100_000,
-                                   reforma_estimada=0, frete_incluso=0,
-                                   dias_giro_estimado=30))
+            # score_roi absurdo (ex: 5.0 = 500%); anualizado 30d → ~6083% > 1000%
+            session.add(_avaliacao("L001", score_roi=5.0, dias_giro_estimado=30))
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"
@@ -187,6 +190,38 @@ class TestAuditDeteccao:
             session.commit()
         violacoes = audit(engine)
         assert any("Modelo" in v for v in violacoes), f"Violacoes: {violacoes}"
+
+    def test_lance_max_acima_do_giro_reportado(self):
+        """Pagar mais que o preço de giro = perder dinheiro garantido. Bug
+        crítico do precificador deve ser pego pela auditoria."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10000))
+            session.add(_avaliacao(
+                "L001",
+                preco_giro=30000,
+                preco_max=35000,    # 5k acima do giro — impossível
+                fipe=32000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("preço de giro" in v for v in violacoes), f"Violacoes: {violacoes}"
+
+    def test_lance_max_acima_da_fipe_reportado(self):
+        """Pagar acima da FIPE × 1.05 sugere FIPE ruim ou super-anchor —
+        invariante econômico básico (não dá pra revender acima do varejo)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10000))
+            session.add(_avaliacao(
+                "L001",
+                preco_giro=50000,
+                preco_max=42000,    # > FIPE×1.05 = 33.6k
+                fipe=32000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("FIPE × 1.05" in v for v in violacoes), f"Violacoes: {violacoes}"
 
 
 # ---------------------------------------------------------------------------

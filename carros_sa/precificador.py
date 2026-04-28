@@ -1,21 +1,28 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
-    preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
-    margem_min       = margem_base * fator_risco * fator_liquidez
-    preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
+Fórmula (real, conferida com o código):
+    preco_giro_fipe  = webmotors_mediana * f_km
+    preco_giro_aa    = min(auto_avaliar_ref, webmotors_mediana) * f_km   # só se auto_avaliar_ref
+    preco_giro       = min(preco_giro_fipe, preco_giro_aa)               # consolidado
+    margem_aplicada  = max(margem_base * fator_risco * fator_liquidez, margem_minima)
+    preco_alvo_lance = (preco_giro - reforma - frete - custo_op - margem_aplicada * preco_giro
+                        - taxa_fixa) / (1 + taxa_pct)
+
+`webmotors_mediana` vem do AvaliadorMercado: mediana dos `similares_precos`
+quando o widget "Talvez se interesse por" do Auto Avaliar trouxe lotes de fato
+comparáveis (filtro: mediana dentro de [70%, 110%] da FIPE), senão fallback
+FIPE × 0.97. `webmotors_p25` é exposto pra debug mas NÃO entra na fórmula
+hoje — antes da migração foi candidato a piso conservador.
+
+Sobre as duas âncoras:
+- FIPE é sempre disponível (API pública).
+- Tabela Auto Avaliar (auto_avaliar_ref) só está disponível quando o lote (ou
+  um lote histórico do mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida.
+  Reflete atacado real e costuma ser mais baixo que FIPE — usamos `min` pra
+  ficar conservador.
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
-
-Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
-- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
-  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
-  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
-  de giro consolidado.
 """
 
 from __future__ import annotations

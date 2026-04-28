@@ -78,17 +78,35 @@ def _col_letter(idx_0based: int) -> str:
             return letters
 
 
-def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
-    """ROI garantido se ganhar o lote exatamente pelo lance máximo.
+def _lucro_alvo_absoluto(av: AvaliacaoLote) -> int:
+    """Lucro esperado em R$ se ganhar o lote pelo `preco_alvo`.
 
-    = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    Derivado algebricamente de campos persistidos (sem precisar carregar
+    `empresa` pra obter custo_op):
+
+        score_roi = retorno_alvo / capital_alvo
+        capital_alvo = preco_giro - retorno_alvo
+        => retorno_alvo = score_roi × preco_giro / (1 + score_roi)
+
+    Antes a coluna `Lucro/mês (R$)` usava `score_roi × preco_alvo`, que é
+    `retorno_alvo × preco_alvo / capital_alvo` — não o retorno real.
     """
-    if av.preco_max <= 0:
-        return 0.0
-    capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
-    lucro = av.preco_giro - capital
-    return round(lucro / max(capital, 1) * 100, 1)
+    if av.preco_giro <= 0 or av.score_roi <= 0:
+        return 0
+    return int(round(av.score_roi * av.preco_giro / (1 + av.score_roi)))
+
+
+def _roi_alvo_pct(av: AvaliacaoLote) -> float:
+    """ROI esperado (%) no `preco_alvo` — ranking metric oficial.
+
+    Antes esta planilha mostrava "ROI no preco_max", que pelo design do
+    precificador é uma TAUTOLOGIA (cai sempre em margem_min/(1−margem_min) por
+    construção do teto) E estava bugada (esquecia `custo_op` no capital,
+    inflando o número em ~4-5pp). `score_roi` já é o ROI no preço-alvo, calibrado
+    pela margem ajustada por risco/liquidez — varia entre lotes e é o sinal certo
+    pra ranqueamento.
+    """
+    return round(av.score_roi * 100.0, 1)
 
 
 class SheetsExporter:
@@ -171,13 +189,15 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
-            roi_max = _calcular_roi_no_maximo(av)
-            roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
-            # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
-            # score_roi × preco_alvo (lucro no caso médio do bid).
+            # ROI anualizado calculado sobre o preco-alvo (`score_roi`).
+            # Antes anualizávamos o "ROI no max" — uma tautologia que vinha
+            # ainda mais enviesada por bug (custo_op fora do capital).
+            roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
+            # Lucro/mês — métrica intuitiva pro operador: "esse lote rende
+            # R$X/mês enquanto no pátio". Usa o lucro absoluto correto no
+            # preço-alvo (ver _lucro_alvo_absoluto), não score_roi × preco_alvo.
             lucro_mes = lucro_reais_por_mes(
-                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
+                _lucro_alvo_absoluto(av), av.dias_giro_estimado,
             )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -499,14 +519,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
+                "lucro_alvo × 30 ÷ dias_giro (floor 30d; fallback 90d). lucro_alvo = score_roi × preco_giro / (1 + score_roi) — derivação algébrica do retorno absoluto se ganhar pelo `preco_alvo` (capital = preco_giro − retorno).",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d). `score_roi` é o ROI no preço-ALVO (= retorno_alvo / capital_alvo) calibrado pela margem ajustada por risco e liquidez do laudo/mercado.",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. ANTES anualizávamos o 'ROI no max', mas pelo design do precificador esse valor é tautologia (cai sempre em margem_min/(1−margem_min)) e não diferencia lotes.",
             ],
             [
                 "Reforma (R$)",

@@ -23,7 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
+from carros_sa.tools.sheets import HEADER, _roi_alvo_pct
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
@@ -64,6 +64,12 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
+        else "Lance Máximo > preço de giro — impossível recuperar capital, bug no precificador"
+        if isinstance(v, (int, float)) and v > 0
+            and r.get("preco_giro") and v > r["preco_giro"]
+        else "Lance Máximo > FIPE × 1.05 — sistema sugerindo pagar acima do varejo, suspeito"
+        if isinstance(v, (int, float)) and v > 0
+            and r.get("fipe") and v > r["fipe"] * 1.05
         else None
     ),
     "ROI anualizado (%)": lambda v, r: (
@@ -138,8 +144,8 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        roi_max = _calcular_roi_no_maximo(av)
-        roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+        roi_alvo_pct = _roi_alvo_pct(av)
+        roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -183,7 +189,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
-            "roi_pct": roi_max,
+            "roi_pct": roi_alvo_pct,
             "dias_giro": av.dias_giro_estimado,
             "roi_anualizado": round(roi_anual, 1),
             "fator_risco": round(av.fator_risco, 3),

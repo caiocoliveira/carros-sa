@@ -18,8 +18,9 @@ from carros_sa.tools.sheets import (
     COLUMN_FORMATS,
     HEADER,
     SheetsExporter,
-    _calcular_roi_no_maximo,
     _col_letter,
+    _lucro_alvo_absoluto,
+    _roi_alvo_pct,
 )
 
 
@@ -110,23 +111,42 @@ def _exporter() -> SheetsExporter:
 # Testes
 # ---------------------------------------------------------------------------
 
-class TestCalcularRoiNoMaximo:
-    def test_roi_positivo(self):
-        """ROI se ganhar no lance máximo: (giro - capital_max) / capital_max."""
-        av = _avaliacao(preco_giro=35000, preco_max=25000)
-        av.reforma_estimada = 3000
-        av.frete_incluso = 1500
-        av.taxas_leilao = int(25000 * 0.08)  # 2000
-        # capital = 25000 + 3000 + 1500 + 2000 = 31500
-        # lucro = 35000 - 31500 = 3500
-        # roi = 3500 / 31500 * 100 ≈ 11.1
-        roi = _calcular_roi_no_maximo(av)
-        assert roi == pytest.approx(11.1, abs=0.5)
+class TestRoiAlvoEDerivados:
+    """Métricas no preço-ALVO substituem o `_calcular_roi_no_maximo` antigo.
 
-    def test_preco_max_zero_retorna_zero(self):
-        av = _avaliacao()
-        av.preco_max = 0
-        assert _calcular_roi_no_maximo(av) == 0.0
+    Bugs corrigidos:
+      - Faltava `custo_op` no capital → ROI inflado em ~4-5pp.
+      - ROI no MAX é tautologia (cai sempre em margem_min/(1−margem_min)) por
+        construção do precificador → coluna não diferenciava lotes.
+      - Lucro/mês usava `score_roi × preco_alvo` (errado pelo fator
+        `preco_alvo / capital_alvo` ≈ 0.7-0.9).
+    """
+
+    def test_roi_alvo_pct_eh_score_roi(self):
+        """ROI alvo (%) é simplesmente `score_roi × 100`, arredondado a 1 casa."""
+        av = _avaliacao(score_roi=0.347)
+        assert _roi_alvo_pct(av) == 34.7
+
+    def test_lucro_alvo_eh_retorno_real_no_alvo(self):
+        """Verifica derivação algébrica: retorno = score_roi × giro / (1+score_roi).
+
+        Cenário: giro=50.000, score_roi=0.25.
+        Capital_alvo = giro − retorno = 50.000 − retorno
+        => retorno × (1 + 0.25) = 0.25 × 50.000
+        => retorno = 12.500 / 1.25 = 10.000.
+        """
+        av = _avaliacao(preco_giro=50000, score_roi=0.25)
+        assert _lucro_alvo_absoluto(av) == 10000
+
+    def test_lucro_alvo_zero_quando_giro_zero(self):
+        av = _avaliacao(preco_giro=0)
+        assert _lucro_alvo_absoluto(av) == 0
+
+    def test_lucro_alvo_zero_quando_score_zero_ou_negativo(self):
+        av = _avaliacao(score_roi=0.0)
+        assert _lucro_alvo_absoluto(av) == 0
+        av2 = _avaliacao(score_roi=-0.1)
+        assert _lucro_alvo_absoluto(av2) == 0
 
 
 class TestSheetsExporterQuery:
@@ -521,12 +541,18 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
-    def test_exportar_roi_baseado_no_lance_maximo(self):
-        """ROI anualizado deve ser calculado sobre o lance máximo, não sobre lance_atual."""
+    def test_exportar_roi_anualizado_usa_score_roi_alvo(self):
+        """ROI anualizado deve refletir `score_roi` (ROI no preço-ALVO) — antes
+        usávamos ROI no MAX (tautologia + bug de custo_op), agora a métrica
+        diferencia lotes pelo retorno calibrado por risco/liquidez.
+
+        Setup: score_roi=0.30 → ROI alvo=30%. Sem dias_giro → fallback 90d.
+        Anualizado = 30 × 365/90 ≈ 121.7%. Faixa estreita (±5pp) pra travar.
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=20000))
-            av = _avaliacao("L001", preco_giro=35000, preco_max=25000)
+            av = _avaliacao("L001", preco_giro=35000, preco_max=25000, score_roi=0.30)
             session.add(av)
             session.add(_laudo("L001"))
             session.commit()
@@ -545,10 +571,7 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
         idx_roi = HEADER.index("ROI anualizado (%)")
         roi_val = rows[2][idx_roi]
-        # ROI no máximo ≈ 11%; sem dias_giro preenchido, fallback = 90d
-        # ROI anualizado ≈ 11 × 365/90 ≈ 44%. Faixa larga pra acomodar pequenas
-        # variações do preco_alvo/fator_risco.
-        assert 20 < roi_val < 80
+        assert 117 < roi_val < 127
 
 
 class TestSheetsExporterFimEmObrigatorio:

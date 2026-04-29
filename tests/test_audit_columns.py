@@ -60,6 +60,7 @@ def _avaliacao(
     webmotors_mediana: Optional[int] = 34000,
     preco_giro_fipe: int = 30000,
     preco_giro_aa: Optional[int] = None,
+    score_roi: float = 0.3,
     justificativa: str = "Laudo leve, FIPE R$30k, giro estimado 90 dias.",
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
@@ -67,7 +68,7 @@ def _avaliacao(
         lote_id=lote_id,
         preco_alvo=25000,
         preco_max=preco_max,
-        score_roi=0.3,
+        score_roi=score_roi,
         fator_risco=fator_risco,
         fator_liquidez=1.0,
         margem_aplicada=0.15,
@@ -147,15 +148,21 @@ class TestAuditHappyPath:
 
 class TestAuditDeteccao:
     def test_roi_absurdo_reportado(self):
-        """ROI anualizado > 1000% sugere erro de cálculo — fora do racional econômico."""
+        """ROI anualizado > 1000% sugere score_roi inflado ou dias_giro=1 (floor não aplicado)."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=1000))
-            # preco_giro enorme vs preco_max minúsculo → ROI no máximo explode,
-            # anualizado com dias_giro=30 vira ~5 dígitos.
-            session.add(_avaliacao("L001", preco_max=1000, preco_giro=100_000,
-                                   reforma_estimada=0, frete_incluso=0,
-                                   dias_giro_estimado=30))
+            # ROI anualizado = score_roi × 365 / dias_giro. Score 5.0 (500% no
+            # alvo, valor que NÃO deveria existir) × 365 / 30 = 6083% > 1000.
+            session.add(_avaliacao(
+                "L001",
+                preco_max=1000,
+                preco_giro=100_000,
+                reforma_estimada=0,
+                frete_incluso=0,
+                dias_giro_estimado=30,
+                score_roi=5.0,
+            ))
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"

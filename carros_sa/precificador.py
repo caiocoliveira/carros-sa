@@ -1,21 +1,35 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula (ver plano):
-    preco_giro_fipe  = min(FIPE * 0.95, webmotors_p25)
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_p25)  # só se auto_avaliar_ref
-    preco_giro       = min(preco_giro_fipe, preco_giro_aa)   # consolidado, mais conservador
-    margem_min       = margem_base * fator_risco * fator_liquidez
-    preco_alvo_lance = preco_giro - reforma - taxas - frete - custo_op - margem_min * preco_giro
+Fórmula efetiva (espelha o código abaixo):
+    f_km             = fator_km(km_lote, webmotors_km_mediana)            # ∈ [0.75, 1.15]
+    preco_giro_fipe  = webmotors_mediana × f_km
+    preco_giro_aa    = min(auto_avaliar_ref, webmotors_mediana) × f_km    # só se auto_avaliar_ref
+    preco_giro       = min(preco_giro_fipe, preco_giro_aa)                # consolidado, mais conservador
+    margem_min       = margem_base × fator_risco × fator_liquidez
+    preco_alvo_lance = (preco_giro − reforma − frete − custo_op − margem_min×preco_giro − taxa_fixa)
+                      / (1 + taxa_pct)
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
 Sobre as duas âncoras:
-- FIPE é sempre disponível (API pública). Ajustamos por 5% pq FIPE é varejo.
+- `webmotors_mediana` é a fonte primária de revenda. Quando Webmotors live ainda
+  não está conectado (workstream G), o AvaliadorMercado a preenche como
+  `FIPE × 0.97` (ver `agents/avaliador_mercado.py`). Daí o nome `preco_giro_fipe`
+  não é literal: é a âncora de mediana (com fallback indireto pra FIPE).
+  `webmotors_p25` é exposto em `SinalMercado` mas hoje NÃO é usado no precificador
+  (versões anteriores usavam `min(FIPE×0.95, p25)`; a fórmula evoluiu).
 - Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
   mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
   costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
   de giro consolidado.
+
+Invariantes esperados (validados pelo audit):
+- `preco_max ≤ preco_giro × (1 − margem_min)` por construção (resolve a circularidade
+  da taxa de leilão).
+- `preco_max < FIPE` em condições normais. Pode ficar perto/acima de FIPE só em
+  cenários extremos: f_km no teto (km do lote << km mediana de mercado) somado a
+  custos baixos; alerta no audit captura isso.
 """
 
 from __future__ import annotations

@@ -29,7 +29,7 @@ CRON_MARK="carros-sa-triagem"
 # (3) retry: quando o scraper não acha o `laudo_pdf_url` no 1º passe (modal
 # lento, rede instável, layout diferente do grupo), o orquestrador cai em
 # `_laudo_sem_pdf` com confidence=0.5. Sem esse passe, o lote ia pra planilha
-# como "LAUDO NÃO ANALISADO" até a próxima coleta. Cheap — pula listagem e
+# como "LAUDO NÃO CAPTURADO" até a próxima coleta. Cheap — pula listagem e
 # só visita a URL dos lotes pendentes (inclui os que o limpar_decoys marcou).
 CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1 # $CRON_MARK"
 

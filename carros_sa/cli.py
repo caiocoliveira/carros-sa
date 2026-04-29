@@ -160,10 +160,15 @@ def top(
     for av, lote, roi_anual in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
-        # Lucro esperado no alvo (usar score_roi × capital_alvo daria o lucro
-        # no caso médio). Aproximação simples: score_roi × preco_alvo — é o
-        # lucro que a margem.base × fatores persegue no preço-alvo.
-        lucro_esperado = int(av.score_roi * av.preco_alvo)
+        # Lucro absoluto exato no preço-alvo:
+        #   score_roi = lucro / capital_alvo  ⇒  capital_alvo = preco_giro / (1 + score_roi)
+        #   lucro = preco_giro - capital_alvo = preco_giro × score_roi / (1 + score_roi)
+        # Substitui aproximação anterior `score_roi × preco_alvo` que subestimava
+        # ~10% (capital_alvo > preco_alvo por reforma/frete/taxas/custo_op).
+        lucro_esperado = (
+            int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
+            if av.score_roi > 0 and av.preco_giro > 0 else 0
+        )
         r_mes = lucro_reais_por_mes(lucro_esperado, av.dias_giro_estimado)
         tbl.add_row(
             lote.id,

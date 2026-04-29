@@ -172,6 +172,78 @@ class TestSheetsExporterQuery:
         assert "Última atualização" in call_args[0][0]
         assert call_args[1] == HEADER
 
+    def test_exportar_fipe_em_coluna_dedicada(self):
+        """Coluna FIPE (R$) renderiza `av.fipe` direto. Não depende do laudo —
+        fica visível mesmo quando o lote está com 'LAUDO NÃO ANALISADO'.
+        Registros sem fipe (pré-workstream K) caem pro placeholder '—'."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # L001: avaliação com fipe preenchido + laudo ok
+            session.add(_lote("L001"))
+            av1 = _avaliacao("L001")
+            av1.fipe = 32000
+            session.add(av1)
+            session.add(_laudo("L001"))
+            # L002: sem laudo (não analisado), mas com fipe — deve aparecer
+            session.add(_lote("L002", modelo="Gol", lance_atual=18000))
+            av2 = _avaliacao("L002")
+            av2.fipe = 25000
+            session.add(av2)
+            # L003: avaliação sem fipe (registro antigo, NULL) → '—'
+            session.add(_lote("L003", modelo="Onix", lance_atual=22000))
+            av3 = _avaliacao("L003")
+            av3.fipe = None
+            session.add(av3)
+            session.add(_laudo("L003"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_fipe = HEADER.index("FIPE (R$)")
+        idx_modelo = HEADER.index("Modelo")
+        # Mapeia modelo → fipe
+        fipe_por_modelo = {rows[i][idx_modelo]: rows[i][idx_fipe] for i in range(2, len(rows))}
+        assert fipe_por_modelo["Fiesta"] == 32000
+        assert fipe_por_modelo["Gol"] == 25000      # FIPE aparece mesmo sem laudo
+        assert fipe_por_modelo["Onix"] == "—"       # registro antigo sem fipe
+
+    def test_exportar_marca_e_modelo_em_colunas_separadas(self):
+        """Marca e Modelo são colunas dedicadas — operador filtra por fabricante
+        sem depender de string composta. Modelo cell guarda só `lote.modelo`."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", marca="Ford", modelo="Fiesta"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_marca = HEADER.index("Marca")
+        idx_modelo = HEADER.index("Modelo")
+        assert rows[2][idx_marca] == "Ford"
+        assert rows[2][idx_modelo] == "Fiesta"
+
     def test_exportar_viaveis_aparecem_primeiro(self):
         """Lotes com preco_max > lance_atual (viáveis) devem vir antes dos inviáveis."""
         engine = _engine_mem()

@@ -42,10 +42,14 @@ CHECKS: Dict[str, Validator] = {
         None if v in SITUACOES_VALIDAS
         else f"Situação '{v}' fora do domínio {SITUACOES_VALIDAS}"
     ),
+    "Marca": lambda v, r: (
+        "Marca string vazia — scraper não capturou fabricante do card"
+        if not v or not str(v).strip()
+        else None
+    ),
     "Modelo": lambda v, r: (
-        "Modelo string vazia" if not v or not str(v).strip()
-        else "Modelo sem marca e sem nome — scraper falhou em capturar campos"
-        if not r.get("marca") or not r.get("modelo_raw")
+        "Modelo string vazia — scraper não capturou nome do modelo"
+        if not v or not str(v).strip()
         else None
     ),
     "Ano": lambda v, r: (
@@ -74,6 +78,14 @@ CHECKS: Dict[str, Validator] = {
             if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
             else None
         )
+    ),
+    # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
+    # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
+    # de scraping/cache do client FIPE.
+    "FIPE (R$)": lambda v, r: (
+        "FIPE não-positivo — provável falha do client FIPE ou cache stale"
+        if isinstance(v, (int, float)) and v <= 0
+        else None
     ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d) ou score_roi inflado"
@@ -109,13 +121,15 @@ CHECKS: Dict[str, Validator] = {
 COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
-    "Modelo": lambda r: r["modelo"],
+    "Marca": lambda r: r["marca"],
+    "Modelo": lambda r: r["modelo_raw"],
     "Ano": lambda r: r["ano"],
     "Cidade": lambda r: r["cidade"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
+    "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
     "Reforma (R$)": lambda r: r["reforma_estimada"],

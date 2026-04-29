@@ -34,6 +34,7 @@ from carros_sa.tools.tese import (
 HEADER = [
     "Rank",
     "Situação",
+    "Marca",
     "Modelo",
     "Ano",
     "Cidade",
@@ -41,6 +42,7 @@ HEADER = [
     "KM",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
+    "FIPE (R$)",
     "Lucro/mês (R$)",
     "ROI anualizado (%)",
     "Reforma (R$)",
@@ -62,6 +64,7 @@ COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
+    "FIPE (R$)": _NUMBER_INTEIRO,
     "Lucro/mês (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
@@ -236,13 +239,15 @@ class SheetsExporter:
 
             rows.append({
                 "lote_id": av.lote_id,
-                "modelo": f"{lote.marca} {lote.modelo}",
+                "marca": lote.marca,
+                "modelo": lote.modelo,
                 "ano": lote.ano,
                 "cidade": lote.origem_cidade or "—",
                 "fim_em": fim_em_str,
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
+                "fipe": av.fipe,
                 "roi_anualizado": round(roi_anual, 1),
                 "lucro_mes": lucro_mes,
                 "reforma_estimada": av.reforma_estimada,
@@ -335,9 +340,15 @@ class SheetsExporter:
                 reforma_cell = r["reforma_estimada"]
                 tese_cell = r["tese"]
 
+            # FIPE é referência de mercado, NÃO depende do laudo — sempre mostra
+            # quando a avaliação tem o valor (registros pré-workstream K podem
+            # estar com fipe=NULL; nesses casos cai pro placeholder).
+            fipe_cell = r["fipe"] if r["fipe"] is not None else "—"
+
             sheet_rows.append([
                 rank,
                 situacao,
+                r["marca"],
                 r["modelo"],
                 r["ano"],
                 r["cidade"],
@@ -345,6 +356,7 @@ class SheetsExporter:
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
                 preco_max_cell,
+                fipe_cell,
                 lucro_mes_cell,
                 roi_anual_cell,
                 reforma_cell,
@@ -483,9 +495,15 @@ class SheetsExporter:
                 "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Os números numéricos ficam '—' até o retry do laudo rodar.",
             ],
             [
+                "Marca",
+                "Auto Avaliar (listagem)",
+                "Marca (`lote.marca`) extraída do card via regex",
+                "Coluna dedicada permite filtro/ordenação por fabricante sem depender de string composta",
+            ],
+            [
                 "Modelo",
                 "Auto Avaliar (listagem)",
-                "Marca + modelo extraídos do card via regex (ano fica em coluna separada)",
+                "Modelo (`lote.modelo`) extraído do card via regex; marca fica em coluna separada e ano em outra",
                 "Identificação humana do veículo",
             ],
             [
@@ -523,6 +541,12 @@ class SheetsExporter:
                 "Precificador",
                 "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo.",
                 "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
+            ],
+            [
+                "FIPE (R$)",
+                "API FIPE (cache `modelo_fipe_cache`)",
+                "Valor da Tabela FIPE pra (marca, modelo, ano) consultado no momento da avaliação. Persistido em `avaliacao_lote.fipe` pra não depender de re-consulta. '—' em registros pré-workstream K (NULL).",
+                "Âncora bruta de mercado pro operador comparar lance atual e máximo contra a referência pública. Não depende do laudo.",
             ],
             [
                 "Lucro/mês (R$)",

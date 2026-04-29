@@ -1,0 +1,65 @@
+# Carros SA - Rio de Janeiro (placeholder, sem operação real ainda).
+# Estrutura espelha a de empresa_fake_sp: pátio metropolitano, margem mais
+# exigente que Uberlândia, frete e custos operacionais ~25% acima de MG.
+# Quando houver operação real no RJ, recalibrar com histórico (modelo: bloco A
+# do ROADMAP, calibração do Polo Track 2024 em carros_uberlandia).
+empresa_id: carros_rio
+nome: "Carros SA - Rio de Janeiro (placeholder)"
+patio:
+  cidade: "Rio de Janeiro"
+  uf: "RJ"
+  cep: "20040-020"               # Centro — endereço genérico até definir pátio real
+margem:
+  base: 0.30                     # 30% sobre venda — RJ metropolitano, mais exigente que MG
+  minima_absoluta: 0.18
+raio_max_km: 1000
+# 150 km a partir do Rio cobre RMRJ (Niterói, São Gonçalo, Baixada Fluminense),
+# Petrópolis, Nova Friburgo, Volta Redonda/Barra Mansa e parte da Costa Verde.
+# Excede Campos dos Goytacazes (~280 km) — fora do raio operacional.
+raio_operacao_km: 150
+fator_risco_bounds: [1.0, 2.2]
+fator_liquidez_bounds: [1.0, 2.0]
+# Frete espelhado em empresa_fake_sp (metropolitano). RJ tem geografia mais
+# difícil (serra), valores podem subestimar Petrópolis/Nova Friburgo — aceitar
+# até calibrar com primeiro arremate real.
+tabela_frete:
+  "0-300":
+    hatch: 700
+    sedan: 700
+    suv: 1100
+    utilitario: 1400
+    picape: 1400
+    outro: 1100
+  "300-600":
+    hatch: 1300
+    sedan: 1300
+    suv: 1800
+    utilitario: 2200
+    picape: 2200
+    outro: 1800
+  "600-1000":
+    hatch: 2100
+    sedan: 2100
+    suv: 2700
+    utilitario: 3300
+    picape: 3300
+    outro: 2700
+  "1000-2000":
+    hatch: 2900
+    sedan: 2900
+    suv: 3700
+    utilitario: 4400
+    picape: 4400
+    outro: 3700
+categorias_aceitas: [hatch, sedan, suv, picape]
+# Auto Avaliar = R$ 999 fixo por arremate. Manter pct=0 até aparecer leilão judicial RJ.
+taxa_leilao_pct: 0.0
+taxa_leilao_fixa: 999
+# Custos operacionais ~25% acima de Uberlândia (mão de obra metropolitana RJ).
+# Total estimado: R$ 3175. Recalibrar quando rodar o primeiro carro de verdade.
+custos_operacionais:
+  despachante: 480
+  higienizacao: 560
+  marketing_medio: 1900
+  laudo_cautelar: 150
+  combustivel: 85

@@ -16,7 +16,7 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 | ExtratorLaudo textual (PyMuPDF) | [`carros_sa/agents/extrator_laudo.py`](carros_sa/agents/extrator_laudo.py) | 4 testes c/ PDF real |
 | VisionClient abstrato + 3 impls | [`carros_sa/agents/vision_clients.py`](carros_sa/agents/vision_clients.py) | validado c/ Fiesta real |
 | ExtratorLaudo consolidação (textual+visão) | idem | gold test com fixture Gemini |
-| Config empresas (Uberlândia + SP fake) | [`config/empresas/*.yaml`](config/empresas/) | estáveis |
+| Config empresas (Uberlândia + SP fake + Rio placeholder) | [`config/empresas/*.yaml`](config/empresas/) | estáveis |
 | Script ingest listagem → SQLite | [`scripts/ingest_listagem.py`](scripts/ingest_listagem.py) | 10 lotes persistidos |
 | Script extrair laudo standalone | [`scripts/extrair_laudo.py`](scripts/extrair_laudo.py) | funciona c/ Gemini Flash |
 
@@ -296,9 +296,15 @@ Caminhos pra refinar (em ordem de simplicidade):
 4. **Distinguir "demanda intrínseca" de "política de preço"**: o Polo demorou 227d porque vendeu na FIPE cheia. Dividir `dias_giro` em `dias_se_FIPE` vs `dias_se_FIPE-5%` exigiria histórico com info de quanto desconto deu (não temos hoje).
 - **Limitações:** calibração de qualidade modesta com 32 vendas (~poucas por categoria). Workstream H futuro vai melhorar com séries temporais e overlap real entre AA + Arrematado.
 
----
-
-## Convenções de coordenação
+### U — Tenant placeholder Rio de Janeiro ✅ adicionado 2026-04-29
+- **Arquivos:**
+  - [config/empresas/carros_rio.yaml](config/empresas/carros_rio.yaml) — pátio Rio de Janeiro/RJ (CEP 20040-020 Centro), margem 0.30 (mínima 0.18), raio_operacao_km 150, taxa AA R$ 999 fixa, custos op decompostos R$ 3.175
+  - [config/reforma/carros_rio.yaml](config/reforma/carros_rio.yaml) — tabela de reforma espelhada de empresa_fake_sp (mão de obra metropolitana ≈ SP)
+- **O que faz:** habilita avaliar lotes do Auto Avaliar a partir de um pátio carioca. Raio de 150km cobre 96 cidades (66 RJ + 27 sul de MG + 3 SP região Resende), incluindo Niterói, São Gonçalo, Baixada Fluminense, Petrópolis, Nova Friburgo, Volta Redonda/Barra Mansa e parte da Costa Verde. Usar com `carros-sa triagem --empresa carros_rio` (gera aba `carros_rio` na planilha de exporte).
+- **Limitações:**
+  - **Placeholder, sem operação real.** Margem, frete e custos operacionais foram estimados copiando a estrutura do `empresa_fake_sp`. Recalibrar com primeiro arremate real seguindo o modelo do Bloco A (Polo Track 2024 → carros_uberlandia).
+  - Frete subestima Petrópolis/Nova Friburgo (geografia de serra) — usar como floor até calibrar.
+  - Não cobre Campos dos Goytacazes (~280 km, fora do raio de 150 km).
 
 ### Quem mexe em `carros_sa/models.py`?
 **Ninguém sem discussão.** Se workstream precisa de campo novo: (a) comenta aqui no ROADMAP na seção "Pendências de schema", (b) abre issue/mensagem, (c) espera merge coordenado antes de começar.

@@ -1,0 +1,59 @@
+# Tabela de custos de reforma — Carros SA Rio de Janeiro (placeholder).
+# Espelha empresa_fake_sp: RJ metropolitano ≈ SP metropolitano em mão de obra
+# de funilaria/pintura. Lataria externa inclui peça + reparo + pintura +
+# acabamento (mesma calibração da empresa carros_uberlandia — ver comentário lá).
+# Recalibrar quando houver primeira reforma real no RJ.
+empresa_id: carros_rio
+
+pecas:
+  longarina:
+    leve: 1000
+    media: 2200
+    grave: 6000
+    estrutural: 11000
+  coluna:
+    leve: 900
+    media: 1900
+    grave: 4400
+    estrutural: 8500
+  # LATARIA EXTERNA — valores incluem peça + reparo + pintura + acabamento.
+  porta:
+    leve: 900
+    media: 1900
+    grave: 4400
+    estrutural: 7500
+  paralama:
+    leve: 800
+    media: 1900
+    grave: 3800
+    estrutural: 6900
+  capo_tampa:
+    leve: 900
+    media: 1900
+    grave: 4400
+    estrutural: 7500
+  tampa:
+    leve: 900
+    media: 1900
+    grave: 4400
+    estrutural: 7500
+  teto:
+    leve: 1150
+    media: 2300
+    grave: 5600
+    estrutural: 10200
+  painel:
+    leve: 650
+    media: 1500
+    grave: 4200
+    estrutural: 7800
+
+default:
+  leve: 400
+  media: 900
+  grave: 1900
+  estrutural: 3800
+
+adicional_estrutural: 4000
+adicional_motor_nao_ok: 5000
+incerteza_pct: 0.25

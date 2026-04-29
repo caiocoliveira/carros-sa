@@ -75,7 +75,7 @@ class TestPaginacao:
             pagina_to_cards={1: [_card("A"), _card("B")]},
             total_paginas=1,
         )
-        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG", 7))
+        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG"))
         assert len(cards) == 2
         assert {c["loteId"] for c in cards} == {"A", "B"}
         # Só navegou pra página 1 (sem ?p=)
@@ -91,7 +91,7 @@ class TestPaginacao:
             },
             total_paginas=3,
         )
-        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG", 7))
+        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG"))
         assert {c["loteId"] for c in cards} == {"A", "B", "C", "D", "E"}
         # Navegou em ?p=2 e ?p=3 (p=1 é implícito)
         gotos_com_p = [u for u in page.gotos if "&p=" in u]
@@ -108,19 +108,39 @@ class TestPaginacao:
             },
             total_paginas=2,
         )
-        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG", 7))
+        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG"))
         assert {c["loteId"] for c in cards} == {"A", "B", "C"}
         assert len(cards) == 3
 
-    def test_horizonte_dias_filtra_apos_paginar(self):
-        # Card com timer absurdo (1000h = 41d) deve ser filtrado pelo horizonte de 7d.
+    def test_sem_horizonte_deixa_passar_lotes_futuros(self):
+        # Default (horizonte_dias=None) coleta TUDO, inclusive lotes que acabam
+        # daqui a 40+ dias. Regressão pro bug de abril/2026: a planilha só
+        # mostrava leilões de hoje porque o scraper cortava tudo >7d antes do
+        # DB sequer ver. Agora a coleta é full-pipeline; filtro fica na exibição.
+        page = FakePage(
+            pagina_to_cards={
+                1: [_card("HOJE", timer="02:00:00:00"), _card("LONGE", timer="999:00:00:00")],
+            },
+            total_paginas=1,
+        )
+        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG"))
+        ids = {c["loteId"] for c in cards}
+        assert ids == {"HOJE", "LONGE"}
+
+    def test_horizonte_dias_explicito_filtra_apos_paginar(self):
+        # Opt-in: caller pode passar `horizonte_dias=7` e a gente volta a cortar
+        # lotes com fim > 7d. Mantido só como escape hatch — default é None.
         page = FakePage(
             pagina_to_cards={
                 1: [_card("DENTRO", timer="20:00:00:00"), _card("FORA", timer="999:00:00:00")],
             },
             total_paginas=1,
         )
-        cards = _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG", 7))
+        cards = _run(
+            scraper_autoavaliar._coletar_listagem_cidade(
+                page, "Uberlandia", "MG", horizonte_dias=7,
+            )
+        )
         ids = {c["loteId"] for c in cards}
         assert "DENTRO" in ids
         assert "FORA" not in ids
@@ -129,11 +149,11 @@ class TestPaginacao:
         # Se o site reportar 999 páginas por bug/mudança, a gente não roda
         # 999 requisições — limita a um teto razoável.
         page = FakePage(
-            pagina_to_cards={i: [_card(f"L{i}")] for i in range(1, 30)},
+            pagina_to_cards={i: [_card(f"L{i}")] for i in range(1, 60)},
             total_paginas=999,
         )
-        _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG", 7))
+        _run(scraper_autoavaliar._coletar_listagem_cidade(page, "Uberlandia", "MG"))
         gotos_com_p = [u for u in page.gotos if "&p=" in u]
-        # Hoje Uberlândia tem 4 páginas. 20 é um teto generoso que pega
-        # casos reais e corta qualquer coisa anômala.
-        assert len(gotos_com_p) <= 20
+        # Teto em 50 (subiu de 20 após feedback de inventário faltando).
+        # Iterando p=2..50 = 49 chamadas com ?p=.
+        assert len(gotos_com_p) <= 50

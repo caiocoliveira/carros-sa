@@ -401,6 +401,21 @@ Já registrado:
   - Lotes sem `origem_cidade`/`origem_uf` populados não entram na contagem (o scraper costuma popular, mas snapshots antigos podem ter NULL).
   - `lru_cache(32)` em `carregar_empresa` significa que mudanças no YAML em runtime do mesmo processo só refletem após reload — não impacta operação batch (script encerra entre runs).
 
+### U — Leilões futuros na planilha (decoupling coleta × exibição) ✅
+- **Branch:** `claude/add-future-auctions-ITtsf`
+- **Arquivos:**
+  - [`carros_sa/scraping/scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) — `_coletar_listagem_cidade` e `coletar_listagem` passam a aceitar `horizonte_dias: Optional[int] = None` (default None = coleta full). `_MAX_PAGINAS` subiu de 20 → 50 + log quando o site reporta mais páginas do que o teto.
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `orquestrar` default `horizonte_dias=None`.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `SheetsExporter.exportar(horizonte_exibicao_dias: Optional[int] = None)` — filtra lotes com `fim_em > agora + N dias` da planilha.
+  - [`carros_sa/cli.py`](carros_sa/cli.py) — `triagem --horizonte-dias` agora é **janela de exibição**, default 30d (era 7d de coleta). Coleta passa `None` pro scraper (pega o pipeline inteiro).
+  - [`tests/test_scraper_paginacao.py`](tests/test_scraper_paginacao.py) — teste novo `test_sem_horizonte_deixa_passar_lotes_futuros` + `test_horizonte_dias_explicito_filtra_apos_paginar` (opt-in) + cap ajustado pra 50.
+  - [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — 2 testes novos: `horizonte_exibicao_dias=30` corta lotes 45d; `None` mantém tudo.
+- **Motivação:** Usuário reclamou (2026-04-23) que a planilha só mostra leilões de hoje, apesar do site ter muitos lotes agendados pra dias futuros. Causa raiz: filtro `fim_em > agora + 7d` rodava **no scraper** (`_coletar_listagem_cidade`), descartando tudo antes do DB ver. Se a janela precisava crescer, tinha que re-scrape. Combinado com `_MAX_PAGINAS=20`, raios maiores podiam ter cidades truncadas silenciosamente.
+- **Como funciona:** Scraper agora coleta tudo que aparece na listagem (inclui leilões agendados). DB guarda o pipeline futuro cheio. Usuário decide a janela de exibição via `--horizonte-dias N` (passa pro exporter, não pro scraper) sem precisar re-coletar. Subir `N` = ver mais dias à frente instantaneamente.
+- **Limitações conhecidas:**
+  - Mais lotes coletados = mais chamadas de detalhe/LLM no primeiro run contra DB novo. Sistema já tem dedup por lote_id (orquestrador short-circuita lotes já avaliados) então passadas subsequentes ficam finas.
+  - Se a listagem do Auto Avaliar NÃO mostrar leilões agendados por padrão (pode haver filtro/status que precisa ser passado na URL), esse fix não os traz sozinho — pode precisar de investigação adicional na URL `?status=agendado` ou aba separada. A coleta hoje usa `&order=recforyou`; se o usuário ainda ver só leilões de hoje depois disso, é próximo passo.
+
 ### T — Coluna "Tese" na planilha (sinalização baseada em histórico) ✅
 - **Branch:** `claude/adoring-black-d891b8`
 - **Arquivos:**

@@ -681,7 +681,7 @@ async def orquestrar(
     session: Session,
     page,
     vision_client,
-    horizonte_dias: int = 7,
+    horizonte_dias: Optional[int] = None,
     text_llm_client=None,
 ) -> OrquestradorResult:
     """
@@ -692,7 +692,9 @@ async def orquestrar(
         session: SQLModel Session já aberta
         page: Playwright Page já autenticada
         vision_client: VisionClient instanciado (Gemini, Anthropic, Ollama)
-        horizonte_dias: só lotes com fim em <= N dias
+        horizonte_dias: filtro opcional de coleta — se setado, descarta lotes
+            com fim > N dias. Default `None` = coleta tudo que aparece na
+            listagem; janela de exibição fica a cargo do `SheetsExporter`.
 
     Returns:
         OrquestradorResult com contagens e detalhes por lote.

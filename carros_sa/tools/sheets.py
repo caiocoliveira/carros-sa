@@ -16,7 +16,7 @@ Setup one-time:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from sqlmodel import Session, select
@@ -113,9 +113,21 @@ class SheetsExporter:
             self._gc = gspread.service_account(filename=self._credentials_path)
         return self._gc
 
-    def exportar(self, empresa_id: str, session: Session) -> int:
-        """Lê SQLite, escreve aba <empresa_id> + aba de cidades + aba Glossário. Retorna n linhas exportadas."""
-        rows = self._query(empresa_id, session)
+    def exportar(
+        self,
+        empresa_id: str,
+        session: Session,
+        horizonte_exibicao_dias: Optional[int] = None,
+    ) -> int:
+        """Lê SQLite, escreve aba <empresa_id> + aba de cidades + aba Glossário. Retorna n linhas exportadas.
+
+        `horizonte_exibicao_dias` (opt-in): limita a planilha a lotes cujo fim
+        está dentro de N dias a partir de agora. Default `None` = mostra tudo
+        que está ativo no DB. Separado do `horizonte_dias` do scraper: a coleta
+        puxa o pipeline inteiro de futuros leilões e o usuário decide a janela
+        de exibição sem precisar re-scrape.
+        """
+        rows = self._query(empresa_id, session, horizonte_exibicao_dias)
         # Filtro duro: lote encerrado (timer vencido OU badge ARREMATADO) é
         # ruído — operador não pode mais dar lance. Antes empurrávamos pro
         # final; agora removemos completamente.
@@ -135,7 +147,12 @@ class SheetsExporter:
         self._write_glossario_sheet()
         return len(rows_sorted)
 
-    def _query(self, empresa_id: str, session: Session) -> List[dict]:
+    def _query(
+        self,
+        empresa_id: str,
+        session: Session,
+        horizonte_exibicao_dias: Optional[int] = None,
+    ) -> List[dict]:
         """JOIN lote + avaliacao_lote + laudo (LEFT JOIN — laudo pode não existir)."""
         avaliacoes = session.exec(
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
@@ -151,6 +168,11 @@ class SheetsExporter:
             tese_cfg = None
 
         agora = datetime.now()
+        limite_exibicao = (
+            agora + timedelta(days=horizonte_exibicao_dias)
+            if horizonte_exibicao_dias is not None
+            else None
+        )
         rows: List[dict] = []
         for av in avaliacoes:
             lote = session.get(Lote, av.lote_id)
@@ -165,6 +187,9 @@ class SheetsExporter:
             # sumiu o countdown = já saiu do leilão. Melhor esconder do que
             # mandar o usuário clicar em link morto.
             if lote.fim_em is None:
+                continue
+
+            if limite_exibicao is not None and lote.fim_em > limite_exibicao:
                 continue
 
             laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)

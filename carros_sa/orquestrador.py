@@ -535,6 +535,19 @@ async def _pipeline_lote(
                     # pego por seletor frouxo no passado) — descarta e trata como sem PDF.
                     pdf_dest.unlink(missing_ok=True)
                     pdf_dest = None
+                    # Zera a URL persistida em raw_json: ela apontou pra um arquivo
+                    # que NÃO é laudo, então deixá-la lá envenena (a) o exporter,
+                    # que renderia HYPERLINK clicável pro PDF errado, e (b) o retry
+                    # diário, que re-baixaria o mesmo arquivo inválido. Combina com
+                    # `limpar_decoys_laudo` (defesa retroativa) — aqui a defesa é
+                    # contemporânea, dentro do próprio pipeline.
+                    raw_atual = dict(lote.raw_json or {})
+                    det_atual = dict(raw_atual.get("detalhe") or {})
+                    det_atual["laudo_pdf_url"] = None
+                    raw_atual["detalhe"] = det_atual
+                    lote.raw_json = raw_atual
+                    session.add(lote)
+                    session.commit()
             except Exception:
                 pdf_dest = None
 

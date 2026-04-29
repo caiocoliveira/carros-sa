@@ -391,6 +391,21 @@ Já registrado:
 - **Cobertura:** 8 testes novos (202 total verde). Migração SQLite validada: campo aparece tanto em DB fresco quanto em DB existente sem perda de dados.
 - **Limitações:** coluna tem largura livre — se LLM retornar justificativa muito longa (>500 chars) vai ficar feia no Google Sheets. Prompt hoje pede "uma frase", mas não enforce. Mitigável com truncagem se virar problema.
 
+### O.2 — Gemma 3 local via Ollama (experimental, text-only) 🧪
+- **Branch:** `claude/test-gemma-4-local-SmiEV`
+- **Arquivos:**
+  - [`carros_sa/agents/text_llm_clients.py`](carros_sa/agents/text_llm_clients.py) — +`OllamaTextClient` (espelho do `OllamaVisionClient`), sem campo `images`, endpoint `/api/generate` format=json.
+  - [`carros_sa/agents/text_llm_clients.py`](carros_sa/agents/text_llm_clients.py) — `build_default_text_client()` agora aceita `TEXT_LLM_PROVIDER=ollama` (standalone) e `ollama+gemini` (Ollama primário → Gemini fallback via `FallbackTextLLMClient`).
+  - [`tests/test_text_llm_clients_ollama.py`](tests/test_text_llm_clients_ollama.py) — 10 testes com `httpx.Client.post` mockado (regra CLAUDE.md: sem LLM real em teste).
+  - [`.env.example`](.env.example) — linha comentada documentando `TEXT_LLM_PROVIDER=ollama+gemini`.
+- **Motivação:** usuário (2026-04-22) quer testar rodar o estimador de reforma local no MacBook Air pra eliminar rate limit do Gemini free tier e dependência de rede.
+- **Como usar:** `brew install ollama && ollama pull gemma3:4b && ollama serve`, depois `TEXT_LLM_PROVIDER=ollama+gemini` no `.env`. Nenhum código chamador muda — `estimador_reforma_llm.estimar_llm`, `scripts/comparar_reforma_tabela_vs_llm.py` e `scripts/triagem_diaria.py` já usam `build_default_text_client()`.
+- **Limitações conhecidas:**
+  - **Vision ainda em Gemini** — extrator de laudo NÃO migrado, risco de perda de qualidade no diagrama Auto Avaliar (Gemini 2.5 Flash tem conf. 0.95 na fixture Fiesta). Decidir depois do smoke test do texto.
+  - **Default `auto` não mudou** — Ollama só entra com opt-in explícito pra não quebrar produção em servidor sem Ollama.
+  - **Sem benchmark de qualidade vs Gemini** ainda — user vai rodar `scripts/comparar_reforma_tabela_vs_llm.py --lote 21854782` manualmente.
+  - **Latência esperada** 5-15s/chamada em Gemma 3 4B no M-series vs <2s do Gemini Flash.
+
 ### S — Aba Cidades & Frete na planilha ✅
 - **Branch:** `claude/festive-tesla-6c18ae`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — novo `_write_cidades_frete_sheet(empresa_id, session)` engatado no `exportar()`. Aba `cidades_<empresa_id>` com 1 linha por município no raio operacional + frete por categoria + contagem de lotes ativos (fim_em > now) com origem naquela cidade.

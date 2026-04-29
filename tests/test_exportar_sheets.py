@@ -195,10 +195,12 @@ class TestSheetsExporterQuery:
         assert "Compass" in rows[3][idx_modelo]
         assert "Caro" in rows[3][idx_situacao]
 
-    def test_exportar_sem_laudo_marca_nao_analisado(self):
-        """Lote sem LaudoCache é exportado mas sinaliza "LAUDO NÃO ANALISADO" e zera
+    def test_exportar_sem_laudo_marca_nao_capturado(self):
+        """Lote sem LaudoCache é exportado mas sinaliza "LAUDO NÃO CAPTURADO" e zera
         campos numéricos derivados do laudo — operador não pode dar lance sem conferir
-        primeiro (feedback usuário 2026-04-18)."""
+        primeiro (feedback usuário 2026-04-18). Renomeado de "NÃO ANALISADO" pra
+        "NÃO CAPTURADO" porque na prática o laudo existe no AA quase sempre — quem
+        falhou foi o scraper (modal lazy / 429), não o anunciante."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))
@@ -220,7 +222,7 @@ class TestSheetsExporterQuery:
         assert n == 1
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
+        assert "LAUDO NÃO CAPTURADO" in data_row[HEADER.index("Situação")]
         # Numéricos derivados de um laudo vazio viram traço: piso de R$ 1k em
         # "Reforma" + ROI/preço-alvo calculados com reforma=piso seriam
         # tudo chute, então a planilha esconde.
@@ -229,7 +231,7 @@ class TestSheetsExporterQuery:
         assert data_row[HEADER.index("ROI anualizado (%)")] == "—"
         assert data_row[HEADER.index("Lucro/mês (R$)")] == "—"
 
-    def test_exportar_laudo_fallback_confidence_baixa_marca_nao_analisado(self):
+    def test_exportar_laudo_fallback_confidence_baixa_marca_nao_capturado(self):
         """LaudoCache com confidence=0.5 é fallback `_laudo_sem_pdf` — trata igual a
         laudo ausente. Limite 0.6 aceita só laudos realmente extraídos de PDF."""
         engine = _engine_mem()
@@ -256,7 +258,7 @@ class TestSheetsExporterQuery:
         assert n == 1
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
+        assert "LAUDO NÃO CAPTURADO" in data_row[HEADER.index("Situação")]
         assert data_row[HEADER.index("Reforma (R$)")] == "—"
 
     def test_exportar_laudo_confidence_alta_mantem_valores(self):
@@ -281,7 +283,7 @@ class TestSheetsExporterQuery:
 
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" not in data_row[HEADER.index("Situação")]
+        assert "LAUDO NÃO CAPTURADO" not in data_row[HEADER.index("Situação")]
         assert data_row[HEADER.index("Reforma (R$)")] == 3000
 
     def test_exportar_sem_avaliacoes_retorna_zero(self):

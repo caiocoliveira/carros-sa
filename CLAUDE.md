@@ -113,3 +113,20 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.
 - Listagem real de Uberlândia/MG: `data/scrapes/2026-04-14_uberlandia_listagem.json` (10 lotes variados).
 - Fixture de resposta Gemini: `tests/fixtures/21854782_visual_gemini.json`.
+
+## Padrões aprendidos (revisar antes de tocar nessas áreas)
+
+### Identidade econômica do precificador
+Por construção: `preco_max + reforma + frete + taxas_max + custo_op = preco_giro × (1 − margem_min)`. Equivalentemente: `capital_total_no_max = preco_giro × (1 − margem_min)`. Antes de inventar uma "ROI no máximo" derivada de `(preco_giro − capital) / capital`, lembre que o resultado vira `margem_min / (1 − margem_min)` — quase-constante por empresa, ~11% em Uberlândia. **Pra ranqueamento, sempre use `score_roi` (caso médio no preço-alvo).**
+
+### Lucro absoluto exato — fórmula fechada
+`score_roi = lucro / capital_alvo` ⇒ `capital_alvo = preco_giro / (1 + score_roi)` ⇒ `lucro_absoluto = preco_giro × score_roi / (1 + score_roi)`. Não use `score_roi × preco_alvo` como aproximação — subestima ~10% porque `capital_alvo > preco_alvo` (engloba reforma/frete/taxas/custo_op). Helper canônico em `sheets._lucro_absoluto_no_alvo`.
+
+### Naming hint — `preco_giro_fipe`
+O campo `preco_giro_fipe` em `Avaliacao`/`AvaliacaoLote` é literalmente `webmotors_mediana × f_km`, NÃO `min(FIPE × 0.95, webmotors_p25)`. Quando Webmotors live ainda não está conectado, `webmotors_mediana` é populado pelo `AvaliadorMercado` como `FIPE × 0.97` (ver `agents/avaliador_mercado.py:134`). Daí o nome ser inerte: a fonte primária é a mediana de mercado, com fallback indireto pra FIPE. `webmotors_p25` é exposto em `SinalMercado` mas hoje **não é consumido** pelo precificador (versão antiga usava). Não renomear o campo persistido sem coordenar — é contrato (models.py).
+
+### Antes de mexer em precificador / sheets / cli, rodar `make test` com olhos abertos
+Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_columns.py::test_roi_absurdo_reportado` são guard-rails das fórmulas — qualquer mudança que quebrá-los provavelmente está reintroduzindo um dos bugs anteriores (ROI tautológico ou lucro subestimado).
+
+### Workflow de revisão autônoma
+Quando o usuário pedir "revise e corrija" sem direcionar, o caminho que funcionou foi: (1) ler ROADMAP + precificador + sheets + tests existentes, (2) ESCREVER UM SCRIPT DE SIMULAÇÃO (`/tmp/sim.py`) com lote real conhecido (Polo Track 2024 do YAML) e validar identidades algébricas comparando docstring vs implementação, (3) só depois confirmar bugs e refatorar. Pular a simulação leva a "fixes" baseados em leitura — frequentemente errados.

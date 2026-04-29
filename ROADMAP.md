@@ -4,7 +4,28 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 35/35 testes passando
+✅ **Fundação + EstimadorReforma** — 328/328 testes passando
+
+### W — Revisão econômica das colunas da planilha (2026-04-29) ✅
+- **Branch:** `claude/sleepy-wright-kSiCR`
+- **Motivação:** Usuário pediu sanity-check da relação entre as colunas (FIPE × Lance Máximo × Giro FIPE × ROI × Lucro/mês). Simulação com Polo Track real expôs três bugs compostos.
+- **Bugs encontrados e corrigidos:**
+  1. **`ROI anualizado` na planilha era tautológico.** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) usava `_calcular_roi_no_maximo(av) → roi_max × 365 / dias_giro` mas, por construção do precificador, `preco_max + reforma + frete + taxas + custo_op = preco_giro × (1 − margem_min)` ⇒ `roi_max ≡ margem_min / (1 − margem_min)` ≈ constante por empresa (~11% em Uberlândia). A coluna só variava por `dias_giro`, virando um `1/dias_giro` disfarçado. Pior: `_calcular_roi_no_maximo` ignorava `custo_op` e dava 15.9% em vez de 11.1%, então o número exibido nem era o "garantido" certo. Fix: usar `score_roi` (caso médio calibrado por risco/liquidez) — bate com a CLI `top` e com o que o docstring de `precificador.py:154-162` recomenda.
+  2. **`Lucro/mês` subestimava em ~10%.** [`carros_sa/tools/sheets.py:180`](carros_sa/tools/sheets.py) e [`carros_sa/cli.py:166`](carros_sa/cli.py) usavam `score_roi × preco_alvo` como aproximação do lucro absoluto, mas `score_roi = lucro / capital_alvo` e `capital_alvo > preco_alvo` (engloba reforma/frete/taxas/custo_op). Fórmula exata fechada: `lucro = preco_giro × score_roi / (1 + score_roi)`. Helper canônico `sheets._lucro_absoluto_no_alvo`. No Polo Track real: era R$ 7.419/mês, agora R$ 8.288/mês — gap de R$ 869/mês que afeta diretamente a comparação entre lotes.
+  3. **`pdf_dest.exists()` em [`carros_sa/orquestrador.py:609`](carros_sa/orquestrador.py) podia ser `None.exists()`** quando `pdf_url` era truthy mas o download/validação falhava. AttributeError engolido pelo `try/except` de baixo, mas confundia debug. Fix: checar `pdf_dest is not None and pdf_dest.exists()`.
+- **Limpeza de docstrings:** [`precificador.py`](carros_sa/precificador.py) declarava `preco_giro_fipe = min(FIPE × 0.95, webmotors_p25)` mas o código faz `webmotors_mediana × f_km` há várias iterações; `webmotors_p25` está exportado em `SinalMercado` mas não é consumido. Docstring agora reflete a fórmula efetiva e nota o legado.
+- **Audit reforçado** ([`carros_sa/tools/audit.py`](carros_sa/tools/audit.py)): nova invariante "Lance Máximo > FIPE × 1.05" pra pegar âncora de revenda inflada (f_km saturado em casos onde não deveria, FIPE errada, mediana inflada). ROI anualizado negativo também passa a ser sinalizado.
+- **CLAUDE.md** atualizado com 4 padrões aprendidos: identidade econômica do precificador, fórmula fechada do lucro absoluto, naming hint `preco_giro_fipe`, workflow de revisão autônoma (escrever simulação ANTES de fix).
+- **Cobertura:** 4 testes novos em `TestLucroAbsolutoNoAlvo` (gold Polo + edge cases score=0/negativo/preco_giro=0); `test_roi_absurdo_reportado` migrado pra trigger via `score_roi=5.0` × dias=30 = 6083% > 1000% (ao invés do mecanismo anterior baseado no roi_max bugado); `test_exportar_roi_anualizado_baseado_em_score_roi` substitui o teste que pinava ~44%/ano (tautologia) por 121.7%/ano (score_roi=0.3, dias=90). Suite total: **328 verde**.
+- **Validação real (simulação 3 lotes):**
+  - Fiesta 2013 estrutural: `preco_max=R$13.4k vs FIPE R$30.9k = 43.5%` — descartado como inviável (lance atual R$22.9k > p_max).
+  - Polo Track 2024: `p_max=R$56.7k vs FIPE R$70k = 81%`, ROI/ano=231.5%, lucro/mês=R$8.236 — saudável.
+  - Compass 2019: `p_max=R$82.8k vs FIPE R$100k = 82.8%`, ROI/ano=311.3%, lucro/mês=R$16.418 — alto por giro rápido (60d SUV).
+  - Todos com `p_max < FIPE`, como esperado pela construção.
+- **Limitações conhecidas:**
+  - Score_roi em lotes inviáveis (Fiesta) sai 121% pois o fator_risco máximo dispara a margem efetiva. Como o lote é descartado pelo filtro de viabilidade antes de chegar à planilha, não polui a UI — mas o número absoluto fica bizarro em logs. Cap futuro em `margem_aplicada` (ex: ≤0.50) seria razoável; não fiz pra não mudar o ranking de lotes calibrados sem mais dados.
+
+
 
 | Componente | Arquivo | Cobertura |
 |---|---|---|

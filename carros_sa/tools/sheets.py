@@ -78,17 +78,21 @@ def _col_letter(idx_0based: int) -> str:
             return letters
 
 
-def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
-    """ROI garantido se ganhar o lote exatamente pelo lance máximo.
+def _lucro_absoluto_no_alvo(av: AvaliacaoLote) -> int:
+    """Lucro esperado em R$ se a empresa comprar pelo preço-alvo (caso médio).
 
-    = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    Identidade exata: `score_roi = lucro / capital_alvo` ⇒
+        capital_alvo = preco_giro / (1 + score_roi)
+        lucro        = preco_giro - capital_alvo = preco_giro × score_roi / (1 + score_roi)
+
+    Usa só campos persistidos em AvaliacaoLote — não precisa do `custo_op` da
+    empresa em runtime. Substitui aproximação anterior `score_roi × preco_alvo`
+    que subestimava sistematicamente em ~10% (capital_alvo > preco_alvo por causa
+    de reforma/frete/taxas/custo_op).
     """
-    if av.preco_max <= 0:
-        return 0.0
-    capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
-    lucro = av.preco_giro - capital
-    return round(lucro / max(capital, 1) * 100, 1)
+    if av.score_roi <= 0 or av.preco_giro <= 0:
+        return 0
+    return int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
 
 
 class SheetsExporter:
@@ -171,13 +175,16 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
-            roi_max = _calcular_roi_no_maximo(av)
-            roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+            # ROI anualizado: usa `score_roi` (caso médio no preço-alvo, calibrado
+            # por risco/liquidez) — não `roi_max`, que cai num quase-constante
+            # `margem_min/(1-margem_min)` por construção (ver justificativa no
+            # docstring de precificador.py:154-162). Bate com a CLI `top`.
+            roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
             # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
-            # score_roi × preco_alvo (lucro no caso médio do bid).
+            # "esse lote rende R$X/mês enquanto no pátio". Fórmula exata:
+            # lucro_absoluto = preco_giro × score_roi / (1 + score_roi).
             lucro_mes = lucro_reais_por_mes(
-                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
+                _lucro_absoluto_no_alvo(av), av.dias_giro_estimado,
             )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -506,14 +513,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa).",
             ],
             [
                 "Reforma (R$)",

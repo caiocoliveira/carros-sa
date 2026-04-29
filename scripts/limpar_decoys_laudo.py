@@ -11,7 +11,7 @@ porque foram raspados antes do aperto.
 
 Esses lotes envenenam o retry: o orquestrador vê a URL, acha que é laudo,
 baixa, o `_pdf_eh_laudo_valido()` rejeita o PDF, e o lote cai em
-`_laudo_sem_pdf` com confidence=0.5. Resultado: mostra "LAUDO NÃO ANALISADO"
+`_laudo_sem_pdf` com confidence=0.5. Resultado: mostra "LAUDO NÃO CAPTURADO"
 pro usuário até alguém re-raspar o detalhe.
 
 O que este script faz:

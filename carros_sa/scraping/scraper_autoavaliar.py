@@ -153,6 +153,76 @@ _ABRIR_MODAL_LAUDO_JS = """
 """
 
 
+# Trigger alternativo: o link "Acessar" que renderiza logo abaixo de
+# "STATUS DO LAUDO" no DOM dos grupos kuruma/autus/trivel. O texto não contém
+# "laudo", então `_ABRIR_MODAL_LAUDO_JS` não pega. Diagnóstico 2026-04-27 nos
+# detalhes salvos: 2/10 lotes (Gol kuruma + Cruze kuruma) chegavam ao parser
+# com status_laudo="Laudo Aprovado" mas laudo_pdf_url=None — o "Acessar" estava
+# lá, só não foi clicado.
+#
+# Estratégia: localizar o nó de texto exato "STATUS DO LAUDO" e clicar o
+# primeiro elemento clicável seguinte cujo texto seja "Acessar" (ou similares
+# curtos). Limitamos a busca aos próximos 8 elementos pra não pegar "Acessar"
+# de outras seções (ex.: STATUS DO DOCUMENTO).
+_CLICK_ACESSAR_NEAR_LAUDO_JS = """
+() => {
+    function norm(s) {
+        return (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').trim();
+    }
+    const ACESSAR_LABELS = new Set(['acessar', 'ver', 'abrir', 'visualizar', 'baixar']);
+
+    // 1. Acha o nó cujo texto é exatamente "STATUS DO LAUDO".
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let alvoLabel = null;
+    let node;
+    while ((node = walker.nextNode())) {
+        if (norm(node.textContent || '') === 'status do laudo') {
+            alvoLabel = node;
+            break;
+        }
+    }
+    if (!alvoLabel) return false;
+
+    // 2. Sobe até um container que contenha o status — geralmente 1-3 níveis.
+    let container = alvoLabel;
+    for (let i = 0; i < 4 && container.parentElement; i++) {
+        container = container.parentElement;
+        const t = norm(container.textContent || '');
+        if (t.length > 30 && t.length < 400) break;  // contém label + valor + acessar
+    }
+
+    // 3. Procura clicáveis dentro do container com texto curto "acessar".
+    const clicaveis = container.querySelectorAll('a, button, [role="button"]');
+    for (const el of clicaveis) {
+        const txt = norm(el.textContent);
+        if (txt.length === 0 || txt.length > 20) continue;
+        if (!ACESSAR_LABELS.has(txt)) continue;
+        try { el.click(); return true; } catch (e) {}
+    }
+    return false;
+}
+"""
+
+
+# Detecta se o body_text indica que o laudo cautelar EXISTE no AA — usado pra
+# decidir se vale insistir quando o seletor de URL falha. "Aprovado",
+# "Aprovado com apontamento" e "Não aprovado" todos significam que tem laudo
+# (no último caso o early_exit já descarta o lote, mas a URL pode ser útil pro
+# operador conferir manualmente). "Pendente" / "Não disponível" indicam laudo
+# ainda não anexado pelo vendedor — aí não adianta insistir.
+def _laudo_existe_no_body(body_text: str) -> bool:
+    if not body_text:
+        return False
+    import re as _re
+    m = _re.search(r"STATUS DO LAUDO\s*\n\s*([^\n]+)", body_text)
+    if not m:
+        return False
+    status = m.group(1).strip().lower()
+    if "aprovado" in status:        # "aprovado" / "não aprovado" / "aprovado com apontamento"
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Gerenciamento de cookies
 # ---------------------------------------------------------------------------
@@ -405,14 +475,20 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
     Abre página de detalhe de um lote.
     Retorna (body_text, laudo_pdf_url).
 
-    Tenta extrair `laudo_pdf_url` em múltiplas passadas:
+    Tenta extrair `laudo_pdf_url` em passadas escalonadas:
       1. DOM inicial imediato
-      2. Se falhou: clica "ver laudo" e aguarda 2s
-      3. Se falhou: espera mais 2s (lazy load lento)
-      4. Se falhou: clica de novo (às vezes o primeiro click só expande menu)
+      2-4. Clica botão com texto contendo "laudo" + waits 2s/2.5s/3.5s
+      5-7. Reservadas pra grupos kuruma/autus/trivel/autojapan: o trigger é o
+           link "Acessar" abaixo de STATUS DO LAUDO (texto não contém "laudo",
+           então _ABRIR_MODAL_LAUDO_JS perde). Só rodam quando o body_text
+           confirma que o laudo EXISTE — sem isso, viramos no fallback de
+           `_laudo_sem_pdf` em vez de bater num modal que não vai abrir.
 
     Triagem 2026-04-18 mostrou que 55% dos lotes ficavam com pdf_url=None
-    mesmo tendo PDF disponível. Essa versão tenta mais agressivo.
+    mesmo tendo PDF disponível. Diagnóstico 2026-04-27 (via JSONs em
+    data/detalhes/): 20% dos lotes têm STATUS DO LAUDO="Laudo Aprovado" no
+    body_text mas laudo_pdf_url=None — exatamente os grupos kuruma. Essas
+    passadas extras atacam isso.
 
     Se nada der, retorna None e pipeline cai em `_laudo_sem_pdf`.
     """
@@ -435,7 +511,7 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
     if laudo_pdf_url:
         return body_text, laudo_pdf_url
 
-    # Passadas 2-4: tenta revelar o modal. Até 2 cliques com waits crescentes.
+    # Passadas 2-4: tenta revelar o modal via botão "laudo". Até 2 cliques.
     for tentativa, espera_ms in enumerate([2000, 2500, 3500]):
         try:
             clicou = await page.evaluate(_ABRIR_MODAL_LAUDO_JS)
@@ -445,10 +521,36 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
                 _log.info("laudo_pdf_url achado na passada %d", tentativa + 2)
                 return body_text, laudo_pdf_url
             if not clicou and tentativa >= 1:
-                # Sem botão novo pra clicar e 2 tentativas já passaram — desiste.
+                # Sem botão novo pra clicar e 2 tentativas já passaram — desiste
+                # do trigger "laudo" e cai pra trigger "Acessar" se aplicável.
                 break
         except Exception:
             pass
+
+    # Passadas 5-7: trigger "Acessar" próximo a STATUS DO LAUDO (kuruma & cia).
+    # Só roda quando body_text confirma que o laudo existe — pra não desperdiçar
+    # 12s em lote que realmente não tem laudo anexado.
+    if _laudo_existe_no_body(body_text):
+        for tentativa, espera_ms in enumerate([3000, 4000, 5000]):
+            try:
+                clicou = await page.evaluate(_CLICK_ACESSAR_NEAR_LAUDO_JS)
+                await page.wait_for_timeout(espera_ms)
+                laudo_pdf_url = await _extrair_valido()
+                if laudo_pdf_url:
+                    _log.info(
+                        "laudo_pdf_url achado via trigger 'Acessar' na passada %d",
+                        tentativa + 5,
+                    )
+                    return body_text, laudo_pdf_url
+                if not clicou and tentativa >= 1:
+                    break
+            except Exception:
+                pass
+        # Se chegou aqui, o laudo existe no AA mas não conseguimos a URL —
+        # log explícito pra triagem identificar (vs lote sem laudo no AA).
+        _log.warning(
+            "laudo existe no body_text mas URL não foi capturada: %s", url
+        )
 
     return body_text, None
 

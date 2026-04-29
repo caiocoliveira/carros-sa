@@ -404,6 +404,26 @@ Já registrado:
   - `HistoricoStat` é cached por export — múltiplos exports na mesma sessão não veem Arrematados novos sem re-chamar `carregar_historico_stat`. Aceitável (export roda 1x por run).
   - Coluna descritiva — NÃO afeta ranking, NÃO filtra. Lotes com laudo pendente mostram Tese "—" pra evitar sinal enganoso (lance_max está "—" nesses casos).
 
+### U — Auditoria de completude de laudo (PDF + cache + URL) ✅
+- **Branch:** `claude/great-turing-Nfdh4`
+- **Arquivos:**
+  - [`carros_sa/tools/laudo_audit.py`](carros_sa/tools/laudo_audit.py) — NOVO. `verificar_laudo_completo(lote, laudo, pdf_dir)` checa simultaneamente: (1) PDF persistido em `data/laudos_pdfs/<id>.pdf` (>5KB), (2) `LaudoCache.confidence ≥ 0.6`, (3) `raw_json.detalhe.laudo_pdf_url` passa em `is_laudo_pdf_url`. `auditar(session, empresa_id)` agrega para todos os lotes ativos espelhando o filtro do exporter (avaliados + fim_em futuro + não-encerrados).
+  - [`scripts/auditar_laudos.py`](scripts/auditar_laudos.py) — NOVO. CLI que imprime relatório com lotes incompletos, motivo agregado e instruções de remediação. `--strict` retorna exit 1 quando há incompletos (pra travar cron).
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — fix preventivo: quando `_pdf_eh_laudo_valido` rejeita o arquivo baixado, agora também zera `raw_json.detalhe.laudo_pdf_url` no commit granular do mesmo passo. Antes, a URL "envenenada" continuava persistida → exporter renderia HYPERLINK clicável pra um PDF que o validador já tinha rejeitado.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — coluna "Laudo" passa a ter 3 estados em vez de 2: HYPERLINK (URL válida), `"PDF salvo (link expirado)"` (PDF local existe mas URL pré-assinada já morreu), ou "—" (sem URL e sem PDF). URLs do `storage.googleapis.com/doc-b2b/` expiram em ~1h; o estado intermediário sinaliza que o laudo FOI analisado.
+  - [`Makefile`](Makefile) — novo target `make auditar-laudos [EMPRESA=<id>]`.
+  - [`tests/test_laudo_audit.py`](tests/test_laudo_audit.py) — 16 testes cobrindo: matriz das 3 condições, agregação, filtro de ativos, multi-tenant, e os 3 estados da célula "Laudo" no exporter.
+- **Motivação:** usuário pediu garantia de que todo carro na lista tem laudo baixado, revisado e link na planilha — e identificar/resolver razão quando não tiver. As camadas defensivas existentes (`is_laudo_pdf_url` no scraper, `_pdf_eh_laudo_valido` no orquestrador, `limpar_decoys` no cron, retry diário) cobrem cada sintoma isoladamente, mas ninguém auditava o resultado integrado. Resultado: lotes "vazavam" pra planilha com 1 das 3 condições falhando sem ninguém perceber.
+- **Como funciona o ciclo completo:**
+  1. **Pipeline** baixa PDF → valida → extrai laudo → persiste URL no raw_json. Quando valida rejeita, agora zera URL (defesa contemporânea).
+  2. **Cron** roda diariamente: `triagem` → `limpar_decoys` (defesa retroativa em URL legada) → retry de pendentes.
+  3. **Exporter** renderiza 3 estados — link clicável, "PDF salvo", ou "—" — operador sabe exatamente o que pode fazer.
+  4. **Auditoria** (`make auditar-laudos`) é a fonte única da verdade que cruza os 3 sinais e reporta gaps acionáveis.
+- **Cobertura:** 16 testes em `tests/test_laudo_audit.py`. Suite total: **342 passed, 2 skipped** (skip do guard de DB e do orquestrador-async sem playwright).
+- **Limitações conhecidas:**
+  - URLs pré-assinadas do Google Storage expiram em ~1h. O estado "PDF salvo (link expirado)" é o melhor que dá pra fazer sem hospedar o PDF em outro lugar. Pra ter link permanente, o próximo passo é subir os PDFs no Google Drive (via service account já configurada) e armazenar `drive_file_id` no `LaudoCache` — mudança maior, fora deste workstream.
+  - `auditar_laudos.py` não integra com o cron ainda — operador precisa rodar manualmente. Adicionar ao `setup_cron.sh` quando o estado típico for ≥99% completo (hoje, com URLs expiradas frequentes, ia spammar log).
+
 ---
 
 ## Marcos (do plano arquitetural original)

@@ -24,6 +24,7 @@ from sqlmodel import Session, select
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
+from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
 from carros_sa.tools.tese import (
     calcular_tese,
     carregar_config_tese,
@@ -196,6 +197,13 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
+            # PDF persistido em data/laudos_pdfs/ — quando temos o arquivo local
+            # mas a URL pré-assinada do storage já expirou (URLs do Auto Avaliar
+            # vivem ~1h), sinaliza ao operador que o laudo FOI analisado e está
+            # salvo, mas o link clicável não vai funcionar. Antes mostrava só
+            # "—" no mesmo caso de URL ausente sem PDF, ofuscando essa diferença.
+            pdf_local_existe = (PDF_DIR_DEFAULT / f"{av.lote_id}.pdf").exists()
+
             # Laudo só conta como "analisado" se veio de um PDF real — fallback
             # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
             # confidence <= 0.55. Sem essa distinção o usuário via reforma de
@@ -234,6 +242,7 @@ class SheetsExporter:
                 "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
+                "pdf_local_existe": pdf_local_existe,
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "laudo_analisado": laudo_analisado,
@@ -275,13 +284,18 @@ class SheetsExporter:
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
-            # Link pro PDF do laudo. Se URL passou pelo filtro de decoy
-            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, "—".
-            # Motivação: usuário quer conferir o laudo antes de dar lance
-            # sem precisar clicar no anúncio, abrir o modal e esperar carregar.
+            # Link pro PDF do laudo. Três estados:
+            #   1. URL válida (passa em is_laudo_pdf_url)  → HYPERLINK clicável.
+            #   2. PDF salvo localmente mas URL ausente/expirada → texto descritivo
+            #      "PDF salvo (link expirado)" — sinaliza que o laudo FOI analisado
+            #      e está em data/laudos_pdfs/<lote>.pdf, só o link assinado morreu.
+            #      (URLs do storage do Auto Avaliar têm validade ~1h.)
+            #   3. Sem URL e sem PDF local → "—" (laudo de fato não disponível).
             if r["laudo_url"]:
                 laudo_escaped = r["laudo_url"].replace('"', '""')
                 laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
+            elif r.get("pdf_local_existe"):
+                laudo_cell = "PDF salvo (link expirado)"
             else:
                 laudo_cell = "—"
 
@@ -528,9 +542,9 @@ class SheetsExporter:
             ],
             [
                 "Laudo",
-                "Scraper detalhe",
-                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. URLs que não são laudo real (Relatório de Transparência, listagem) são filtradas e a célula fica '—'.",
-                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. '—' = laudo não achado ou selo 'SEM LAUDO'.",
+                "Scraper detalhe + PDF persistido",
+                "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs que não são laudo real (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url`; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL pré-assinada do storage já expirou (validade ~1h); (3) '—' quando não há URL nem PDF local.",
+                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (2) significa que o laudo FOI analisado (severidade/avarias estão certas), só o link clicável morreu — pra abrir, recolete o lote ou consulte data/laudos_pdfs/<lote>.pdf no laptop. Auditoria diária pelo `make auditar-laudos`.",
             ],
         ]
 

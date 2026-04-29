@@ -618,8 +618,12 @@ async def _pipeline_lote(
         # configurado, determinístico direto.
         if text_llm_client is not None:
             # Observações do inspetor enriquecem o prompt quando temos o PDF.
+            # `pdf_dest` é None se não havia URL, download falhou OU validação
+            # rejeitou (vide bloco acima). Checa antes de chamar `.exists()` —
+            # senão `None.exists()` levantava AttributeError silencioso (engolido
+            # pelo try/except interno mas confundia debug).
             observacoes = ""
-            if pdf_url and pdf_dest.exists():
+            if pdf_dest is not None and pdf_dest.exists():
                 try:
                     from carros_sa.agents.extrator_laudo import parse_laudo_textual
                     observacoes = parse_laudo_textual(pdf_dest).observacoes or ""

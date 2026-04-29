@@ -17,11 +17,17 @@ pro usuário até alguém re-raspar o detalhe.
 O que este script faz:
   1. Varre todos os lotes no SQLite.
   2. Para cada um, olha `raw_json.detalhe.laudo_pdf_url`. Se a URL não passa
-     no gate `is_laudo_pdf_url()`, considera decoy.
-  3. **Remove a URL** do raw_json (seta `None`).
-  4. **Derruba o LaudoCache** do lote (delete) pra garantir que o retry do
-     pipeline vai re-executar o fluxo completo — incluindo re-scrape do
-     detalhe com o seletor corrigido.
+     no gate `is_laudo_pdf_url()`, é candidata a decoy.
+  3. **Exceção empírica:** se essa URL já gerou um `LaudoCache` com
+     `confidence ≥ 0.6`, ela é preservada — `_pdf_eh_laudo_valido()` aceitou
+     e `extrair_laudo()` rodou com sucesso, então a allowlist é que está
+     defasada (host novo do AA), não a URL. Anular agora derrubaria o link
+     "Ver laudo" da planilha sem ganho real e poderia entrar em loop com
+     o retry. Era exatamente esse o sintoma de "—" em massa na coluna
+     Laudo (PDF) mesmo com lotes "✓ Viável".
+  4. Pra URLs sem cache forte: **remove a URL** do raw_json (seta `None`)
+     e **derruba o LaudoCache** (delete) pra forçar re-extração no próximo
+     retry.
   5. Retorna contagem de lotes tocados.
 
 Importável como biblioteca (`limpar_decoys(session) -> ResultadoLimpeza`)
@@ -56,6 +62,7 @@ class ResultadoLimpeza:
     decoys_encontrados: int = 0
     decoys_limpos: int = 0
     laudos_derrubados: int = 0
+    preservados_por_cache: int = 0
     lotes_afetados: List[str] = field(default_factory=list)
 
 
@@ -85,8 +92,19 @@ def limpar_decoys(session: Session, *, dry_run: bool = False) -> ResultadoLimpez
         if not url:
             continue
         # `is_laudo_pdf_url()` é a fonte de verdade — qualquer URL que não
-        # passa ali é decoy pra efeitos deste script.
+        # passa ali é candidata a decoy pra efeitos deste script.
         if is_laudo_pdf_url(url):
+            continue
+
+        # Evidência empírica vence allowlist: se aquela URL já gerou um
+        # LaudoCache com confidence≥0.6, o `_pdf_eh_laudo_valido()` aceitou
+        # e o `extrair_laudo()` rodou com sucesso. Anular agora derruba o
+        # link "Ver laudo" da planilha sem motivo e força re-extrair toda
+        # vez que o cron passar — o retry pode achar URL fora da allowlist
+        # de novo (host novo do AA), entrar em loop. Preservamos.
+        laudo = session.get(LaudoCache, lote.id)
+        if laudo is not None and (laudo.confidence or 0) >= 0.6:
+            result.preservados_por_cache += 1
             continue
 
         result.decoys_encontrados += 1
@@ -109,8 +127,8 @@ def limpar_decoys(session: Session, *, dry_run: bool = False) -> ResultadoLimpez
         # Derruba o LaudoCache — sem isso, o retry `--somente-laudo-pendente`
         # ainda vê confidence<0.6 e tenta, mas sem invalidar o cache o
         # orquestrador pode pular em outros paths. Deletar força o fluxo
-        # completo no próximo retry.
-        laudo = session.get(LaudoCache, lote.id)
+        # completo no próximo retry. Só chega aqui pra cache fraco (conf<0.6);
+        # cache forte foi protegido no início do loop.
         if laudo is not None:
             session.delete(laudo)
             result.laudos_derrubados += 1
@@ -132,11 +150,12 @@ def main(
 
     modo = "[yellow]DRY-RUN[/yellow]" if dry_run else "[green]persistido[/green]"
     console.print(f"\n[bold]Limpeza de decoys ({modo}):[/bold]")
-    console.print(f"  Total de lotes no DB: {res.total_lotes}")
-    console.print(f"  Decoys encontrados:   {res.decoys_encontrados}")
+    console.print(f"  Total de lotes no DB:        {res.total_lotes}")
+    console.print(f"  Decoys encontrados:          {res.decoys_encontrados}")
+    console.print(f"  Preservados por cache forte: {res.preservados_por_cache}")
     if not dry_run:
-        console.print(f"  Decoys limpos:        {res.decoys_limpos}")
-        console.print(f"  LaudoCache derrubado: {res.laudos_derrubados}")
+        console.print(f"  Decoys limpos:               {res.decoys_limpos}")
+        console.print(f"  LaudoCache derrubado:        {res.laudos_derrubados}")
     if res.lotes_afetados:
         console.print(f"\n  Amostra de lotes afetados: {res.lotes_afetados[:10]}")
 

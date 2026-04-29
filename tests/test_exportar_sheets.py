@@ -597,6 +597,43 @@ class TestSheetsExporterQuery:
         idx_laudo = HEADER.index("Laudo")
         assert rows[2][idx_laudo] == "—"
 
+    def test_resize_encolhe_grade_pra_len_header(self):
+        """Slim-down do HEADER (27→15 cols em abr/2026) deixou colunas órfãs
+        no Sheets — `ws.clear()` não derruba colunas, só apaga valores no
+        range ativo. Resultado observado pelo operador: 'Laudo (PDF)'
+        zumbi em Z mostrando '—' pra todo mundo mesmo com lotes '✓ Viável'.
+        Fix: `ws.resize(cols=len(HEADER))` antes do update derruba qualquer
+        coluna além do HEADER atual no servidor."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        # Resize precisa ter sido chamado com cols=len(HEADER) ANTES do clear,
+        # senão a aba antiga (27 cols) mantém colunas P→AA congeladas.
+        assert mock_ws.resize.called, "ws.resize não foi chamado — colunas órfãs do HEADER antigo continuam no sheet"
+        kwargs = mock_ws.resize.call_args.kwargs
+        assert kwargs.get("cols") == len(HEADER)
+        # Resize antes de clear: ordem importa pra evitar perda transitória de dados
+        # (clear de grade larga + resize depois é equivalente, mas resize→clear
+        # garante que o estado intermediário visto por leitores concorrentes seja
+        # já o estado final estreito).
+        call_order = [c[0] for c in mock_ws.method_calls]
+        assert call_order.index("resize") < call_order.index("clear")
+
     def test_exportar_url_vazia_nao_gera_hyperlink(self):
         """Lote sem URL deve cair pro placeholder '—', sem fórmula HYPERLINK quebrada."""
         engine = _engine_mem()

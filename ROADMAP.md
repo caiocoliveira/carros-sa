@@ -4,7 +4,28 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 35/35 testes passando
+✅ **Fundação + EstimadorReforma** — 328/328 testes passando
+
+### W — Revisão econômica das colunas da planilha (2026-04-29) ✅
+- **Branch:** `claude/sleepy-wright-kSiCR`
+- **Motivação:** Usuário pediu sanity-check da relação entre as colunas (FIPE × Lance Máximo × Giro FIPE × ROI × Lucro/mês). Simulação com Polo Track real expôs três bugs compostos.
+- **Bugs encontrados e corrigidos:**
+  1. **`ROI anualizado` na planilha era tautológico.** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) usava `_calcular_roi_no_maximo(av) → roi_max × 365 / dias_giro` mas, por construção do precificador, `preco_max + reforma + frete + taxas + custo_op = preco_giro × (1 − margem_min)` ⇒ `roi_max ≡ margem_min / (1 − margem_min)` ≈ constante por empresa (~11% em Uberlândia). A coluna só variava por `dias_giro`, virando um `1/dias_giro` disfarçado. Pior: `_calcular_roi_no_maximo` ignorava `custo_op` e dava 15.9% em vez de 11.1%, então o número exibido nem era o "garantido" certo. Fix: usar `score_roi` (caso médio calibrado por risco/liquidez) — bate com a CLI `top` e com o que o docstring de `precificador.py:154-162` recomenda.
+  2. **`Lucro/mês` subestimava em ~10%.** [`carros_sa/tools/sheets.py:180`](carros_sa/tools/sheets.py) e [`carros_sa/cli.py:166`](carros_sa/cli.py) usavam `score_roi × preco_alvo` como aproximação do lucro absoluto, mas `score_roi = lucro / capital_alvo` e `capital_alvo > preco_alvo` (engloba reforma/frete/taxas/custo_op). Fórmula exata fechada: `lucro = preco_giro × score_roi / (1 + score_roi)`. Helper canônico `sheets._lucro_absoluto_no_alvo`. No Polo Track real: era R$ 7.419/mês, agora R$ 8.288/mês — gap de R$ 869/mês que afeta diretamente a comparação entre lotes.
+  3. **`pdf_dest.exists()` em [`carros_sa/orquestrador.py:609`](carros_sa/orquestrador.py) podia ser `None.exists()`** quando `pdf_url` era truthy mas o download/validação falhava. AttributeError engolido pelo `try/except` de baixo, mas confundia debug. Fix: checar `pdf_dest is not None and pdf_dest.exists()`.
+- **Limpeza de docstrings:** [`precificador.py`](carros_sa/precificador.py) declarava `preco_giro_fipe = min(FIPE × 0.95, webmotors_p25)` mas o código faz `webmotors_mediana × f_km` há várias iterações; `webmotors_p25` está exportado em `SinalMercado` mas não é consumido. Docstring agora reflete a fórmula efetiva e nota o legado.
+- **Audit reforçado** ([`carros_sa/tools/audit.py`](carros_sa/tools/audit.py)): nova invariante "Lance Máximo > FIPE × 1.05" pra pegar âncora de revenda inflada (f_km saturado em casos onde não deveria, FIPE errada, mediana inflada). ROI anualizado negativo também passa a ser sinalizado.
+- **CLAUDE.md** atualizado com 4 padrões aprendidos: identidade econômica do precificador, fórmula fechada do lucro absoluto, naming hint `preco_giro_fipe`, workflow de revisão autônoma (escrever simulação ANTES de fix).
+- **Cobertura:** 4 testes novos em `TestLucroAbsolutoNoAlvo` (gold Polo + edge cases score=0/negativo/preco_giro=0); `test_roi_absurdo_reportado` migrado pra trigger via `score_roi=5.0` × dias=30 = 6083% > 1000% (ao invés do mecanismo anterior baseado no roi_max bugado); `test_exportar_roi_anualizado_baseado_em_score_roi` substitui o teste que pinava ~44%/ano (tautologia) por 121.7%/ano (score_roi=0.3, dias=90). Suite total: **328 verde**.
+- **Validação real (simulação 3 lotes):**
+  - Fiesta 2013 estrutural: `preco_max=R$13.4k vs FIPE R$30.9k = 43.5%` — descartado como inviável (lance atual R$22.9k > p_max).
+  - Polo Track 2024: `p_max=R$56.7k vs FIPE R$70k = 81%`, ROI/ano=231.5%, lucro/mês=R$8.236 — saudável.
+  - Compass 2019: `p_max=R$82.8k vs FIPE R$100k = 82.8%`, ROI/ano=311.3%, lucro/mês=R$16.418 — alto por giro rápido (60d SUV).
+  - Todos com `p_max < FIPE`, como esperado pela construção.
+- **Limitações conhecidas:**
+  - Score_roi em lotes inviáveis (Fiesta) sai 121% pois o fator_risco máximo dispara a margem efetiva. Como o lote é descartado pelo filtro de viabilidade antes de chegar à planilha, não polui a UI — mas o número absoluto fica bizarro em logs. Cap futuro em `margem_aplicada` (ex: ≤0.50) seria razoável; não fiz pra não mudar o ranking de lotes calibrados sem mais dados.
+
+
 
 | Componente | Arquivo | Cobertura |
 |---|---|---|
@@ -370,6 +391,21 @@ Já registrado:
 - **Cobertura:** 8 testes novos (202 total verde). Migração SQLite validada: campo aparece tanto em DB fresco quanto em DB existente sem perda de dados.
 - **Limitações:** coluna tem largura livre — se LLM retornar justificativa muito longa (>500 chars) vai ficar feia no Google Sheets. Prompt hoje pede "uma frase", mas não enforce. Mitigável com truncagem se virar problema.
 
+### O.2 — Gemma 3 local via Ollama (experimental, text-only) 🧪
+- **Branch:** `claude/test-gemma-4-local-SmiEV`
+- **Arquivos:**
+  - [`carros_sa/agents/text_llm_clients.py`](carros_sa/agents/text_llm_clients.py) — +`OllamaTextClient` (espelho do `OllamaVisionClient`), sem campo `images`, endpoint `/api/generate` format=json.
+  - [`carros_sa/agents/text_llm_clients.py`](carros_sa/agents/text_llm_clients.py) — `build_default_text_client()` agora aceita `TEXT_LLM_PROVIDER=ollama` (standalone) e `ollama+gemini` (Ollama primário → Gemini fallback via `FallbackTextLLMClient`).
+  - [`tests/test_text_llm_clients_ollama.py`](tests/test_text_llm_clients_ollama.py) — 10 testes com `httpx.Client.post` mockado (regra CLAUDE.md: sem LLM real em teste).
+  - [`.env.example`](.env.example) — linha comentada documentando `TEXT_LLM_PROVIDER=ollama+gemini`.
+- **Motivação:** usuário (2026-04-22) quer testar rodar o estimador de reforma local no MacBook Air pra eliminar rate limit do Gemini free tier e dependência de rede.
+- **Como usar:** `brew install ollama && ollama pull gemma3:4b && ollama serve`, depois `TEXT_LLM_PROVIDER=ollama+gemini` no `.env`. Nenhum código chamador muda — `estimador_reforma_llm.estimar_llm`, `scripts/comparar_reforma_tabela_vs_llm.py` e `scripts/triagem_diaria.py` já usam `build_default_text_client()`.
+- **Limitações conhecidas:**
+  - **Vision ainda em Gemini** — extrator de laudo NÃO migrado, risco de perda de qualidade no diagrama Auto Avaliar (Gemini 2.5 Flash tem conf. 0.95 na fixture Fiesta). Decidir depois do smoke test do texto.
+  - **Default `auto` não mudou** — Ollama só entra com opt-in explícito pra não quebrar produção em servidor sem Ollama.
+  - **Sem benchmark de qualidade vs Gemini** ainda — user vai rodar `scripts/comparar_reforma_tabela_vs_llm.py --lote 21854782` manualmente.
+  - **Latência esperada** 5-15s/chamada em Gemma 3 4B no M-series vs <2s do Gemini Flash.
+
 ### S — Aba Cidades & Frete na planilha ✅
 - **Branch:** `claude/festive-tesla-6c18ae`
 - **Arquivos:** [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — novo `_write_cidades_frete_sheet(empresa_id, session)` engatado no `exportar()`. Aba `cidades_<empresa_id>` com 1 linha por município no raio operacional + frete por categoria + contagem de lotes ativos (fim_em > now) com origem naquela cidade.
@@ -379,6 +415,21 @@ Já registrado:
 - **Limitações conhecidas:**
   - Lotes sem `origem_cidade`/`origem_uf` populados não entram na contagem (o scraper costuma popular, mas snapshots antigos podem ter NULL).
   - `lru_cache(32)` em `carregar_empresa` significa que mudanças no YAML em runtime do mesmo processo só refletem após reload — não impacta operação batch (script encerra entre runs).
+
+### U — Leilões futuros na planilha (decoupling coleta × exibição) ✅
+- **Branch:** `claude/add-future-auctions-ITtsf`
+- **Arquivos:**
+  - [`carros_sa/scraping/scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) — `_coletar_listagem_cidade` e `coletar_listagem` passam a aceitar `horizonte_dias: Optional[int] = None` (default None = coleta full). `_MAX_PAGINAS` subiu de 20 → 50 + log quando o site reporta mais páginas do que o teto.
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `orquestrar` default `horizonte_dias=None`.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `SheetsExporter.exportar(horizonte_exibicao_dias: Optional[int] = None)` — filtra lotes com `fim_em > agora + N dias` da planilha.
+  - [`carros_sa/cli.py`](carros_sa/cli.py) — `triagem --horizonte-dias` agora é **janela de exibição**, default 30d (era 7d de coleta). Coleta passa `None` pro scraper (pega o pipeline inteiro).
+  - [`tests/test_scraper_paginacao.py`](tests/test_scraper_paginacao.py) — teste novo `test_sem_horizonte_deixa_passar_lotes_futuros` + `test_horizonte_dias_explicito_filtra_apos_paginar` (opt-in) + cap ajustado pra 50.
+  - [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — 2 testes novos: `horizonte_exibicao_dias=30` corta lotes 45d; `None` mantém tudo.
+- **Motivação:** Usuário reclamou (2026-04-23) que a planilha só mostra leilões de hoje, apesar do site ter muitos lotes agendados pra dias futuros. Causa raiz: filtro `fim_em > agora + 7d` rodava **no scraper** (`_coletar_listagem_cidade`), descartando tudo antes do DB ver. Se a janela precisava crescer, tinha que re-scrape. Combinado com `_MAX_PAGINAS=20`, raios maiores podiam ter cidades truncadas silenciosamente.
+- **Como funciona:** Scraper agora coleta tudo que aparece na listagem (inclui leilões agendados). DB guarda o pipeline futuro cheio. Usuário decide a janela de exibição via `--horizonte-dias N` (passa pro exporter, não pro scraper) sem precisar re-coletar. Subir `N` = ver mais dias à frente instantaneamente.
+- **Limitações conhecidas:**
+  - Mais lotes coletados = mais chamadas de detalhe/LLM no primeiro run contra DB novo. Sistema já tem dedup por lote_id (orquestrador short-circuita lotes já avaliados) então passadas subsequentes ficam finas.
+  - Se a listagem do Auto Avaliar NÃO mostrar leilões agendados por padrão (pode haver filtro/status que precisa ser passado na URL), esse fix não os traz sozinho — pode precisar de investigação adicional na URL `?status=agendado` ou aba separada. A coleta hoje usa `&order=recforyou`; se o usuário ainda ver só leilões de hoje depois disso, é próximo passo.
 
 ### T — Coluna "Tese" na planilha (sinalização baseada em histórico) ✅
 - **Branch:** `claude/adoring-black-d891b8`
@@ -403,6 +454,26 @@ Já registrado:
   - Sinais ruins são listas de substrings simples no nome do modelo — falso positivo possível (ex: "Santa Fe 3.5 Híbrido" casaria V6 se tivesse o pattern). Mitigado com `excludes`, mas o domínio é restrito à checagem por substring.
   - `HistoricoStat` é cached por export — múltiplos exports na mesma sessão não veem Arrematados novos sem re-chamar `carregar_historico_stat`. Aceitável (export roda 1x por run).
   - Coluna descritiva — NÃO afeta ranking, NÃO filtra. Lotes com laudo pendente mostram Tese "—" pra evitar sinal enganoso (lance_max está "—" nesses casos).
+
+### U — Auditoria de completude de laudo (PDF + cache + URL) ✅
+- **Branch:** `claude/great-turing-Nfdh4`
+- **Arquivos:**
+  - [`carros_sa/tools/laudo_audit.py`](carros_sa/tools/laudo_audit.py) — NOVO. `verificar_laudo_completo(lote, laudo, pdf_dir)` checa simultaneamente: (1) PDF persistido em `data/laudos_pdfs/<id>.pdf` (>5KB), (2) `LaudoCache.confidence ≥ 0.6`, (3) `raw_json.detalhe.laudo_pdf_url` passa em `is_laudo_pdf_url`. `auditar(session, empresa_id)` agrega para todos os lotes ativos espelhando o filtro do exporter (avaliados + fim_em futuro + não-encerrados).
+  - [`scripts/auditar_laudos.py`](scripts/auditar_laudos.py) — NOVO. CLI que imprime relatório com lotes incompletos, motivo agregado e instruções de remediação. `--strict` retorna exit 1 quando há incompletos (pra travar cron).
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — fix preventivo: quando `_pdf_eh_laudo_valido` rejeita o arquivo baixado, agora também zera `raw_json.detalhe.laudo_pdf_url` no commit granular do mesmo passo. Antes, a URL "envenenada" continuava persistida → exporter renderia HYPERLINK clicável pra um PDF que o validador já tinha rejeitado.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — coluna "Laudo" passa a ter 3 estados em vez de 2: HYPERLINK (URL válida), `"PDF salvo (link expirado)"` (PDF local existe mas URL pré-assinada já morreu), ou "—" (sem URL e sem PDF). URLs do `storage.googleapis.com/doc-b2b/` expiram em ~1h; o estado intermediário sinaliza que o laudo FOI analisado.
+  - [`Makefile`](Makefile) — novo target `make auditar-laudos [EMPRESA=<id>]`.
+  - [`tests/test_laudo_audit.py`](tests/test_laudo_audit.py) — 16 testes cobrindo: matriz das 3 condições, agregação, filtro de ativos, multi-tenant, e os 3 estados da célula "Laudo" no exporter.
+- **Motivação:** usuário pediu garantia de que todo carro na lista tem laudo baixado, revisado e link na planilha — e identificar/resolver razão quando não tiver. As camadas defensivas existentes (`is_laudo_pdf_url` no scraper, `_pdf_eh_laudo_valido` no orquestrador, `limpar_decoys` no cron, retry diário) cobrem cada sintoma isoladamente, mas ninguém auditava o resultado integrado. Resultado: lotes "vazavam" pra planilha com 1 das 3 condições falhando sem ninguém perceber.
+- **Como funciona o ciclo completo:**
+  1. **Pipeline** baixa PDF → valida → extrai laudo → persiste URL no raw_json. Quando valida rejeita, agora zera URL (defesa contemporânea).
+  2. **Cron** roda diariamente: `triagem` → `limpar_decoys` (defesa retroativa em URL legada) → retry de pendentes.
+  3. **Exporter** renderiza 3 estados — link clicável, "PDF salvo", ou "—" — operador sabe exatamente o que pode fazer.
+  4. **Auditoria** (`make auditar-laudos`) é a fonte única da verdade que cruza os 3 sinais e reporta gaps acionáveis.
+- **Cobertura:** 16 testes em `tests/test_laudo_audit.py`. Suite total: **342 passed, 2 skipped** (skip do guard de DB e do orquestrador-async sem playwright).
+- **Limitações conhecidas:**
+  - URLs pré-assinadas do Google Storage expiram em ~1h. O estado "PDF salvo (link expirado)" é o melhor que dá pra fazer sem hospedar o PDF em outro lugar. Pra ter link permanente, o próximo passo é subir os PDFs no Google Drive (via service account já configurada) e armazenar `drive_file_id` no `LaudoCache` — mudança maior, fora deste workstream.
+  - `auditar_laudos.py` não integra com o cron ainda — operador precisa rodar manualmente. Adicionar ao `setup_cron.sh` quando o estado típico for ≥99% completo (hoje, com URLs expiradas frequentes, ia spammar log).
 
 ---
 

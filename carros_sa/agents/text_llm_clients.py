@@ -119,6 +119,40 @@ class AnthropicTextClient(TextLLMClient):
 
 
 # =============================================================================
+# Ollama local — text-only
+# =============================================================================
+
+class OllamaTextClient(TextLLMClient):
+    """Ollama local text-only. Default gemma3:4b. Requer `ollama serve` rodando (port 11434)."""
+
+    def __init__(self, model: str = "gemma3:4b", host: str = "http://localhost:11434"):
+        import httpx
+
+        self._http = httpx.Client(base_url=host, timeout=120)
+        self._model = model
+
+    def generate_json(self, prompt: str) -> dict:
+        response = self._http.post(
+            "/api/generate",
+            json={
+                "model": self._model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.0},
+            },
+        )
+        response.raise_for_status()
+        raw = response.json()["response"].strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+        return json.loads(raw)
+
+    @property
+    def custo_estimado_usd(self) -> float:
+        return 0.0
+
+
+# =============================================================================
 # Fallback em cascata
 # =============================================================================
 
@@ -167,7 +201,8 @@ class FallbackTextLLMClient(TextLLMClient):
 def build_default_text_client() -> TextLLMClient:
     """Cascata default: Gemini primário + Haiku fallback (se ANTHROPIC_API_KEY setada).
 
-    Respeita `TEXT_LLM_PROVIDER` quando explícito: gemini | anthropic | auto.
+    Respeita `TEXT_LLM_PROVIDER` quando explícito:
+      gemini | anthropic | ollama | ollama+gemini | auto
     """
     provider = os.environ.get("TEXT_LLM_PROVIDER", "auto").lower()
 
@@ -175,6 +210,11 @@ def build_default_text_client() -> TextLLMClient:
         return GeminiTextClient()
     if provider == "anthropic":
         return AnthropicTextClient()
+    if provider == "ollama":
+        return OllamaTextClient()
+    if provider == "ollama+gemini":
+        # Ollama primário (custo zero, sem rate limit); Gemini cobre Ollama offline.
+        return FallbackTextLLMClient([OllamaTextClient(), GeminiTextClient()])
 
     if provider in ("", "auto"):
         clients: List[TextLLMClient] = []
@@ -185,7 +225,7 @@ def build_default_text_client() -> TextLLMClient:
         if not clients:
             raise RuntimeError(
                 "Nenhum provider de texto configurado. Defina GEMINI_API_KEY "
-                "e/ou ANTHROPIC_API_KEY no .env."
+                "e/ou ANTHROPIC_API_KEY no .env, ou TEXT_LLM_PROVIDER=ollama."
             )
         if len(clients) == 1:
             return clients[0]

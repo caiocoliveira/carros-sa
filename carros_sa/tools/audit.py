@@ -23,7 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
+from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
@@ -42,10 +42,14 @@ CHECKS: Dict[str, Validator] = {
         None if v in SITUACOES_VALIDAS
         else f"Situação '{v}' fora do domínio {SITUACOES_VALIDAS}"
     ),
+    "Marca": lambda v, r: (
+        "Marca string vazia — scraper não capturou fabricante do card"
+        if not v or not str(v).strip()
+        else None
+    ),
     "Modelo": lambda v, r: (
-        "Modelo string vazia" if not v or not str(v).strip()
-        else "Modelo sem marca e sem nome — scraper falhou em capturar campos"
-        if not r.get("marca") or not r.get("modelo_raw")
+        "Modelo string vazia — scraper não capturou nome do modelo"
+        if not v or not str(v).strip()
         else None
     ),
     "Ano": lambda v, r: (
@@ -64,12 +68,33 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
+        else (
+            # Sanidade de cabeça: por construção `preco_max ≤ preco_giro × (1−margem_min)`
+            # < FIPE, tirando casos extremos (km do lote MUITO abaixo da mediana de
+            # mercado → f_km próximo do teto 1.15). Lance Máximo > FIPE × 1.05 é
+            # red flag — indica dado desalinhado (FIPE errada, mediana inflada,
+            # f_km saturado num caso onde não devia).
+            f"Lance Máximo R$ {v} > FIPE × 1.05 (FIPE={r.get('fipe')}) — checar âncora de revenda"
+            if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
+            else None
+        )
+    ),
+    # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
+    # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
+    # de scraping/cache do client FIPE.
+    "FIPE (R$)": lambda v, r: (
+        "FIPE não-positivo — provável falha do client FIPE ou cache stale"
+        if isinstance(v, (int, float)) and v <= 0
         else None
     ),
     "ROI anualizado (%)": lambda v, r: (
-        "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"
-        if v is not None and v > 1000
-        else None
+        "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d) ou score_roi inflado"
+        if isinstance(v, (int, float)) and v > 1000
+        else (
+            "ROI anualizado negativo — score_roi negativo (custos > preco_giro) deveria ter sido descartado"
+            if isinstance(v, (int, float)) and v < 0
+            else None
+        )
     ),
     "Lucro/mês (R$)": lambda v, r: (
         "Lucro/mês negativo — verificar score_roi ou preco_alvo"
@@ -96,13 +121,15 @@ CHECKS: Dict[str, Validator] = {
 COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
-    "Modelo": lambda r: r["modelo"],
+    "Marca": lambda r: r["marca"],
+    "Modelo": lambda r: r["modelo_raw"],
     "Ano": lambda r: r["ano"],
     "Cidade": lambda r: r["cidade"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
+    "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
     "Reforma (R$)": lambda r: r["reforma_estimada"],
@@ -138,8 +165,10 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        roi_max = _calcular_roi_no_maximo(av)
-        roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+        # ROI anualizado = score_roi (caso médio no preço-alvo) anualizado.
+        # Igual ao SheetsExporter: ROI no máximo era quase-constante por empresa
+        # (≈margem_min/(1-margem_min)), virava tautologia inútil pra ranking.
+        roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -183,7 +212,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
-            "roi_pct": roi_max,
+            "score_roi": av.score_roi,
             "dias_giro": av.dias_giro_estimado,
             "roi_anualizado": round(roi_anual, 1),
             "fator_risco": round(av.fator_risco, 3),

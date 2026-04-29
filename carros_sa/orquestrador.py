@@ -535,6 +535,19 @@ async def _pipeline_lote(
                     # pego por seletor frouxo no passado) — descarta e trata como sem PDF.
                     pdf_dest.unlink(missing_ok=True)
                     pdf_dest = None
+                    # Zera a URL persistida em raw_json: ela apontou pra um arquivo
+                    # que NÃO é laudo, então deixá-la lá envenena (a) o exporter,
+                    # que renderia HYPERLINK clicável pro PDF errado, e (b) o retry
+                    # diário, que re-baixaria o mesmo arquivo inválido. Combina com
+                    # `limpar_decoys_laudo` (defesa retroativa) — aqui a defesa é
+                    # contemporânea, dentro do próprio pipeline.
+                    raw_atual = dict(lote.raw_json or {})
+                    det_atual = dict(raw_atual.get("detalhe") or {})
+                    det_atual["laudo_pdf_url"] = None
+                    raw_atual["detalhe"] = det_atual
+                    lote.raw_json = raw_atual
+                    session.add(lote)
+                    session.commit()
             except Exception:
                 pdf_dest = None
 
@@ -605,8 +618,12 @@ async def _pipeline_lote(
         # configurado, determinístico direto.
         if text_llm_client is not None:
             # Observações do inspetor enriquecem o prompt quando temos o PDF.
+            # `pdf_dest` é None se não havia URL, download falhou OU validação
+            # rejeitou (vide bloco acima). Checa antes de chamar `.exists()` —
+            # senão `None.exists()` levantava AttributeError silencioso (engolido
+            # pelo try/except interno mas confundia debug).
             observacoes = ""
-            if pdf_url and pdf_dest.exists():
+            if pdf_dest is not None and pdf_dest.exists():
                 try:
                     from carros_sa.agents.extrator_laudo import parse_laudo_textual
                     observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
@@ -664,7 +681,7 @@ async def orquestrar(
     session: Session,
     page,
     vision_client,
-    horizonte_dias: int = 7,
+    horizonte_dias: Optional[int] = None,
     text_llm_client=None,
 ) -> OrquestradorResult:
     """
@@ -675,7 +692,9 @@ async def orquestrar(
         session: SQLModel Session já aberta
         page: Playwright Page já autenticada
         vision_client: VisionClient instanciado (Gemini, Anthropic, Ollama)
-        horizonte_dias: só lotes com fim em <= N dias
+        horizonte_dias: filtro opcional de coleta — se setado, descarta lotes
+            com fim > N dias. Default `None` = coleta tudo que aparece na
+            listagem; janela de exibição fica a cargo do `SheetsExporter`.
 
     Returns:
         OrquestradorResult com contagens e detalhes por lote.

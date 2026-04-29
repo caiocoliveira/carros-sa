@@ -160,10 +160,15 @@ def top(
     for av, lote, roi_anual in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
-        # Lucro esperado no alvo (usar score_roi × capital_alvo daria o lucro
-        # no caso médio). Aproximação simples: score_roi × preco_alvo — é o
-        # lucro que a margem.base × fatores persegue no preço-alvo.
-        lucro_esperado = int(av.score_roi * av.preco_alvo)
+        # Lucro absoluto exato no preço-alvo:
+        #   score_roi = lucro / capital_alvo  ⇒  capital_alvo = preco_giro / (1 + score_roi)
+        #   lucro = preco_giro - capital_alvo = preco_giro × score_roi / (1 + score_roi)
+        # Substitui aproximação anterior `score_roi × preco_alvo` que subestimava
+        # ~10% (capital_alvo > preco_alvo por reforma/frete/taxas/custo_op).
+        lucro_esperado = (
+            int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
+            if av.score_roi > 0 and av.preco_giro > 0 else 0
+        )
         r_mes = lucro_reais_por_mes(lucro_esperado, av.dias_giro_estimado)
         tbl.add_row(
             lote.id,
@@ -404,7 +409,13 @@ def sheets(
 @app.command()
 def triagem(
     empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
-    horizonte_dias: int = typer.Option(7, help="Lotes com fim nos próximos N dias"),
+    horizonte_dias: int = typer.Option(
+        30,
+        help=(
+            "Janela de exibição na planilha (lotes com fim nos próximos N dias). "
+            "A coleta puxa tudo — isso filtra só o que aparece na Sheet."
+        ),
+    ),
     headless: bool = typer.Option(True, help="False = abre browser visível (debug)"),
     sem_sheets: bool = typer.Option(False, help="Pular exportação para Sheets"),
     top_n: int = typer.Option(10, "--top", help="Quantos lotes mostrar no ranking final"),
@@ -475,12 +486,15 @@ async def _run_triagem(
             f"\n[bold]Coletando leilões ({empresa_id}, horizonte {horizonte_dias}d)...[/bold]"
         )
         with get_session() as session:
+            # `horizonte_dias=None` → coleta toda a listagem (inclui leilões
+            # agendados pra daqui a semanas). O recorte de exibição acontece
+            # depois, no `SheetsExporter.exportar(horizonte_exibicao_dias=...)`.
             result = await orquestrar(
                 empresa_id=empresa_id,
                 session=session,
                 page=page,
                 vision_client=vision_client,
-                horizonte_dias=horizonte_dias,
+                horizonte_dias=None,
                 text_llm_client=text_llm_client,
             )
 
@@ -537,7 +551,11 @@ async def _run_triagem(
     try:
         exporter = SheetsExporter(spreadsheet_id=sheet_id, credentials_path=creds_path)
         with get_session() as session:
-            n = exporter.exportar(empresa_id=empresa_id, session=session)
+            n = exporter.exportar(
+                empresa_id=empresa_id,
+                session=session,
+                horizonte_exibicao_dias=horizonte_dias,
+            )
         console.print(f"[green]✓ {n} lotes exportados → aba \"{empresa_id}\"[/green]")
         console.print(f"  Sheet: {exporter.sheet_url}")
     except Exception as exc:

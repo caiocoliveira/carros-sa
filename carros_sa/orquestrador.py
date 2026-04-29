@@ -44,7 +44,7 @@ from carros_sa.models import (
     LaudoEstruturado,
 )
 from carros_sa.precificador import precificar
-from carros_sa.scraping.parsers import parse_card_lines, parse_detalhe
+from carros_sa.scraping.parsers import extrair_loja_do_card, parse_card_lines, parse_detalhe
 from carros_sa.scraping.scraper_autoavaliar import (
     baixar_pdf,
     coletar_detalhe,
@@ -275,12 +275,22 @@ def _laudo_sem_pdf(flags=None) -> LaudoEstruturado:
 # Persistência
 # ---------------------------------------------------------------------------
 
-def _persistir_flags_no_lote(lote: Lote, flags, session: Session) -> None:
+def _persistir_flags_no_lote(
+    lote: Lote,
+    flags,
+    session: Session,
+    body_text: Optional[str] = None,
+) -> None:
     """Salva o resultado do parse_detalhe em `lote.raw_json["detalhe"]` e promove
     preço-referência Auto Avaliar + % FIPE para colunas first-class do Lote.
 
     Também alimenta o histórico `PrecoReferenciaAA` — útil pra lotes futuros
     do mesmo modelo que caiam em cidades sem esse dado embutido.
+
+    Quando `body_text` é passado, persiste uma amostra truncada
+    (`body_text_sample`, primeiros 8KB) pra debug offline do parser quando
+    campos ficarem vazios em massa. Sem isso, só é possível iterar no parser
+    raspando Auto Avaliar ao vivo de novo.
 
     Idempotente: reescrever sobrescreve; múltiplas coletas do mesmo lote
     criam múltiplas linhas de histórico, o que é esperado (série temporal).
@@ -290,6 +300,10 @@ def _persistir_flags_no_lote(lote: Lote, flags, session: Session) -> None:
 
     raw = dict(lote.raw_json or {})
     raw["detalhe"] = _flags_to_dict(flags)
+    if body_text:
+        # Trunca pra 8KB — suficiente pra diagnosticar parser sem inflar SQLite.
+        # Típico body_text de página Auto Avaliar: 20-50KB.
+        raw["body_text_sample"] = body_text[:8000]
     lote.raw_json = raw
 
     if flags.preco_referencia_aa is not None:
@@ -308,9 +322,21 @@ def _persistir_flags_no_lote(lote: Lote, flags, session: Session) -> None:
     session.add(lote)
 
 
-def _upsert_lote(lote_raw: LoteRaw, session: Session) -> Lote:
-    """Persiste ou atualiza Lote no SQLite. Retorna o objeto persistido."""
+def _upsert_lote(
+    lote_raw: LoteRaw, session: Session, *, loja: Optional[str] = None
+) -> Lote:
+    """Persiste ou atualiza Lote no SQLite. Retorna o objeto persistido.
+
+    `loja` é mergeado em `raw_json["loja"]` quando informado — não faz parte do
+    contrato LoteRaw, fica como campo adicional pra sobreviver em reprocessos.
+    """
     existente = session.get(Lote, lote_raw.lote_id)
+    raw_json = lote_raw.model_dump(mode="json")
+    if loja:
+        raw_json["loja"] = loja
+    elif existente and isinstance(existente.raw_json, dict) and existente.raw_json.get("loja"):
+        # Preserva loja de coleta anterior quando a atual não trouxe o dado.
+        raw_json["loja"] = existente.raw_json["loja"]
     row = Lote(
         id=lote_raw.lote_id,
         leilao=lote_raw.leilao,
@@ -323,7 +349,7 @@ def _upsert_lote(lote_raw: LoteRaw, session: Session) -> Lote:
         fim_em=lote_raw.fim_em,
         origem_cidade=lote_raw.origem_cidade,
         origem_uf=lote_raw.origem_uf,
-        raw_json=lote_raw.model_dump(mode="json"),
+        raw_json=raw_json,
         scraped_at=datetime.utcnow(),
     )
     if existente:
@@ -440,13 +466,21 @@ async def _pipeline_lote(
 
     modelo_str = f"{lote.marca} {lote.modelo} {lote.ano}"
 
-    # Verifica se já foi avaliado nesta empresa
+    # Short-circuit: só pula o pipeline se ESTÁ realmente completo — avaliação
+    # existente E laudo com confiança ≥ 0.6. Antes, bastava ter AvaliacaoLote,
+    # o que tornava o flag `--somente-laudo-pendente` do script de retry
+    # inofensivo: ele escolhia lotes com conf<0.6, mas aqui o pipeline saía
+    # sem re-raspar detalhe nem re-extrair laudo. Resultado: 104 lotes ativos
+    # com AvaliacaoLote stale + LaudoCache placeholder (conf=0.5, detalhe
+    # ausente) nunca reprocessavam.
     ja_avaliado = session.exec(
         select(AvaliacaoLote)
         .where(AvaliacaoLote.empresa_id == empresa.empresa_id)
         .where(AvaliacaoLote.lote_id == lote.id)
     ).first()
-    if ja_avaliado:
+    laudo_atual = session.get(LaudoCache, lote.id)
+    laudo_ok = laudo_atual is not None and (laudo_atual.confidence or 0) >= 0.6
+    if ja_avaliado and laudo_ok:
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=ja_avaliado.preco_alvo,
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))
@@ -465,7 +499,7 @@ async def _pipeline_lote(
         # pra moto, falha de laudo, Webmotors timeout) dispara session.rollback()
         # e **apaga também o detalhe raspado**, forçando re-scrape desnecessário.
         # Comitando aqui, o detalhe fica salvo e o reprocessamento vira 1-request.
-        _persistir_flags_no_lote(lote, flags, session)
+        _persistir_flags_no_lote(lote, flags, session, body_text=body_text)
         session.commit()
 
         # 2. Early exit
@@ -501,6 +535,19 @@ async def _pipeline_lote(
                     # pego por seletor frouxo no passado) — descarta e trata como sem PDF.
                     pdf_dest.unlink(missing_ok=True)
                     pdf_dest = None
+                    # Zera a URL persistida em raw_json: ela apontou pra um arquivo
+                    # que NÃO é laudo, então deixá-la lá envenena (a) o exporter,
+                    # que renderia HYPERLINK clicável pro PDF errado, e (b) o retry
+                    # diário, que re-baixaria o mesmo arquivo inválido. Combina com
+                    # `limpar_decoys_laudo` (defesa retroativa) — aqui a defesa é
+                    # contemporânea, dentro do próprio pipeline.
+                    raw_atual = dict(lote.raw_json or {})
+                    det_atual = dict(raw_atual.get("detalhe") or {})
+                    det_atual["laudo_pdf_url"] = None
+                    raw_atual["detalhe"] = det_atual
+                    lote.raw_json = raw_atual
+                    session.add(lote)
+                    session.commit()
             except Exception:
                 pdf_dest = None
 
@@ -571,8 +618,12 @@ async def _pipeline_lote(
         # configurado, determinístico direto.
         if text_llm_client is not None:
             # Observações do inspetor enriquecem o prompt quando temos o PDF.
+            # `pdf_dest` é None se não havia URL, download falhou OU validação
+            # rejeitou (vide bloco acima). Checa antes de chamar `.exists()` —
+            # senão `None.exists()` levantava AttributeError silencioso (engolido
+            # pelo try/except interno mas confundia debug).
             observacoes = ""
-            if pdf_url and pdf_dest.exists():
+            if pdf_dest is not None and pdf_dest.exists():
                 try:
                     from carros_sa.agents.extrator_laudo import parse_laudo_textual
                     observacoes = parse_laudo_textual(pdf_dest).observacoes or ""
@@ -630,7 +681,7 @@ async def orquestrar(
     session: Session,
     page,
     vision_client,
-    horizonte_dias: int = 7,
+    horizonte_dias: Optional[int] = None,
     text_llm_client=None,
 ) -> OrquestradorResult:
     """
@@ -641,7 +692,9 @@ async def orquestrar(
         session: SQLModel Session já aberta
         page: Playwright Page já autenticada
         vision_client: VisionClient instanciado (Gemini, Anthropic, Ollama)
-        horizonte_dias: só lotes com fim em <= N dias
+        horizonte_dias: filtro opcional de coleta — se setado, descarta lotes
+            com fim > N dias. Default `None` = coleta tudo que aparece na
+            listagem; janela de exibição fica a cargo do `SheetsExporter`.
 
     Returns:
         OrquestradorResult com contagens e detalhes por lote.
@@ -662,8 +715,9 @@ async def orquestrar(
     for card in cards:
         try:
             lote_raw = parse_card_lines(card["lines"], card["loteId"], card["href"])
+            loja = extrair_loja_do_card(card["lines"])
             existente = session.get(Lote, lote_raw.lote_id)
-            _upsert_lote(lote_raw, session)
+            _upsert_lote(lote_raw, session, loja=loja)
             if not existente:
                 lotes_ids_novos.append(lote_raw.lote_id)
         except Exception:

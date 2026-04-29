@@ -6,6 +6,7 @@ import pytest
 
 from carros_sa.scraping.parsers import (
     _timer_para_fim_em,
+    extrair_loja_do_card,
     is_laudo_pdf_url,
     parse_card_lines,
     parse_detalhe,
@@ -335,6 +336,49 @@ def test_parse_detalhe_reprovado_estrutural_early_exit():
     assert flags.early_exit == "reprovado_estrutural"
 
 
+def test_parse_detalhe_itens_reprovados_case_insensitive():
+    """Variações fora de caixa alta também são capturadas (parser tolerante)."""
+    body = (
+        "STATUS DO LAUDO\nAprovado com ressalvas\n"
+        "Coluna B reprovada\n"
+        "Porta dianteira direita Reparada\n"
+        "Airbag substituído em 2020\n"
+        "Paralama com dano estrutural\n"
+        "LAUDO COMPLETO\n"
+    )
+    flags = parse_detalhe(body)
+    itens = flags.itens_reprovados
+    assert len(itens) == 4
+    assert any("coluna b reprovada" in i.lower() for i in itens)
+    assert any("reparada" in i.lower() for i in itens)
+    assert any("substituído" in i.lower() for i in itens)
+    assert any("dano estrutural" in i.lower() for i in itens)
+
+
+def test_parse_detalhe_itens_reprovados_ignora_linhas_muito_longas():
+    """Parágrafos longos contendo 'reprovado' no meio não são itens — só linhas compactas."""
+    body = (
+        "STATUS DO LAUDO\nAprovado\n"
+        "Coluna A reprovada\n"  # curta → captura
+        "Este parágrafo de 200+ caracteres descreve em detalhes a situação do veículo que foi reprovado em testes anteriores mas depois aprovado novamente após reparo completo e revisão.\n"  # longa → ignora
+    )
+    flags = parse_detalhe(body)
+    assert len(flags.itens_reprovados) == 1
+    assert "Coluna A reprovada" in flags.itens_reprovados[0]
+
+
+def test_parse_detalhe_itens_reprovados_ignora_linhas_vazias_e_curtas():
+    body = (
+        "STATUS DO LAUDO\nAprovado\n"
+        "\n\n\n"
+        "ok\n"                 # muito curta < 5 chars, ignora
+        "NÃO APROVADO\n"       # válida, 12 chars
+    )
+    flags = parse_detalhe(body)
+    assert len(flags.itens_reprovados) == 1
+    assert "NÃO APROVADO" in flags.itens_reprovados[0]
+
+
 def test_parse_detalhe_opcionais_e_ipva():
     flags = parse_detalhe(DETALHE_FIESTA_BODY)
     assert "AIR BAG DUPLO" in flags.opcionais
@@ -448,6 +492,37 @@ class TestIsLaudoPdfUrl:
     def test_url_vazia_ou_none(self):
         assert is_laudo_pdf_url(None) is False
         assert is_laudo_pdf_url("") is False
+
+
+class TestExtrairLojaDoCard:
+    """Últimas linhas do card (depois do timer) trazem loja e grupo anunciante.
+    Gold com o Fiesta real + variações observadas nos 10 lotes de Uberlândia."""
+
+    def test_gold_fiesta_real_retorna_loja_e_grupo(self):
+        # CARD_FIESTA_LINES termina em 'SN VW UDI MATRIZ' / 'GRUPO SAGA SEMINOVOS' / '4.2' / 'AVALIE AGORA'
+        loja = extrair_loja_do_card(CARD_FIESTA_LINES)
+        assert loja == "SN VW UDI MATRIZ · GRUPO SAGA SEMINOVOS"
+
+    def test_card_sem_rating_ainda_pega_loja_e_grupo(self):
+        # Observado no Range Rover Evoque (21860924): sem rating antes do CTA
+        lines = [
+            "Uberlândia/MG", "28%", "LAND ROVER", "RANGE ROVER", "EVOQUE",
+            "93.000,00", "82.000,00", "2.0 DYNAMIC 4WD 16V GASOLINA 4P AUTOMATICO",
+            "2014/2015", "GASOLINA", "AUTOMATICO", "97.403", "12:15:13:92",
+            "QUITCAR", "Revendedores Auto Avaliar", "AVALIE AGORA",
+        ]
+        assert extrair_loja_do_card(lines) == "QUITCAR · Revendedores Auto Avaliar"
+
+    def test_card_sem_timer_retorna_none(self):
+        # Defensivo: card malformado sem timer não deve explodir nem adivinhar
+        assert extrair_loja_do_card(["FORD", "FIESTA", "AVALIE AGORA"]) is None
+
+    def test_card_sem_nada_apos_timer_retorna_none(self):
+        assert extrair_loja_do_card(["12:00:00", "AVALIE AGORA"]) is None
+
+    def test_rating_e_cta_sao_ignorados(self):
+        lines = ["12:00:00", "LOJA X", "GRUPO Y", "4.5", "AVALIE AGORA"]
+        assert extrair_loja_do_card(lines) == "LOJA X · GRUPO Y"
 
 
 def test_parse_detalhe_encerrado_tem_precedencia_sobre_estrutural():

@@ -16,6 +16,14 @@ dependencies = [
     "python-dotenv>=1.0",
     "typer>=0.12",
     "gspread>=6.0",
+    # Adicionados explicitamente no upgrade 3.9 → 3.12 (estavam só no venv
+    # antigo, sem trilha em pyproject — recriar venv quebrava o pipeline).
+    "anthropic>=0.40",      # vision/text fallback
+    "google-genai>=1.0",    # Gemini default
+    "pymupdf>=1.26",        # parse de laudo (textual)
+    "pypdf>=5.0",           # parse de laudo (validação rápida)
+    "pillow>=11.0",         # PDF→imagem pra visão
+    "tenacity>=9.0",        # retry decorator (FIPE etc)
 ]
 
 [project.optional-dependencies]

@@ -24,6 +24,7 @@ from carros_sa.models import CategoriaVeiculo, ModeloFipeCache
 from carros_sa.tools.fipe import FipeClient, _parse_valor
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "fipe_fiesta_2013.json"
+FIXTURE_CHERY = Path(__file__).resolve().parent / "fixtures" / "fipe_chery_tiggo_2015.json"
 
 
 class FakeFipeClient(FipeClient):
@@ -94,8 +95,9 @@ def test_avaliador_fiesta_com_similares_reais(fipe_responses, in_memory_session)
     # p25 (n=6): índice 0.25*5=1.25 entre 25k-ish
     assert 23200 <= sinal.webmotors_p25 <= 29500
     assert sinal.n_anuncios_competidores == 6
-    # n>=6 → ajuste de liquidez: hatch baseline 25 - 5 = 20
-    assert sinal.dias_giro_estimado == 20
+    # Fiesta 2013 (idade 13) → hatch VELHO → prior 100d
+    # n>=6 → ajuste de liquidez: -5 = 95
+    assert sinal.dias_giro_estimado == 95
 
     # 4 chamadas HTTP "esperadas": marcas, modelos, anos, valor
     assert len(fake.calls) == 4
@@ -137,6 +139,39 @@ def test_cache_persistente_evita_segunda_chamada(fipe_responses, in_memory_sessi
     assert rows[0].valor == 30876
 
 
+def test_chery_tiggo_2015_nao_cai_em_marca_errada(in_memory_session):
+    """Regressão do bug que motivou a migração pra v2 em 2026-04-23.
+
+    A FIPE tem DUAS marcas Chery: "Caoa Chery" (245, só modelos novos) e
+    "Caoa Chery/Chery" (161, catálogo completo legacy + atual). Query "Chery"
+    empata o token `chery` nas duas. O código v1 antigo usava `>` estrito no
+    scoring, ficava com a primeira iterada (245), e o Tiggo 2.0 2015 acabava
+    matchando um Tiggo 7 novo ~R$ 114k em vez do valor real ~R$ 41k.
+
+    Esse teste garante que mesmo com a 245 aparecendo primeiro na lista de
+    marcas, `consultar` tenta AMBAS as candidatas e fica com a do melhor match
+    de modelo (Tiggo 2.0 → 4 tokens na 161, Tiggo 7 Pro → 2 tokens na 245).
+    """
+    fipe_responses = json.loads(FIXTURE_CHERY.read_text())
+    fake = FakeFipeClient(fipe_responses)
+
+    sinal = avaliar(
+        marca="Chery",
+        modelo="Tiggo 2.0 16V GASOLINA 4P AUTOMATICO",
+        ano=2015,
+        km=120000,
+        similares_precos=None,
+        categoria=CategoriaVeiculo.SUV,
+        fipe_client=fake,
+        session=in_memory_session,
+    )
+
+    assert sinal.fipe == 41512, (
+        f"Esperava FIPE do Tiggo 2.0 2015 (R$ 41.512), veio R$ {sinal.fipe}. "
+        f"Se veio ~114k, bateu de novo no bug de marca errada."
+    )
+
+
 def test_fallback_sem_similares(fipe_responses, in_memory_session):
     fake = FakeFipeClient(fipe_responses)
     sinal = avaliar(
@@ -153,5 +188,6 @@ def test_fallback_sem_similares(fipe_responses, in_memory_session):
     assert sinal.webmotors_mediana == round(30876 * 0.97)
     assert sinal.webmotors_p25 == round(30876 * 0.88)
     assert sinal.n_anuncios_competidores == 0
-    # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → baseline hatch 25
-    assert sinal.dias_giro_estimado == 25
+    # Fiesta 2013 → hatch VELHO → prior 100d.
+    # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → prior puro.
+    assert sinal.dias_giro_estimado == 100

@@ -1,15 +1,22 @@
-"""Cliente para a API pública FIPE da Parallelum.
+"""Cliente para a API pública FIPE da Parallelum (v2).
 
-Endpoint base: https://parallelum.com.br/fipe/api/v1
+Endpoint base: https://fipe.parallelum.com.br/api/v2
 
 Fluxo (4 chamadas pra obter 1 valor):
-  1. GET /carros/marcas                                              → lista marcas
-  2. GET /carros/marcas/{codMarca}/modelos                           → lista modelos
-  3. GET /carros/marcas/{codMarca}/modelos/{codModelo}/anos          → lista anos
-  4. GET /carros/marcas/{codMarca}/modelos/{codModelo}/anos/{codAno} → valor
+  1. GET /cars/brands                                                → lista marcas
+  2. GET /cars/brands/{brandId}/models                               → lista modelos
+  3. GET /cars/brands/{brandId}/models/{modelId}/years               → lista anos
+  4. GET /cars/brands/{brandId}/models/{modelId}/years/{yearId}      → valor
 
 Respostas são cacheadas (in-memory por instância). Persistência em
 `modelo_fipe_cache` é responsabilidade do AvaliadorMercado.
+
+## Histórico
+Migrado de v1 (`parallelum.com.br/fipe/api/v1`, campos `codigo`/`nome`/`Valor`,
+endpoint `/carros/...` em português) para v2 em 2026-04-23 porque v1 começou
+a retornar 503 intermitente E porque v2 corrige o split de marcas que gerava
+bug de lookup em modelos legacy (ex: "Chery Tiggo 2.0 2015" matchava brand
+"Caoa Chery" novo em vez de "Caoa Chery/Chery" legacy → valor ~2.7x errado).
 """
 
 from __future__ import annotations
@@ -23,11 +30,11 @@ from typing import Dict, List, Optional, Tuple
 
 import httpx
 
-FIPE_BASE_URL = "https://parallelum.com.br/fipe/api/v1"
+FIPE_BASE_URL = "https://fipe.parallelum.com.br/api/v2"
 
 _PRECO_RE = re.compile(r"R\$\s*([\d\.]+),(\d{2})")
 
-# Marcas fora do escopo da FIPE /carros/ — principalmente fabricantes exclusivos
+# Marcas fora do escopo da FIPE /cars/ — principalmente fabricantes exclusivos
 # de motos. Sem FIPE não temos âncora de preço, e o pipeline não consegue
 # precificar. Detecção antecipada economiza 1 chamada ao Parallelum + dá motivo
 # de descarte claro ("moto") em vez do LookupError genérico do _resolve_marca.
@@ -53,11 +60,13 @@ def marca_fora_do_escopo_fipe(marca: str) -> bool:
 # marcas (1/4 das chamadas some), cai pra ~150 requests distribuídos em ~45s.
 _DEFAULT_SLEEP_BETWEEN_REQUESTS = 0.3
 
-# Cache em disco do endpoint /carros/marcas — a lista é quase-estática (FIPE
+# Cache em disco do endpoint /cars/brands — a lista é quase-estática (FIPE
 # atualiza mensalmente, mas não adiciona marcas nova), reidratar do disco
-# evita 1 chamada por CADA consulta FIPE do pipeline.
+# evita 1 chamada por CADA consulta FIPE do pipeline. Nome do arquivo sufixado
+# com "_v2" porque o shape do payload mudou do v1 (codigo/nome → code/name) —
+# caches antigos do v1 são ignorados automaticamente.
 _MARCAS_CACHE_PATH = Path(
-    os.environ.get("CARROS_SA_FIPE_MARCAS_CACHE", "data/cache/fipe_marcas.json")
+    os.environ.get("CARROS_SA_FIPE_MARCAS_CACHE", "data/cache/fipe_brands_v2.json")
 )
 _MARCAS_CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 dias
 
@@ -141,9 +150,9 @@ class FipeClient:
         if path in self._cache:
             return self._cache[path]
 
-        # 2. Cache em disco SÓ pra /carros/marcas — lista quase-estática
+        # 2. Cache em disco SÓ pra /cars/brands — lista quase-estática
         #    usada em TODA consulta; evita 1 request por lote do pipeline.
-        if path == "/carros/marcas":
+        if path == "/cars/brands":
             disk_hit = self._carregar_marcas_do_disco()
             if disk_hit is not None:
                 self._cache[path] = disk_hit
@@ -154,7 +163,7 @@ class FipeClient:
         data = self._get_com_retry(url)
         self._cache[path] = data
 
-        if path == "/carros/marcas":
+        if path == "/cars/brands":
             self._persistir_marcas_no_disco(data)
 
         return data
@@ -197,6 +206,10 @@ class FipeClient:
                 data = json.load(f)
             if not isinstance(data, list):
                 return None
+            # Sanity-check do shape v2 (code/name). Se alguém deixou cache v1
+            # (codigo/nome) no mesmo path, ignora e força refetch.
+            if data and not (isinstance(data[0], dict) and "code" in data[0]):
+                return None
             return data
         except (OSError, json.JSONDecodeError):
             return None
@@ -214,63 +227,76 @@ class FipeClient:
 
     # -- Lookups internos --------------------------------------------------
 
-    def _resolve_marca(self, marca_query: str) -> Tuple[str, str]:
-        marcas: List[dict] = self._get("/carros/marcas")  # type: ignore[assignment]
+    def _candidatas_marca(self, marca_query: str) -> List[Tuple[str, str]]:
+        """Retorna TODAS as marcas empatadas no maior score de matching.
+
+        Empate real acontece em pelo menos um caso de produção:
+          "Chery" → [(161, "Caoa Chery/Chery"), (245, "Caoa Chery")]
+        Ambas empatam no token `chery`. O chamador (`consultar`) testa cada
+        candidata e fica com a que deu melhor match de MODELO — assim o Tiggo
+        2.0 2015 (que só existe na 161) não cai erradamente na 245.
+        """
+        marcas: List[dict] = self._get("/cars/brands")  # type: ignore[assignment]
         alvo = _normalizar(marca_query)
         alvo_tokens = set(alvo.split())
 
-        # 1. Match exato
+        # 1. Match exato — curto-circuita
         for m in marcas:
-            if _normalizar(m["nome"]) == alvo:
-                return m["codigo"], m["nome"]
+            if _normalizar(m["name"]) == alvo:
+                return [(str(m["code"]), m["name"])]
 
-        # 2. Prefixo (ex: "ford" bate "ford")
+        # 2. Scoring: token overlap + bônus de prefixo
+        scored: List[Tuple[int, str, str]] = []
         for m in marcas:
-            nome_n = _normalizar(m["nome"])
-            if nome_n.startswith(alvo) or alvo.startswith(nome_n):
-                return m["codigo"], m["nome"]
-
-        # 3. Token overlap — resolve "Volkswagen" → "VW - VolksWagen",
-        #    "Chevrolet" → "GM - Chevrolet", "Chery" → "CAOA Chery", etc.
-        melhor_score = 0
-        melhor = None
-        for m in marcas:
-            nome_tokens = set(_normalizar(m["nome"]).split())
+            nome_n = _normalizar(m["name"])
+            nome_tokens = set(nome_n.split())
             score = len(alvo_tokens & nome_tokens)
-            if score > melhor_score:
-                melhor_score = score
-                melhor = m
-        if melhor_score > 0 and melhor:
-            return melhor["codigo"], melhor["nome"]
+            if nome_n.startswith(alvo) or alvo.startswith(nome_n):
+                score += 1
+            if score > 0:
+                scored.append((score, str(m["code"]), m["name"]))
 
-        raise LookupError(f"marca não encontrada na FIPE: {marca_query!r}")
+        if not scored:
+            raise LookupError(f"marca não encontrada na FIPE: {marca_query!r}")
 
-    def _resolve_modelo(self, cod_marca: str, modelo_query: str) -> Tuple[str, str]:
-        payload = self._get(f"/carros/marcas/{cod_marca}/modelos")
-        modelos: List[dict] = payload["modelos"] if isinstance(payload, dict) else payload  # type: ignore[index]
+        max_score = max(s for s, _, _ in scored)
+        empatadas = [(c, n) for s, c, n in scored if s == max_score]
+        # Desempate determinístico: menor code numérico primeiro (na FIPE, codes
+        # menores costumam ser marcas mais antigas/legacy, que têm o catálogo
+        # completo de modelos históricos).
+        empatadas.sort(key=lambda t: int(t[0]) if t[0].isdigit() else 0)
+        return empatadas
+
+    def _resolve_modelo_com_score(
+        self, cod_marca: str, modelo_query: str
+    ) -> Tuple[str, str, int]:
+        """Match do modelo + o score do melhor candidato (pra comparar entre marcas)."""
+        modelos: List[dict] = self._get(  # type: ignore[assignment]
+            f"/cars/brands/{cod_marca}/models"
+        )
         scored = [
-            (_score_modelo(modelo_query, m["nome"]), -len(m["nome"]), m["codigo"], m["nome"])
+            (_score_modelo(modelo_query, m["name"]), -len(m["name"]), str(m["code"]), m["name"])
             for m in modelos
         ]
         scored.sort(reverse=True)
         if not scored or scored[0][0] == 0:
             raise LookupError(f"modelo não encontrado na FIPE: {modelo_query!r}")
-        _, _, cod, nome = scored[0]
-        return str(cod), nome
+        score, _, cod, nome = scored[0]
+        return cod, nome, score
 
     def _resolve_ano(self, cod_marca: str, cod_modelo: str, ano: int) -> str:
         anos: List[dict] = self._get(  # type: ignore[assignment]
-            f"/carros/marcas/{cod_marca}/modelos/{cod_modelo}/anos"
+            f"/cars/brands/{cod_marca}/models/{cod_modelo}/years"
         )
         # ano vem como "2013-1" (combustível 1=gasolina, 2=alcool, 3=diesel, 4=flex...)
         prefix = f"{ano}-"
         for a in anos:
-            if str(a["codigo"]).startswith(prefix):
-                return str(a["codigo"])
+            if str(a["code"]).startswith(prefix):
+                return str(a["code"])
         # fallback: ano mais próximo
         try:
             anos_int = sorted(
-                {(int(str(a["codigo"]).split("-")[0]), str(a["codigo"])) for a in anos}
+                {(int(str(a["code"]).split("-")[0]), str(a["code"])) for a in anos}
             )
         except ValueError:
             raise LookupError(f"anos FIPE com formato inesperado para modelo {cod_modelo}")
@@ -282,16 +308,40 @@ class FipeClient:
     # -- API pública -------------------------------------------------------
 
     def consultar(self, marca: str, modelo: str, ano: int) -> int:
-        """Retorna o valor FIPE em reais (inteiro)."""
-        cod_marca, _ = self._resolve_marca(marca)
-        cod_modelo, _ = self._resolve_modelo(cod_marca, modelo)
+        """Retorna o valor FIPE em reais (inteiro).
+
+        Quando a marca tem mais de uma candidata empatada (caso Chery), tenta
+        resolver o modelo em CADA uma e fica com o par (marca, modelo) cujo
+        score de modelo foi mais alto. Isso evita que um match fraco numa marca
+        errada (ex: Tiggo 7 novo em "Caoa Chery") sobreponha o match certo
+        numa marca alternativa (Tiggo 2.0 legacy em "Caoa Chery/Chery").
+        """
+        candidatas = self._candidatas_marca(marca)
+
+        melhor: Optional[Tuple[int, str, str]] = None  # (score, cod_marca, cod_modelo)
+        for cod_marca, _nome_marca in candidatas:
+            try:
+                cod_modelo, _nome_modelo, score = self._resolve_modelo_com_score(
+                    cod_marca, modelo
+                )
+            except LookupError:
+                continue
+            if melhor is None or score > melhor[0]:
+                melhor = (score, cod_marca, cod_modelo)
+
+        if melhor is None:
+            raise LookupError(
+                f"modelo não encontrado em nenhuma marca candidata: {marca!r} / {modelo!r}"
+            )
+
+        _, cod_marca, cod_modelo = melhor
         cod_ano = self._resolve_ano(cod_marca, cod_modelo, ano)
         valor_payload = self._get(
-            f"/carros/marcas/{cod_marca}/modelos/{cod_modelo}/anos/{cod_ano}"
+            f"/cars/brands/{cod_marca}/models/{cod_modelo}/years/{cod_ano}"
         )
-        if not isinstance(valor_payload, dict) or "Valor" not in valor_payload:
-            raise LookupError(f"resposta FIPE sem campo Valor: {valor_payload!r}")
-        return _parse_valor(valor_payload["Valor"])
+        if not isinstance(valor_payload, dict) or "price" not in valor_payload:
+            raise LookupError(f"resposta FIPE sem campo price: {valor_payload!r}")
+        return _parse_valor(valor_payload["price"])
 
     def close(self) -> None:
         self._client.close()

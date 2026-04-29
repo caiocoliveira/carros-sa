@@ -21,16 +21,34 @@ from sqlmodel import Session, select
 from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, SinalMercado
 from carros_sa.tools.fipe import FipeClient
 
-# Heurística inicial de giro por categoria. Calibrar com workstream H quando
-# tivermos dados de `arrematado.vendido_em - data`.
-_DIAS_GIRO_DEFAULT = {
-    CategoriaVeiculo.HATCH: 25,
-    CategoriaVeiculo.SEDAN: 30,
-    CategoriaVeiculo.SUV: 35,
-    CategoriaVeiculo.UTILITARIO: 45,
-    CategoriaVeiculo.PICAPE: 35,
-    CategoriaVeiculo.OUTRO: 40,
+# Heurística inicial de giro por (categoria, faixa_idade). Calibrada com
+# histórico do operador (2026-04): carros novos popularizam mais rápido;
+# carros velhos de nicho demoram muito. Valores aproximados — sobrescritos
+# por dados reais quando Arrematado tem ≥3 amostras pra (categoria, faixa).
+_DIAS_GIRO_DEFAULT_POR_FAIXA = {
+    # (categoria, faixa_idade) → dias prior
+    # NOVO (≤3 anos): 1a mão, garantia, pool grande
+    # MEDIO (4-7 anos): rodado mas moderno
+    # VELHO (8+ anos): pool restrito, manutenção cara
+    CategoriaVeiculo.HATCH:      {"novo": 25, "medio": 50, "velho": 100},
+    CategoriaVeiculo.SEDAN:      {"novo": 30, "medio": 55, "velho": 110},
+    CategoriaVeiculo.SUV:        {"novo": 35, "medio": 60, "velho": 95},
+    CategoriaVeiculo.PICAPE:     {"novo": 35, "medio": 50, "velho": 85},
+    CategoriaVeiculo.UTILITARIO: {"novo": 45, "medio": 65, "velho": 120},
+    CategoriaVeiculo.OUTRO:      {"novo": 40, "medio": 60, "velho": 100},
 }
+
+# Compatibilidade: fallback pra quando não temos `ano` (legado).
+_DIAS_GIRO_DEFAULT = {
+    cat: faixas["medio"] for cat, faixas in _DIAS_GIRO_DEFAULT_POR_FAIXA.items()
+}
+
+
+def _prior_dias_giro(categoria: CategoriaVeiculo, faixa) -> int:
+    """Look-up do prior hardcoded por (categoria, faixa)."""
+    faixa_str = faixa.value if hasattr(faixa, "value") else str(faixa)
+    faixas = _DIAS_GIRO_DEFAULT_POR_FAIXA.get(categoria, _DIAS_GIRO_DEFAULT_POR_FAIXA[CategoriaVeiculo.OUTRO])
+    return faixas.get(faixa_str, faixas["medio"])
 
 # TTL do cache persistente FIPE — Parallelum atualiza tabela mensalmente.
 _FIPE_CACHE_TTL = timedelta(days=20)
@@ -88,6 +106,7 @@ def avaliar(
     session: Optional[Session] = None,
     empresa_id: Optional[str] = None,
     aplicar_popularidade: bool = True,
+    webmotors_km_mediana: Optional[int] = None,
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
@@ -116,13 +135,17 @@ def avaliar(
         p25 = int(round(fipe_valor * 0.88))
         n = 0
 
-    # Prior categórico — base do dias_giro
-    prior = _DIAS_GIRO_DEFAULT.get(categoria, 40)
+    # Prior já discrimina por faixa_idade — Polo 2024 NOVO (25d) ≠ Polo 2018 MEDIO
+    # (50d) mesmo quando cai no fallback hardcoded. Calibração com Arrematado
+    # sobrescreve quando há ≥3 amostras pra (categoria, faixa).
+    from carros_sa.agents.calibracao_giro import calibrar_dias_giro, faixa_de_idade
+    faixa = faixa_de_idade(ano)
+    prior = _prior_dias_giro(categoria, faixa)
 
-    # Calibração com Arrematado (Bloco C) — só ativa quando empresa+session presentes
     if empresa_id and session is not None:
-        from carros_sa.agents.calibracao_giro import calibrar_dias_giro
-        dias_giro = calibrar_dias_giro(empresa_id, categoria, session, fallback=prior)
+        dias_giro = calibrar_dias_giro(
+            empresa_id, categoria, session, fallback=prior, faixa_idade=faixa,
+        )
     else:
         dias_giro = prior
 
@@ -140,7 +163,9 @@ def avaliar(
     if aplicar_popularidade:
         from carros_sa.tools.popularidade import ajustar_dias_giro, bucket_modelo
         bucket = bucket_modelo(marca, modelo, categoria, ano=ano)
-        dias_giro = ajustar_dias_giro(dias_giro, bucket)
+        # Passa faixa_idade pra correção granular — picape velha blockbuster
+        # não acelera tanto quanto picape nova blockbuster.
+        dias_giro = ajustar_dias_giro(dias_giro, bucket, faixa_idade=faixa)
 
     return SinalMercado(
         fipe=fipe_valor,
@@ -148,4 +173,5 @@ def avaliar(
         webmotors_p25=p25,
         n_anuncios_competidores=n,
         dias_giro_estimado=dias_giro,
+        webmotors_km_mediana=webmotors_km_mediana,
     )

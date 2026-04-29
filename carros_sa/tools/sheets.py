@@ -16,42 +16,39 @@ Setup one-time:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from sqlmodel import Session, select
 
-from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
+from carros_sa.tenancy import carregar_empresa
+from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
+from carros_sa.tools.tese import (
+    calcular_tese,
+    carregar_config_tese,
+    carregar_historico_stat,
+)
 
 HEADER = [
     "Rank",
     "Situação",
-    "Lote ID",
+    "Marca",
     "Modelo",
+    "Ano",
+    "Cidade",
     "Fim do Leilão",
     "KM",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
     "FIPE (R$)",
-    "Webmotors Mediana (R$)",
-    "Preço Giro FIPE (R$)",
-    "Preço Giro Auto Avaliar (R$)",
-    "FIPE % (lance min)",
-    "ROI se pagar o máximo (%)",
-    "Dias até venda (est.)",
+    "Lucro/mês (R$)",
     "ROI anualizado (%)",
-    "Popularidade",
-    "Fator Risco",
-    "Severidade Laudo",
-    "Motor OK",
-    "Reforma Estimada (R$)",
-    "Racional Reforma",
-    "Frete (R$)",
-    "Justificativa",
-    "URL",
-    "Laudo (PDF)",
-    "Coletado em",
+    "Reforma (R$)",
+    "Tese",
+    "Anúncio",
+    "Laudo",
 ]
 
 # Formato numérico explícito por coluna. Necessário porque `ws.clear()` apaga
@@ -62,20 +59,15 @@ HEADER = [
 # contra reordenações futuras.
 _NUMBER_INTEIRO = {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}
 _NUMBER_DECIMAL_1 = {"numberFormat": {"type": "NUMBER", "pattern": "0.0"}}
-_NUMBER_DECIMAL_3 = {"numberFormat": {"type": "NUMBER", "pattern": "0.000"}}
 
 COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
     "FIPE (R$)": _NUMBER_INTEIRO,
-    "Webmotors Mediana (R$)": _NUMBER_INTEIRO,
-    "Preço Giro FIPE (R$)": _NUMBER_INTEIRO,
-    "Preço Giro Auto Avaliar (R$)": _NUMBER_INTEIRO,
-    "Reforma Estimada (R$)": _NUMBER_INTEIRO,
-    "Frete (R$)": _NUMBER_INTEIRO,
-    "ROI se pagar o máximo (%)": _NUMBER_DECIMAL_1,
-    "Fator Risco": _NUMBER_DECIMAL_3,
+    "Lucro/mês (R$)": _NUMBER_INTEIRO,
+    "Reforma (R$)": _NUMBER_INTEIRO,
+    "ROI anualizado (%)": _NUMBER_DECIMAL_1,
 }
 
 
@@ -90,17 +82,21 @@ def _col_letter(idx_0based: int) -> str:
             return letters
 
 
-def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
-    """ROI garantido se ganhar o lote exatamente pelo lance máximo.
+def _lucro_absoluto_no_alvo(av: AvaliacaoLote) -> int:
+    """Lucro esperado em R$ se a empresa comprar pelo preço-alvo (caso médio).
 
-    = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    Identidade exata: `score_roi = lucro / capital_alvo` ⇒
+        capital_alvo = preco_giro / (1 + score_roi)
+        lucro        = preco_giro - capital_alvo = preco_giro × score_roi / (1 + score_roi)
+
+    Usa só campos persistidos em AvaliacaoLote — não precisa do `custo_op` da
+    empresa em runtime. Substitui aproximação anterior `score_roi × preco_alvo`
+    que subestimava sistematicamente em ~10% (capital_alvo > preco_alvo por causa
+    de reforma/frete/taxas/custo_op).
     """
-    if av.preco_max <= 0:
-        return 0.0
-    capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
-    lucro = av.preco_giro - capital
-    return round(lucro / max(capital, 1) * 100, 1)
+    if av.score_roi <= 0 or av.preco_giro <= 0:
+        return 0
+    return int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
 
 
 class SheetsExporter:
@@ -117,9 +113,21 @@ class SheetsExporter:
             self._gc = gspread.service_account(filename=self._credentials_path)
         return self._gc
 
-    def exportar(self, empresa_id: str, session: Session) -> int:
-        """Lê SQLite, escreve aba <empresa_id> + aba Glossário na Sheet. Retorna n linhas exportadas."""
-        rows = self._query(empresa_id, session)
+    def exportar(
+        self,
+        empresa_id: str,
+        session: Session,
+        horizonte_exibicao_dias: Optional[int] = None,
+    ) -> int:
+        """Lê SQLite, escreve aba <empresa_id> + aba de cidades + aba Glossário. Retorna n linhas exportadas.
+
+        `horizonte_exibicao_dias` (opt-in): limita a planilha a lotes cujo fim
+        está dentro de N dias a partir de agora. Default `None` = mostra tudo
+        que está ativo no DB. Separado do `horizonte_dias` do scraper: a coleta
+        puxa o pipeline inteiro de futuros leilões e o usuário decide a janela
+        de exibição sem precisar re-scrape.
+        """
+        rows = self._query(empresa_id, session, horizonte_exibicao_dias)
         # Filtro duro: lote encerrado (timer vencido OU badge ARREMATADO) é
         # ruído — operador não pode mais dar lance. Antes empurrávamos pro
         # final; agora removemos completamente.
@@ -127,21 +135,44 @@ class SheetsExporter:
         rows_sorted = sorted(
             rows_ativos,
             key=lambda r: (
-                0 if r["viavel"] else 1,        # viáveis antes dos inviáveis
+                0 if r["laudo_analisado"] else 2,   # lotes com laudo real primeiro;
+                                                    # não-analisados só no final pra
+                                                    # o operador conferir depois
+                0 if r["viavel"] else 1,            # viáveis antes dos inviáveis
                 -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
             ),
         )
         self._write_sheet(empresa_id, rows_sorted)
+        self._write_cidades_frete_sheet(empresa_id, session)
         self._write_glossario_sheet()
         return len(rows_sorted)
 
-    def _query(self, empresa_id: str, session: Session) -> List[dict]:
+    def _query(
+        self,
+        empresa_id: str,
+        session: Session,
+        horizonte_exibicao_dias: Optional[int] = None,
+    ) -> List[dict]:
         """JOIN lote + avaliacao_lote + laudo (LEFT JOIN — laudo pode não existir)."""
         avaliacoes = session.exec(
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
         ).all()
 
+        # Pré-carrega histórico pra Tese (sinalização informativa). Fail-soft:
+        # se config ou banco quebrarem, rows ganham tese_texto="—".
+        try:
+            hist_stat = carregar_historico_stat(session)
+            tese_cfg = carregar_config_tese()
+        except Exception:
+            hist_stat = None
+            tese_cfg = None
+
         agora = datetime.now()
+        limite_exibicao = (
+            agora + timedelta(days=horizonte_exibicao_dias)
+            if horizonte_exibicao_dias is not None
+            else None
+        )
         rows: List[dict] = []
         for av in avaliacoes:
             lote = session.get(Lote, av.lote_id)
@@ -158,6 +189,9 @@ class SheetsExporter:
             if lote.fim_em is None:
                 continue
 
+            if limite_exibicao is not None and lote.fim_em > limite_exibicao:
+                continue
+
             laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)
 
             try:
@@ -168,13 +202,19 @@ class SheetsExporter:
             viavel = av.preco_max > (lote.lance_atual or 0)
 
             from carros_sa.agents.calibracao_giro import (
-                _categoria_de_modelo, roi_anualizado,
+                lucro_reais_por_mes, roi_anualizado,
             )
-            from carros_sa.tools.popularidade import bucket_modelo
-            roi_max = _calcular_roi_no_maximo(av)
-            roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
-            cat_inferida = _categoria_de_modelo(lote.modelo)
-            bucket = bucket_modelo(lote.marca, lote.modelo, cat_inferida, ano=lote.ano)
+            # ROI anualizado: usa `score_roi` (caso médio no preço-alvo, calibrado
+            # por risco/liquidez) — não `roi_max`, que cai num quase-constante
+            # `margem_min/(1-margem_min)` por construção (ver justificativa no
+            # docstring de precificador.py:154-162). Bate com a CLI `top`.
+            roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
+            # Lucro esperado / mês — métrica intuitiva pro operador:
+            # "esse lote rende R$X/mês enquanto no pátio". Fórmula exata:
+            # lucro_absoluto = preco_giro × score_roi / (1 + score_roi).
+            lucro_mes = lucro_reais_por_mes(
+                _lucro_absoluto_no_alvo(av), av.dias_giro_estimado,
+            )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
             # Dupla checagem pra cobrir os dois vetores (snapshot velho + detecção
@@ -186,47 +226,63 @@ class SheetsExporter:
             )
             encerrado = encerrado_por_badge or encerrado_por_timer
 
-            scraped_at_str = "—"
-            if lote.scraped_at is not None:
-                try:
-                    scraped_at_str = lote.scraped_at.strftime("%d/%m/%Y %H:%M")
-                except Exception:
-                    scraped_at_str = str(lote.scraped_at)
-
             # URL do PDF do laudo — filtra decoys (Transparência, listing) que
             # ainda podem estar em `raw_json` de coletas antigas. Só exibimos
             # link clicável se a URL passa pelo `is_laudo_pdf_url`.
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
+            # PDF persistido em data/laudos_pdfs/ — quando temos o arquivo local
+            # mas a URL pré-assinada do storage já expirou (URLs do Auto Avaliar
+            # vivem ~1h), sinaliza ao operador que o laudo FOI analisado e está
+            # salvo, mas o link clicável não vai funcionar. Antes mostrava só
+            # "—" no mesmo caso de URL ausente sem PDF, ofuscando essa diferença.
+            pdf_local_existe = (PDF_DIR_DEFAULT / f"{av.lote_id}.pdf").exists()
+
+            # Laudo só conta como "analisado" se veio de um PDF real — fallback
+            # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
+            # confidence <= 0.55. Sem essa distinção o usuário via reforma de
+            # R$ 1.000 (piso) em 63/68 lotes e ia achando que o carro "tava ok"
+            # quando na verdade ninguém leu o laudo. Regra do usuário: não dar
+            # fallback de valor, avisar explicitamente que não foi analisado.
+            laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
+
+            # Tese — sinalização informativa baseada em Arrematado histórico.
+            # NÃO afeta rank nem filtra. Quando hist_stat/tese_cfg não carregam
+            # (ex: config quebrou), todas as linhas viram "—" — fail-soft.
+            if hist_stat is not None and tese_cfg is not None and lote.marca and lote.modelo:
+                tese_texto = calcular_tese(
+                    marca=lote.marca,
+                    modelo=lote.modelo,
+                    km=lote.km,
+                    lance_max=av.preco_max,
+                    historico=hist_stat,
+                    config=tese_cfg,
+                ).texto
+            else:
+                tese_texto = "—"
+
             rows.append({
                 "lote_id": av.lote_id,
-                "modelo": f"{lote.marca} {lote.modelo} {lote.ano}",
+                "marca": lote.marca,
+                "modelo": lote.modelo,
+                "ano": lote.ano,
+                "cidade": lote.origem_cidade or "—",
                 "fim_em": fim_em_str,
                 "km": lote.km,
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
                 "fipe": av.fipe,
-                "webmotors_mediana": av.webmotors_mediana,
-                "preco_giro_fipe": av.preco_giro_fipe,
-                "preco_giro_aa": av.preco_giro_aa,
-                "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
-                "roi_pct": roi_max,
-                "dias_giro": av.dias_giro_estimado,
                 "roi_anualizado": round(roi_anual, 1),
-                "popularidade": bucket.value,
-                "fator_risco": round(av.fator_risco, 3),
-                "severidade": laudo.severidade_geral if laudo else "—",
-                "motor_ok": ("Sim" if laudo.motor_ok else "NÃO") if laudo else "—",
+                "lucro_mes": lucro_mes,
                 "reforma_estimada": av.reforma_estimada,
-                "reforma_racional": av.reforma_racional,
-                "frete": av.frete_incluso,
-                "justificativa": av.justificativa,
+                "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
+                "pdf_local_existe": pdf_local_existe,
                 "viavel": viavel,
                 "encerrado": encerrado,
-                "scraped_at": scraped_at_str,
+                "laudo_analisado": laudo_analisado,
             })
         return rows
 
@@ -251,7 +307,20 @@ class SheetsExporter:
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):
-            situacao = "✓ Viável" if r["viavel"] else "✗ Caro demais"
+            nao_analisado = not r["laudo_analisado"]
+            if nao_analisado:
+                # "NÃO CAPTURADO" descreve o sintoma com honestidade: o laudo
+                # quase sempre EXISTE no Auto Avaliar (status="Aprovado" no
+                # body_text), mas o scraper não conseguiu extrair a URL do PDF
+                # (modal lazy não rendeu, HTTP 429, etc — ver coletar_detalhe).
+                # Antes era "NÃO ANALISADO", o que sugeria que o laudo não
+                # existia — passou a impressão errada e levava operador a
+                # ignorar lotes recuperáveis.
+                situacao = "⚠ LAUDO NÃO CAPTURADO"
+            elif r["viavel"]:
+                situacao = "✓ Viável"
+            else:
+                situacao = "✗ Caro demais"
             # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
             # em vez da URL crua longa. Sheets interpreta com USER_ENTERED.
             if r["url"]:
@@ -259,43 +328,66 @@ class SheetsExporter:
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
-            # Link pro PDF do laudo. Se URL passou pelo filtro de decoy
-            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, "—".
-            # Motivação: usuário quer conferir o laudo antes de dar lance
-            # sem precisar clicar no anúncio, abrir o modal e esperar carregar.
+            # Link pro PDF do laudo. Três estados:
+            #   1. URL válida (passa em is_laudo_pdf_url)  → HYPERLINK clicável.
+            #   2. PDF salvo localmente mas URL ausente/expirada → texto descritivo
+            #      "PDF salvo (link expirado)" — sinaliza que o laudo FOI analisado
+            #      e está em data/laudos_pdfs/<lote>.pdf, só o link assinado morreu.
+            #      (URLs do storage do Auto Avaliar têm validade ~1h.)
+            #   3. Sem URL e sem PDF local → "—" (laudo de fato não disponível).
             if r["laudo_url"]:
                 laudo_escaped = r["laudo_url"].replace('"', '""')
                 laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
+            elif r.get("pdf_local_existe"):
+                laudo_cell = "PDF salvo (link expirado)"
             else:
                 laudo_cell = "—"
+
+            # Quando o laudo não foi analisado de verdade (sem PDF ou extração
+            # falhou), NÃO exibimos preço-alvo, ROI nem reforma — seriam chutes
+            # baseados em laudo vazio e induziriam o operador a dar lance no
+            # escuro. Mantemos identificação do lote + link pra ele resolver
+            # manualmente. O retry automático (scripts/retry_laudos_pendentes.py)
+            # tenta preencher esses campos na próxima passada.
+            if nao_analisado:
+                preco_max_cell = "—"
+                lucro_mes_cell = "—"
+                roi_anual_cell = "—"
+                reforma_cell = "—"
+                # Tese depende do lance_max pra detectar "ticket acima do teto";
+                # sem esse valor definido (laudo pendente), zerar a célula evita
+                # sinalização enganosa.
+                tese_cell = "—"
+            else:
+                preco_max_cell = r["preco_max"]
+                lucro_mes_cell = r["lucro_mes"]
+                roi_anual_cell = r["roi_anualizado"]
+                reforma_cell = r["reforma_estimada"]
+                tese_cell = r["tese"]
+
+            # FIPE é referência de mercado, NÃO depende do laudo — sempre mostra
+            # quando a avaliação tem o valor (registros pré-workstream K podem
+            # estar com fipe=NULL; nesses casos cai pro placeholder).
+            fipe_cell = r["fipe"] if r["fipe"] is not None else "—"
+
             sheet_rows.append([
                 rank,
                 situacao,
-                r["lote_id"],
+                r["marca"],
                 r["modelo"],
+                r["ano"],
+                r["cidade"],
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
                 r["lance_atual"],
-                r["preco_max"],
-                r["fipe"] if r["fipe"] is not None else "—",
-                r["webmotors_mediana"] if r["webmotors_mediana"] is not None else "—",
-                r["preco_giro_fipe"],
-                r["preco_giro_aa"] if r["preco_giro_aa"] is not None else "—",
-                f"{r['fipe_pct_lance_minimo']}%" if r["fipe_pct_lance_minimo"] is not None else "—",
-                r["roi_pct"],
-                r["dias_giro"] if r["dias_giro"] is not None else "—",
-                r["roi_anualizado"],
-                r["popularidade"],
-                r["fator_risco"],
-                r["severidade"],
-                r["motor_ok"],
-                r["reforma_estimada"],
-                r["reforma_racional"] or "—",
-                r["frete"],
-                r["justificativa"],
+                preco_max_cell,
+                fipe_cell,
+                lucro_mes_cell,
+                roi_anual_cell,
+                reforma_cell,
+                tese_cell,
                 url_cell,
                 laudo_cell,
-                r["scraped_at"],
             ])
 
         ws.clear()
@@ -323,6 +415,81 @@ class SheetsExporter:
         if formats:
             ws.batch_format(formats)
 
+    def _write_cidades_frete_sheet(self, empresa_id: str, session: Session) -> None:
+        """Aba 'cidades_<empresa_id>' com cidades do raio operacional + frete por categoria.
+
+        Mostra as cidades onde o scraper procura lotes (haversine ≤ raio_operacao_km
+        do pátio), com o frete por categoria de veículo e a contagem de lotes ativos
+        (fim_em > now()) já no DB pra cada cidade. Ajuda o operador a entender de
+        onde está vindo o inventário e qual o custo logístico real.
+        """
+        try:
+            empresa = carregar_empresa(empresa_id)
+        except FileNotFoundError:
+            # Sem YAML da empresa não há como derivar raio nem tabela de frete.
+            # Pula a aba silenciosamente (caminho atingido apenas em testes
+            # que mockam o gspread sem provisionar config).
+            return
+        cidades = empresa.cidades_de_busca()
+
+        # Conta lotes ativos por (origem_cidade, origem_uf) — case/accent-insensitive
+        # via `_normaliza` espelhando o helper de geo.py. Usado pra colar na linha
+        # da cidade certa mesmo se o Auto Avaliar gravar "São Gotardo" e o IBGE
+        # tiver "Sao Gotardo".
+        from carros_sa.tools.geo import _normaliza
+        agora = datetime.now()
+        lotes_ativos = session.exec(
+            select(Lote).where(Lote.fim_em > agora)
+        ).all()
+        contagem: dict = {}
+        for lote in lotes_ativos:
+            if not lote.origem_cidade or not lote.origem_uf:
+                continue
+            chave = (_normaliza(lote.origem_cidade), lote.origem_uf.strip().upper())
+            contagem[chave] = contagem.get(chave, 0) + 1
+
+        header = [
+            "Cidade", "UF", "Distância (km)",
+            "Frete Hatch (R$)", "Frete Sedan (R$)", "Frete SUV (R$)",
+            "Frete Picape (R$)", "Frete Utilitário (R$)", "Frete Outro (R$)",
+            "Lotes ativos no DB",
+        ]
+
+        body = []
+        for m in cidades:
+            d_km = int(round(m.distancia_do_ponto_km))
+            qtd = contagem.get((_normaliza(m.nome), m.uf), 0)
+            body.append([
+                m.nome, m.uf, d_km,
+                empresa.frete_para(d_km, CategoriaVeiculo.HATCH),
+                empresa.frete_para(d_km, CategoriaVeiculo.SEDAN),
+                empresa.frete_para(d_km, CategoriaVeiculo.SUV),
+                empresa.frete_para(d_km, CategoriaVeiculo.PICAPE),
+                empresa.frete_para(d_km, CategoriaVeiculo.UTILITARIO),
+                empresa.frete_para(d_km, CategoriaVeiculo.OUTRO),
+                qtd,
+            ])
+
+        ts = datetime.now().strftime("%d/%m/%Y %H:%M")
+        banner = [
+            f"Cidades no raio de {empresa.raio_operacao_km}km do pátio "
+            f"({empresa.patio.cidade}/{empresa.patio.uf}) — atualizado {ts}"
+        ] + [""] * (len(header) - 1)
+
+        sheet_rows = [banner, header] + body
+
+        gc = self._client()
+        sh = gc.open_by_key(self._spreadsheet_id)
+        aba_nome = f"cidades_{empresa_id}"
+        try:
+            ws = sh.worksheet(aba_nome)
+        except Exception:
+            ws = sh.add_worksheet(title=aba_nome, rows=max(len(sheet_rows) + 10, 100), cols=len(header))
+
+        ws.clear()
+        ws.update(sheet_rows, value_input_option="USER_ENTERED")
+        ws.freeze(rows=2)
+
     def _write_glossario_sheet(self) -> None:
         """Aba fixa 'Glossário' com origem, cálculo e racional de cada coluna da triagem.
 
@@ -349,32 +516,44 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são FILTRADOS antes do export — não aparecem na aba.",
-                "Planilha só mostra lotes onde ainda dá pra dar lance. Dentro dos ativos, se o mínimo já passou do teto não há lance a fazer.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO quando o scraper não conseguiu extrair a URL do PDF (modal lazy, 429, etc). Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
+                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Os números numéricos ficam '—' até o retry do laudo rodar.",
             ],
             [
-                "Lote ID",
-                "Auto Avaliar",
-                "Segmento numérico da URL /avaliacoes/<empresa>/<ID>/<slug>",
-                "Chave estável pra deduplicar e reabrir o anúncio",
+                "Marca",
+                "Auto Avaliar (listagem)",
+                "Marca (`lote.marca`) extraída do card via regex",
+                "Coluna dedicada permite filtro/ordenação por fabricante sem depender de string composta",
             ],
             [
                 "Modelo",
                 "Auto Avaliar (listagem)",
-                "Marca + modelo + ano extraídos do card via regex",
+                "Modelo (`lote.modelo`) extraído do card via regex; marca fica em coluna separada e ano em outra",
                 "Identificação humana do veículo",
+            ],
+            [
+                "Ano",
+                "Auto Avaliar (listagem)",
+                "Ano-modelo do veículo extraído do card",
+                "Âncora de depreciação FIPE; separado da coluna Modelo pra facilitar filtro/ordenação",
+            ],
+            [
+                "Cidade",
+                "Auto Avaliar (detalhe)",
+                "Campo origem_cidade do lote (onde o carro está pra retirada); '—' se não informado",
+                "Sanity logístico — cidades distantes do pátio entram com frete maior embutido no Lance Máximo",
             ],
             [
                 "Fim do Leilão",
                 "Auto Avaliar",
-                "Timer HH:MM:SS[:centésimos] do card convertido pra datetime absoluto. Lotes SEM fim visível são filtrados do export (Auto Avaliar só mostra countdown enquanto o lote está em leilão ativo; sem countdown = já arrematado ou link morto).",
-                "Urgência — lotes com fim próximo precisam de decisão antes. Ausência da coluna significa que o lote deixou de ser visível no leilão.",
+                "Timer HH:MM:SS[:centésimos] do card convertido pra datetime absoluto. Lotes SEM fim visível são filtrados do export (Auto Avaliar só mostra countdown enquanto o lote está ativo).",
+                "Urgência — lotes com fim próximo precisam de decisão antes",
             ],
             [
                 "KM",
                 "Auto Avaliar",
                 "Número parseado da página de detalhe (specs)",
-                "Input pro giro (KM alto = revenda mais difícil)",
+                "Sanity check rápido de desgaste (KM alto = revenda mais difícil)",
             ],
             [
                 "Lance Atual (R$)",
@@ -385,116 +564,50 @@ class SheetsExporter:
             [
                 "Lance Máximo (R$)",
                 "Precificador",
-                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade: taxa é cobrada sobre o próprio lance vencedor (~8%).",
-                "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada mesmo no melhor cenário",
+                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo.",
+                "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
             ],
             [
                 "FIPE (R$)",
-                "API FIPE Parallelum",
-                "Valor da tabela FIPE pro modelo+ano, R$ bruto",
-                "Âncora pública de preço de varejo — linha de base nacional",
+                "API FIPE (cache `modelo_fipe_cache`)",
+                "Valor da Tabela FIPE pra (marca, modelo, ano) consultado no momento da avaliação. Persistido em `avaliacao_lote.fipe` pra não depender de re-consulta. '—' em registros pré-workstream K (NULL).",
+                "Âncora bruta de mercado pro operador comparar lance atual e máximo contra a referência pública. Não depende do laudo.",
             ],
             [
-                "Webmotors Mediana (R$)",
-                "Webmotors scraper",
-                "Mediana dos preços dos anúncios ativos do mesmo modelo/ano",
-                "Preço real de mercado (varejo) agora, não 'oficial' como FIPE",
-            ],
-            [
-                "Preço Giro FIPE (R$)",
-                "Precificador",
-                "min(FIPE × 0.95, Webmotors p25). Corta 5% da FIPE pra aproximar de atacado e limita pelo p25 (25% mais baratos) do Webmotors.",
-                "Preço de venda conservador ancorado em FIPE — linha de base se não tiver dado Auto Avaliar",
-            ],
-            [
-                "Preço Giro Auto Avaliar (R$)",
-                "Precificador",
-                "min(Auto Avaliar ref, Webmotors p25). 'Auto Avaliar ref' vem da 'ULTIMA AVALIAÇÃO' do anúncio (tabela do próprio marketplace de atacado).",
-                "Preço atacado real — geralmente mais baixo que FIPE. Quando presente, ganha peso no preco_giro final (menor entre os dois)",
-            ],
-            [
-                "FIPE % (lance min)",
-                "Auto Avaliar",
-                "Atributo .tag-percent-value no DOM do anúncio (badge na foto)",
-                "Sinal do vendedor sobre valor relativo: % baixo = modelo desvalorizado, alto = perto da FIPE",
-            ],
-            [
-                "ROI se pagar o máximo (%)",
+                "Lucro/mês (R$)",
                 "Derivado",
-                "(preco_giro − capital_total) ÷ capital_total × 100, onde capital_total = lance_max + reforma + frete + taxas(~8% do max) + custo_op",
-                "Retorno PERCENTUAL no pior cenário aceitável (se ganhar o lote pagando exatamente o teto)",
-            ],
-            [
-                "Dias até venda (est.)",
-                "CalibracaoGiro / AvaliacaoLote.dias_giro_estimado",
-                "Média histórica de dias_até_venda por categoria do veículo, calibrada a partir da tabela Arrematado. Fallback pra prior hardcoded quando há <3 vendas da categoria.",
-                "Input do ROI anualizado — quantos dias em média demora pra girar esse tipo de carro na empresa",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
+                "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "(1 + ROI)^(365/dias_giro) − 1, com floor de 30 dias. Usa 90d se dias_giro_estimado é NULL.",
-                "Normaliza ROI absoluto pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa).",
             ],
             [
-                "Fator Risco",
-                "Precificador",
-                "bounds.lo + (bounds.hi − bounds.lo) × peso, onde peso = severidade_laudo + documentação + motor + (1 − confidence laudo)",
-                "Multiplica a margem exigida. Lote mais arriscado → margem maior → lance mais baixo",
-            ],
-            [
-                "Severidade Laudo",
-                "ExtratorLaudo",
-                "Classificação do laudo em nenhuma / leve / média / grave / estrutural, via análise do PDF + fotos com LLM",
-                "Sinal primário de risco — 'estrutural' é descartado automaticamente no scraper",
-            ],
-            [
-                "Motor OK",
-                "ExtratorLaudo",
-                "Bool do campo motor_ok do laudo estruturado",
-                "Motor comprometido destrói margem de revenda; penaliza fator_risco forte",
-            ],
-            [
-                "Reforma Estimada (R$)",
+                "Reforma (R$)",
                 "EstimadorReformaLLM (fallback: tabela YAML)",
-                "Custo total dos itens retornados pelo LLM; se LLM falhar, soma da tabela (família_peça × severidade) + adicional estrutural quando aplicável",
-                "Custo ANTES de vender — sai direto do preço de giro. Empresa-específico (mão de obra varia por cidade)",
+                "Custo total dos itens retornados pelo LLM a partir do laudo; se LLM falhar, soma da tabela (família_peça × severidade) + adicional estrutural quando aplicável. Já descontado do Lance Máximo.",
+                "Custo ANTES de vender. Números grandes aqui = lote com dano material relevante; confirmar no PDF do laudo antes do lance.",
             ],
             [
-                "Racional Reforma",
-                "EstimadorReformaLLM (fallback: itens da tabela)",
-                "Justificativa livre do LLM quando disponível; senão, sumário 'descrição (R$valor)' dos itens do determinístico",
-                "Auditoria rápida sem abrir o laudo: dá pra ver POR QUE a reforma ficou naquele valor",
+                "Tese",
+                "Derivado (tabela Arrematado + config/tese.yaml)",
+                "🟢 típica: modelo ≥ 2 compras + ticket e KM na faixa histórica (12k-85k, 30k-260k km). 🔴 atípica: 2+ sinais ruins (V6 gasolina + km alto, diesel + km muito alto, nicho sem histórico, ticket acima do teto, elétrico sem revenda). 🟡 fora da curva: um eixo fora ou 1 sinal isolado.",
+                "SINALIZAÇÃO informativa — NÃO altera rank, NÃO filtra. Lado-a-lado com o ROI, responde 'isso se parece com o que a gente já comprou?'. Thresholds editáveis em config/tese.yaml sem release de código.",
             ],
             [
-                "Frete (R$)",
-                "Tabela da empresa",
-                "empresa.frete_para(km_origem→pátio, categoria_veículo) com extrapolação +30% acima da maior faixa",
-                "Custo de trazer o carro ao pátio — aumenta com distância e peso do veículo",
-            ],
-            [
-                "Justificativa",
-                "Precificador",
-                "String montada com todas as variáveis da fórmula pra auditoria humana",
-                "Facilita revisar por que um lote ficou com aquele preco_alvo sem abrir código",
-            ],
-            [
-                "URL",
+                "Anúncio",
                 "Auto Avaliar",
                 "=HYPERLINK do link direto do anúncio no b2b.autoavaliar.com.br, rotulado 'Abrir anúncio'",
                 "1 clique pra abrir o anúncio original e fazer checagens manuais ou lance",
             ],
             [
-                "Laudo (PDF)",
-                "Scraper detalhe",
-                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. Extraído do DOM do anúncio (storage.googleapis.com/doc-b2b ou cdn-aav.autoavaliar.com.br). URLs que não são laudo real (Relatório de Transparência Salarial, páginas de listagem) são filtradas e a célula fica '—'.",
-                "Olhar o laudo sem precisar abrir o anúncio — ajuda a bater olho em avarias antes de dar lance. '—' significa que o laudo não foi achado (pode existir lote com selo 'SEM LAUDO' ou modal que o scraper não conseguiu abrir).",
-            ],
-            [
-                "Coletado em",
-                "Lote.scraped_at",
-                "Timestamp do momento em que esse lote foi raspado do Auto Avaliar (por linha)",
-                "Saber a idade específica daquela linha — lote raspado hoje é confiável, lote raspado há 3 dias pode já ter sido arrematado (veja também o banner de Última atualização no topo da aba)",
+                "Laudo",
+                "Scraper detalhe + PDF persistido",
+                "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs que não são laudo real (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url`; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL pré-assinada do storage já expirou (validade ~1h); (3) '—' quando não há URL nem PDF local.",
+                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (2) significa que o laudo FOI analisado (severidade/avarias estão certas), só o link clicável morreu — pra abrir, recolete o lote ou consulte data/laudos_pdfs/<lote>.pdf no laptop. Auditoria diária pelo `make auditar-laudos`.",
             ],
         ]
 

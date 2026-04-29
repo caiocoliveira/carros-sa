@@ -23,12 +23,9 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.sheets import HEADER, _calcular_roi_no_maximo
+from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
-SEVERIDADES_VALIDAS = {"nenhuma", "leve", "média", "media", "grave", "estrutural", "—", None}
-MOTOR_VALIDOS = {"Sim", "NÃO", "—", True, False, None}
-POPULARIDADE_VALIDA = {"blockbuster", "popular", "normal", "nicho", "iliquido", "—", None}
 
 
 # Validator retorna None se ok; string com motivo se suspeito.
@@ -45,13 +42,22 @@ CHECKS: Dict[str, Validator] = {
         None if v in SITUACOES_VALIDAS
         else f"Situação '{v}' fora do domínio {SITUACOES_VALIDAS}"
     ),
-    "Lote ID": lambda v, r: "Lote ID vazio" if not v else None,
-    "Modelo": lambda v, r: (
-        "Modelo string vazia" if not v or not str(v).strip()
-        else "Modelo sem marca e sem nome (só ano) — scraper falhou em capturar campos"
-        if not r.get("marca") or not r.get("modelo_raw")
+    "Marca": lambda v, r: (
+        "Marca string vazia — scraper não capturou fabricante do card"
+        if not v or not str(v).strip()
         else None
     ),
+    "Modelo": lambda v, r: (
+        "Modelo string vazia — scraper não capturou nome do modelo"
+        if not v or not str(v).strip()
+        else None
+    ),
+    "Ano": lambda v, r: (
+        "Ano fora de [1980, ano_atual+1] — provavelmente erro de parsing do card"
+        if v is None or not isinstance(v, int) or v < 1980 or v > datetime.now().year + 1
+        else None
+    ),
+    "Cidade": lambda v, r: None,  # "—" é legítimo (lote sem origem_cidade declarada)
     "Fim do Leilão": lambda v, r: None,  # pode ser "—" para lotes showroom
     "KM": lambda v, r: (
         "KM absurdo (>800k ou <0)" if v is not None and (v > 800_000 or v < 0) else None
@@ -62,112 +68,74 @@ CHECKS: Dict[str, Validator] = {
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
-        else None
-    ),
-    "FIPE (R$)": lambda v, r: (
-        "FIPE zerado mas preco_giro existe — AvaliadorMercado falhou em popular FIPE?"
-        if v == 0 and r.get("preco_giro_fipe")
-        else None
-    ),
-    "Webmotors Mediana (R$)": lambda v, r: None,  # None é legítimo (scraper offline)
-    "Preço Giro FIPE (R$)": lambda v, r: (
-        "Preço Giro FIPE não-positivo" if v is not None and v <= 0 else None
-    ),
-    "Preço Giro Auto Avaliar (R$)": lambda v, r: (
-        "Preço Giro AA não-positivo" if v is not None and v <= 0 else None
-    ),
-    "FIPE % (lance min)": lambda v, r: None,  # string formatada do DOM
-    "ROI se pagar o máximo (%)": lambda v, r: (
-        "ROI >500% improvável — revisar preco_giro vs capital_total"
-        if v is not None and v > 500
         else (
-            "ROI <-80% num lote 'Viável' é contraditório (se prejuízo é tão grande, status deveria ser 'Caro demais')"
-            if v is not None and v < -80 and r["situacao"] == "✓ Viável"
+            # Sanidade de cabeça: por construção `preco_max ≤ preco_giro × (1−margem_min)`
+            # < FIPE, tirando casos extremos (km do lote MUITO abaixo da mediana de
+            # mercado → f_km próximo do teto 1.15). Lance Máximo > FIPE × 1.05 é
+            # red flag — indica dado desalinhado (FIPE errada, mediana inflada,
+            # f_km saturado num caso onde não devia).
+            f"Lance Máximo R$ {v} > FIPE × 1.05 (FIPE={r.get('fipe')}) — checar âncora de revenda"
+            if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
             else None
         )
     ),
-    "Dias até venda (est.)": lambda v, r: (
-        "Dias até venda deve ser >=1; valor <=0 indica bug no CalibracaoGiro"
-        if v is not None and v <= 0
+    # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
+    # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
+    # de scraping/cache do client FIPE.
+    "FIPE (R$)": lambda v, r: (
+        "FIPE não-positivo — provável falha do client FIPE ou cache stale"
+        if isinstance(v, (int, float)) and v <= 0
         else None
     ),
     "ROI anualizado (%)": lambda v, r: (
-        "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d)"
-        if v is not None and v > 1000
+        "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d) ou score_roi inflado"
+        if isinstance(v, (int, float)) and v > 1000
+        else (
+            "ROI anualizado negativo — score_roi negativo (custos > preco_giro) deveria ter sido descartado"
+            if isinstance(v, (int, float)) and v < 0
+            else None
+        )
+    ),
+    "Lucro/mês (R$)": lambda v, r: (
+        "Lucro/mês negativo — verificar score_roi ou preco_alvo"
+        if isinstance(v, (int, float)) and v < 0
         else None
     ),
-    "Fator Risco": lambda v, r: (
-        "Fator Risco fora de [0.5, 1.5] — bounds típicos do precificador"
-        if v is not None and not (0.5 <= v <= 1.5)
+    "Reforma (R$)": lambda v, r: (
+        "Reforma negativa" if v is not None and v < 0 else None
+    ),
+    # Coluna informativa. Valores esperados: texto com emoji prefixo (🟢/🟡/🔴)
+    # ou "—" quando config/tese.yaml não carrega ou laudo pendente. String vazia
+    # seria bug (calcular_tese deveria sempre produzir algo).
+    "Tese": lambda v, r: (
+        "Tese string vazia — calcular_tese ou fallback '—' não produziu valor"
+        if v is None or (isinstance(v, str) and not v.strip())
         else None
     ),
-    "Popularidade": lambda v, r: (
-        None if v in POPULARIDADE_VALIDA
-        else f"Popularidade '{v}' fora do enum BucketPopularidade"
-    ),
-    "Severidade Laudo": lambda v, r: (
-        None if v in SEVERIDADES_VALIDAS
-        else f"Severidade '{v}' fora do domínio do ExtratorLaudo"
-    ),
-    "Motor OK": lambda v, r: (
-        None if v in MOTOR_VALIDOS else f"Motor OK '{v}' inesperado (esperado Sim/NÃO/—)"
-    ),
-    "Reforma Estimada (R$)": lambda v, r: (
-        "Reforma estimada negativa" if v is not None and v < 0 else None
-    ),
-    "Frete (R$)": lambda v, r: (
-        "Frete negativo" if v is not None and v < 0 else None
-    ),
-    "Justificativa": lambda v, r: (
-        "Justificativa string vazia — precificador deveria sempre escrever o racional"
-        if not v else None
-    ),
-    # Opcional por design: só é preenchido quando o estimador LLM rodou (e o
-    # LLM devolveu campo 'justificativa'). Pode ser "—" ou string livre.
-    "Racional Reforma": lambda v, r: None,
-    "URL": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
-    "Laudo (PDF)": lambda v, r: None,  # "—" (sem URL de laudo ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
-    "Coletado em": lambda v, r: (
-        "Coletado em vazio — Lote.scraped_at não foi populado"
-        if not v or v == "—"
-        else None
-    ),
+    "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
+    "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
 }
 
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
-# Chaves do dict interno: lote_id, modelo, fim_em, km, lance_atual, preco_max,
-# fipe, webmotors_mediana, preco_giro_fipe, preco_giro_aa, fipe_pct_lance_minimo,
-# roi_pct, dias_giro, roi_anualizado, fator_risco, severidade, motor_ok,
-# reforma_estimada, frete, justificativa, url, scraped_at, rank, situacao,
-# encerrado, viavel, preco_giro.
 COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
-    "Lote ID": lambda r: r["lote_id"],
-    "Modelo": lambda r: r["modelo"],
+    "Marca": lambda r: r["marca"],
+    "Modelo": lambda r: r["modelo_raw"],
+    "Ano": lambda r: r["ano"],
+    "Cidade": lambda r: r["cidade"],
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
-    "FIPE (R$)": lambda r: r["fipe"],
-    "Webmotors Mediana (R$)": lambda r: r["webmotors_mediana"],
-    "Preço Giro FIPE (R$)": lambda r: r["preco_giro_fipe"],
-    "Preço Giro Auto Avaliar (R$)": lambda r: r["preco_giro_aa"],
-    "FIPE % (lance min)": lambda r: r["fipe_pct_lance_minimo"],
-    "ROI se pagar o máximo (%)": lambda r: r["roi_pct"],
-    "Dias até venda (est.)": lambda r: r["dias_giro"],
+    "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
     "ROI anualizado (%)": lambda r: r["roi_anualizado"],
-    "Fator Risco": lambda r: r["fator_risco"],
-    "Popularidade": lambda r: r.get("popularidade", "—"),
-    "Severidade Laudo": lambda r: r["severidade"],
-    "Motor OK": lambda r: r["motor_ok"],
-    "Reforma Estimada (R$)": lambda r: r["reforma_estimada"],
-    "Frete (R$)": lambda r: r["frete"],
-    "Justificativa": lambda r: r["justificativa"],
-    "URL": lambda r: r["url"],
-    "Laudo (PDF)": lambda r: r.get("laudo_url") or "—",
-    "Coletado em": lambda r: r["scraped_at"],
+    "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
+    "Reforma (R$)": lambda r: r["reforma_estimada"],
+    "Tese": lambda r: r.get("tese", "—"),
+    "Anúncio": lambda r: r["url"],
+    "Laudo": lambda r: r.get("laudo_url") or "—",
 }
 
 
@@ -197,8 +165,10 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        roi_max = _calcular_roi_no_maximo(av)
-        roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+        # ROI anualizado = score_roi (caso médio no preço-alvo) anualizado.
+        # Igual ao SheetsExporter: ROI no máximo era quase-constante por empresa
+        # (≈margem_min/(1-margem_min)), virava tautologia inútil pra ranking.
+        roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -225,9 +195,13 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             except Exception:
                 scraped_at_str = str(lote.scraped_at)
 
+        loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
         rows.append({
             "lote_id": av.lote_id,
-            "modelo": f"{lote.marca} {lote.modelo} {lote.ano}".strip(),
+            "modelo": f"{lote.marca} {lote.modelo}".strip(),
+            "ano": lote.ano,
+            "cidade": lote.origem_cidade or "—",
+            "loja": loja_raw or "—",
             "marca": lote.marca,
             "modelo_raw": lote.modelo,
             "fim_em": fim_em_str,
@@ -235,11 +209,10 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "lance_atual": lote.lance_atual or 0,
             "preco_max": av.preco_max,
             "fipe": av.fipe,
-            "webmotors_mediana": av.webmotors_mediana,
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
-            "roi_pct": roi_max,
+            "score_roi": av.score_roi,
             "dias_giro": av.dias_giro_estimado,
             "roi_anualizado": round(roi_anual, 1),
             "fator_risco": round(av.fator_risco, 3),

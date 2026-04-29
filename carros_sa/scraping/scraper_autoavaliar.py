@@ -125,19 +125,102 @@ _EXTRACT_PDF_URL_JS = """
 """
 
 # Abre o modal do laudo cautelar se existir — Auto Avaliar renderiza o PDF
-# via lazy load ao clicar em botão/link com texto "laudo".
+# via lazy load ao clicar em botão/link com texto "laudo". A heurística
+# anterior exigia "laudo" + ("completo"|"cautelar"|"ver"), o que cobria os
+# grupos tipo "saga" mas perdia rótulos observados em autus/trivel/kuruma/
+# autojapan — lá o botão vem como "LAUDO DO VEÍCULO" ou "Acessar laudo".
+# Diagnóstico 2026-04-18: 37/42 lotes ativos sem `laudo_pdf_url` nem
+# `status_laudo`, concentrados nesses grupos, indicando que a seção não era
+# sequer renderizada porque o click não acontecia. Afrouxamos pra qualquer
+# clicável curto contendo "laudo" e confiamos no `_EXTRACT_PDF_URL_JS` (pós-
+# click) pra rejeitar URLs que não sejam laudo real.
 _ABRIR_MODAL_LAUDO_JS = """
 () => {
-    const alvos = Array.from(document.querySelectorAll('a, button, [role="button"], div[class*="laudo"], span[class*="laudo"]'));
+    function norm(s) {
+        return (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').trim();
+    }
+    const alvos = Array.from(document.querySelectorAll('a, button, [role="button"]'));
     for (const el of alvos) {
-        const txt = (el.textContent || '').toLowerCase();
-        if (txt.includes('laudo') && (txt.includes('completo') || txt.includes('cautelar') || txt.includes('ver'))) {
-            try { el.click(); return true; } catch (e) {}
-        }
+        const txt = norm(el.textContent);
+        if (txt.length === 0 || txt.length > 50) continue;
+        if (!txt.includes('laudo')) continue;
+        // Rejeita rótulo do decoy institucional (Relatório de Transparência Salarial)
+        if (txt.includes('transparencia') || txt.includes('salarial')) continue;
+        try { el.click(); return true; } catch (e) {}
     }
     return false;
 }
 """
+
+
+# Trigger alternativo: o link "Acessar" que renderiza logo abaixo de
+# "STATUS DO LAUDO" no DOM dos grupos kuruma/autus/trivel. O texto não contém
+# "laudo", então `_ABRIR_MODAL_LAUDO_JS` não pega. Diagnóstico 2026-04-27 nos
+# detalhes salvos: 2/10 lotes (Gol kuruma + Cruze kuruma) chegavam ao parser
+# com status_laudo="Laudo Aprovado" mas laudo_pdf_url=None — o "Acessar" estava
+# lá, só não foi clicado.
+#
+# Estratégia: localizar o nó de texto exato "STATUS DO LAUDO" e clicar o
+# primeiro elemento clicável seguinte cujo texto seja "Acessar" (ou similares
+# curtos). Limitamos a busca aos próximos 8 elementos pra não pegar "Acessar"
+# de outras seções (ex.: STATUS DO DOCUMENTO).
+_CLICK_ACESSAR_NEAR_LAUDO_JS = """
+() => {
+    function norm(s) {
+        return (s || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').trim();
+    }
+    const ACESSAR_LABELS = new Set(['acessar', 'ver', 'abrir', 'visualizar', 'baixar']);
+
+    // 1. Acha o nó cujo texto é exatamente "STATUS DO LAUDO".
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let alvoLabel = null;
+    let node;
+    while ((node = walker.nextNode())) {
+        if (norm(node.textContent || '') === 'status do laudo') {
+            alvoLabel = node;
+            break;
+        }
+    }
+    if (!alvoLabel) return false;
+
+    // 2. Sobe até um container que contenha o status — geralmente 1-3 níveis.
+    let container = alvoLabel;
+    for (let i = 0; i < 4 && container.parentElement; i++) {
+        container = container.parentElement;
+        const t = norm(container.textContent || '');
+        if (t.length > 30 && t.length < 400) break;  // contém label + valor + acessar
+    }
+
+    // 3. Procura clicáveis dentro do container com texto curto "acessar".
+    const clicaveis = container.querySelectorAll('a, button, [role="button"]');
+    for (const el of clicaveis) {
+        const txt = norm(el.textContent);
+        if (txt.length === 0 || txt.length > 20) continue;
+        if (!ACESSAR_LABELS.has(txt)) continue;
+        try { el.click(); return true; } catch (e) {}
+    }
+    return false;
+}
+"""
+
+
+# Detecta se o body_text indica que o laudo cautelar EXISTE no AA — usado pra
+# decidir se vale insistir quando o seletor de URL falha. "Aprovado",
+# "Aprovado com apontamento" e "Não aprovado" todos significam que tem laudo
+# (no último caso o early_exit já descarta o lote, mas a URL pode ser útil pro
+# operador conferir manualmente). "Pendente" / "Não disponível" indicam laudo
+# ainda não anexado pelo vendedor — aí não adianta insistir.
+def _laudo_existe_no_body(body_text: str) -> bool:
+    if not body_text:
+        return False
+    import re as _re
+    m = _re.search(r"STATUS DO LAUDO\s*\n\s*([^\n]+)", body_text)
+    if not m:
+        return False
+    status = m.group(1).strip().lower()
+    if "aprovado" in status:        # "aprovado" / "não aprovado" / "aprovado com apontamento"
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +255,13 @@ def _carregar_cookies(path: Optional[Path] = None) -> Optional[list[dict]]:
 
 async def login(page, email: str, password: str) -> None:
     """Faz login no Auto Avaliar. Salva cookies. Levanta RuntimeError se falhar."""
-    await page.goto(LOGIN_URL, wait_until="networkidle")
-    await page.wait_for_timeout(1000)
+    # `networkidle` timeoutava consistentemente 2026-04-19 após upgrade pra
+    # Playwright 1.58: Auto Avaliar mantém WebSocket/long-polling ativo na tela
+    # de login e a página nunca atinge idle. `domcontentloaded` é suficiente —
+    # só precisamos do DOM renderizado pra preencher campos. `sessao_valida`
+    # (logo abaixo) já usava esse approach sem problema.
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=15000)
+    await page.wait_for_timeout(1500)
 
     # Tenta selectors — Auto Avaliar usa name/id como hash, então priorizamos placeholder
     for email_sel in [
@@ -257,7 +345,7 @@ async def garantir_autenticado(page, email: str, password: str) -> None:
 # Coleta de listagem
 # ---------------------------------------------------------------------------
 
-_MAX_PAGINAS = 20  # teto defensivo pro range de `?p=N`
+_MAX_PAGINAS = 50  # teto defensivo pro range de `?p=N`
 
 
 _CONTA_PAGINAS_JS = """
@@ -274,7 +362,7 @@ async def _coletar_listagem_cidade(
     page,
     cidade: str,
     uf: str,
-    horizonte_dias: int,
+    horizonte_dias: Optional[int] = None,
 ) -> list:
     """Coleta cards de UMA cidade, iterando TODAS as páginas via `?p=N`.
 
@@ -282,6 +370,13 @@ async def _coletar_listagem_cidade(
     links da paginação como `<a class="button" data-page="N">`. A gente lê
     `max(data-page)` na primeira página e itera até lá, limitando a
     `_MAX_PAGINAS` pra não rodar loop runaway se o DOM mudar.
+
+    `horizonte_dias` é um filtro opcional pós-agregação: se setado, descarta
+    cards cujo timer aponte pra fim > agora + N dias. Default `None` = coleta
+    TUDO que aparece na listagem — a janela de exibição é decidida no
+    exporter (ver `SheetsExporter.exportar(horizonte_exibicao_dias=...)`).
+    Separar coleta de exibição evita que bumps de horizonte precisem de
+    re-scrape: o DB passa a guardar o pipeline cheio de leilões futuros.
     """
     base_url = (
         f"{LISTAGEM_URL}?location={uf.lower()}&cities={quote(cidade.lower())}"
@@ -292,12 +387,19 @@ async def _coletar_listagem_cidade(
     await page.goto(base_url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(2000)
 
-    total_paginas = await page.evaluate(_CONTA_PAGINAS_JS)
+    total_paginas_raw = await page.evaluate(_CONTA_PAGINAS_JS)
     try:
-        total_paginas = int(total_paginas)
+        total_paginas_detectado = int(total_paginas_raw)
     except (TypeError, ValueError):
-        total_paginas = 1
-    total_paginas = max(1, min(total_paginas, _MAX_PAGINAS))
+        total_paginas_detectado = 1
+    if total_paginas_detectado > _MAX_PAGINAS:
+        # Sinal pro operador de que pode estar faltando inventário — se
+        # acontecer sempre com a mesma cidade, vale subir `_MAX_PAGINAS`.
+        print(
+            f"[scraper] aviso: {cidade}/{uf} reporta {total_paginas_detectado} "
+            f"páginas, coletando só as {_MAX_PAGINAS} primeiras"
+        )
+    total_paginas = max(1, min(total_paginas_detectado, _MAX_PAGINAS))
 
     vistos: set = set()
     agregado: list = []
@@ -318,7 +420,11 @@ async def _coletar_listagem_cidade(
         await page.wait_for_timeout(1500)
         await _coleta_pagina_atual()
 
-    # Filtra por horizonte DEPOIS de agregar todas as páginas
+    if horizonte_dias is None:
+        return agregado
+
+    # Filtra por horizonte DEPOIS de agregar todas as páginas (opt-in: só quando
+    # o caller quer limitar explicitamente; o pipeline default deixa passar)
     agora = datetime.now()
     limite = agora + timedelta(days=horizonte_dias)
     resultado = []
@@ -337,7 +443,7 @@ async def _coletar_listagem_cidade(
 async def coletar_listagem(
     page,
     empresa: EmpresaConfig,
-    horizonte_dias: int = 7,
+    horizonte_dias: Optional[int] = None,
 ) -> list[dict]:
     """
     Coleta cards do Auto Avaliar iterando pelas cidades do raio operacional da empresa.
@@ -387,40 +493,84 @@ async def coletar_detalhe(page, url: str) -> tuple[str, Optional[str]]:
     Abre página de detalhe de um lote.
     Retorna (body_text, laudo_pdf_url).
 
-    Tenta extrair `laudo_pdf_url` em duas passadas: primeiro no DOM inicial, e
-    se falhar, clica em botão/link "Ver Laudo" pra renderizar o modal lazy e
-    tenta de novo. Sem ambiguidade — a 2ª passada é best-effort, se não achar
-    ainda retorna None (pipeline cai em `_laudo_sem_pdf` que agora aproveita
-    `flags.reprovado_estrutural` quando aplicável).
+    Tenta extrair `laudo_pdf_url` em passadas escalonadas:
+      1. DOM inicial imediato
+      2-4. Clica botão com texto contendo "laudo" + waits 2s/2.5s/3.5s
+      5-7. Reservadas pra grupos kuruma/autus/trivel/autojapan: o trigger é o
+           link "Acessar" abaixo de STATUS DO LAUDO (texto não contém "laudo",
+           então _ABRIR_MODAL_LAUDO_JS perde). Só rodam quando o body_text
+           confirma que o laudo EXISTE — sem isso, viramos no fallback de
+           `_laudo_sem_pdf` em vez de bater num modal que não vai abrir.
+
+    Triagem 2026-04-18 mostrou que 55% dos lotes ficavam com pdf_url=None
+    mesmo tendo PDF disponível. Diagnóstico 2026-04-27 (via JSONs em
+    data/detalhes/): 20% dos lotes têm STATUS DO LAUDO="Laudo Aprovado" no
+    body_text mas laudo_pdf_url=None — exatamente os grupos kuruma. Essas
+    passadas extras atacam isso.
+
+    Se nada der, retorna None e pipeline cai em `_laudo_sem_pdf`.
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     from carros_sa.scraping.parsers import is_laudo_pdf_url
 
     await page.goto(url, wait_until="networkidle", timeout=30000)
     await page.wait_for_timeout(1500)
 
     body_text: str = await page.evaluate("() => document.body.innerText")
-    laudo_pdf_url: Optional[str] = await page.evaluate(_EXTRACT_PDF_URL_JS)
 
-    # Sanity check em Python — o JS já rejeita decoys, mas se algum vazar
-    # (p.ex. padrão novo que ainda não mapeamos) evita baixar PDF errado e
-    # deixa claro no log que não temos laudo válido.
-    if laudo_pdf_url and not is_laudo_pdf_url(laudo_pdf_url):
-        laudo_pdf_url = None
+    async def _extrair_valido() -> Optional[str]:
+        u = await page.evaluate(_EXTRACT_PDF_URL_JS)
+        return u if (u and is_laudo_pdf_url(u)) else None
 
-    # 2ª passada: se PDF não foi achado no DOM inicial, tenta revelar o modal
-    # do laudo (Auto Avaliar às vezes lazy-loada). Só abre o modal se valer a pena.
-    if not laudo_pdf_url:
+    # Passada 1: DOM inicial
+    laudo_pdf_url = await _extrair_valido()
+    if laudo_pdf_url:
+        return body_text, laudo_pdf_url
+
+    # Passadas 2-4: tenta revelar o modal via botão "laudo". Até 2 cliques.
+    for tentativa, espera_ms in enumerate([2000, 2500, 3500]):
         try:
             clicou = await page.evaluate(_ABRIR_MODAL_LAUDO_JS)
-            if clicou:
-                await page.wait_for_timeout(1500)
-                laudo_pdf_url = await page.evaluate(_EXTRACT_PDF_URL_JS)
-                if laudo_pdf_url and not is_laudo_pdf_url(laudo_pdf_url):
-                    laudo_pdf_url = None
+            await page.wait_for_timeout(espera_ms)
+            laudo_pdf_url = await _extrair_valido()
+            if laudo_pdf_url:
+                _log.info("laudo_pdf_url achado na passada %d", tentativa + 2)
+                return body_text, laudo_pdf_url
+            if not clicou and tentativa >= 1:
+                # Sem botão novo pra clicar e 2 tentativas já passaram — desiste
+                # do trigger "laudo" e cai pra trigger "Acessar" se aplicável.
+                break
         except Exception:
             pass
 
-    return body_text, laudo_pdf_url
+    # Passadas 5-7: trigger "Acessar" próximo a STATUS DO LAUDO (kuruma & cia).
+    # Só roda quando body_text confirma que o laudo existe — pra não desperdiçar
+    # 12s em lote que realmente não tem laudo anexado.
+    if _laudo_existe_no_body(body_text):
+        for tentativa, espera_ms in enumerate([3000, 4000, 5000]):
+            try:
+                clicou = await page.evaluate(_CLICK_ACESSAR_NEAR_LAUDO_JS)
+                await page.wait_for_timeout(espera_ms)
+                laudo_pdf_url = await _extrair_valido()
+                if laudo_pdf_url:
+                    _log.info(
+                        "laudo_pdf_url achado via trigger 'Acessar' na passada %d",
+                        tentativa + 5,
+                    )
+                    return body_text, laudo_pdf_url
+                if not clicou and tentativa >= 1:
+                    break
+            except Exception:
+                pass
+        # Se chegou aqui, o laudo existe no AA mas não conseguimos a URL —
+        # log explícito pra triagem identificar (vs lote sem laudo no AA).
+        _log.warning(
+            "laudo existe no body_text mas URL não foi capturada: %s", url
+        )
+
+    return body_text, None
 
 
 # ---------------------------------------------------------------------------

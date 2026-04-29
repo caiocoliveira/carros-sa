@@ -140,6 +140,36 @@ def test_ajustar_dias_giro_floor_15():
     assert ajustar_dias_giro(20, BucketPopularidade.BLOCKBUSTER) == 15
 
 
+def test_multiplicador_idade_atenua_velho_blockbuster():
+    """Velho blockbuster tem correção (× 1.15) — não acelera tanto quanto novo."""
+    from carros_sa.agents.calibracao_giro import FaixaIdade
+
+    # Novo blockbuster: base 0.6
+    novo = multiplicador(BucketPopularidade.BLOCKBUSTER, FaixaIdade.NOVO)
+    assert novo == pytest.approx(0.6)
+
+    # Velho blockbuster: 0.6 × 1.15 = 0.69 (atenuado, menos aceleração)
+    velho = multiplicador(BucketPopularidade.BLOCKBUSTER, FaixaIdade.VELHO)
+    assert velho == pytest.approx(0.69)
+
+    # Sem faixa → base puro (retrocompat)
+    semfaixa = multiplicador(BucketPopularidade.BLOCKBUSTER, None)
+    assert semfaixa == pytest.approx(0.6)
+
+
+def test_ajustar_dias_giro_velho_blockbuster_gira_mais_devagar(yaml_temporario):
+    """Picape velha blockbuster (muito rara mas possível): correção atenua velocidade."""
+    from carros_sa.agents.calibracao_giro import FaixaIdade
+
+    # Base 100d picape blockbuster
+    novo_d = ajustar_dias_giro(100, BucketPopularidade.BLOCKBUSTER, FaixaIdade.NOVO)
+    velho_d = ajustar_dias_giro(100, BucketPopularidade.BLOCKBUSTER, FaixaIdade.VELHO)
+
+    assert novo_d == 60           # 100 * 0.6 = 60
+    assert velho_d == 69          # 100 * 0.6 * 1.15 = 69
+    assert velho_d > novo_d
+
+
 def test_ranking_real_carrega_e_polo_track_eh_blockbuster_hatch():
     """Sanity do YAML real em config/mercado/ — Polo Track tem que ser top-5 hatch."""
     invalidar_cache()  # garante leitura do real, não do temp

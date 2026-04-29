@@ -11,9 +11,27 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="$REPO_DIR/.venv/bin/python3"
 SCRIPT="$REPO_DIR/scripts/triagem_diaria.py"
+RETRY_SCRIPT="$REPO_DIR/scripts/reprocessar_lotes_do_db.py"
+DECOY_SCRIPT="$REPO_DIR/scripts/limpar_decoys_laudo.py"
 LOG="/tmp/carros_sa_triagem.log"
 CRON_MARK="carros-sa-triagem"
-CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1 # $CRON_MARK"
+# Pipeline diário: (1) triagem completa → (2) limpeza de decoys de laudo →
+# (3) retry automático de laudos pendentes.
+#
+# (2) limpar_decoys: até abril/2026, um seletor JS frouxo do scraper pegava o
+# link do "Relatório de Transparência Salarial" (rodapé institucional) como se
+# fosse o PDF do laudo e persistia essa URL-decoy em raw_json.detalhe.laudo_pdf_url.
+# O gate `is_laudo_pdf_url()` hoje filtra no scraping, mas lotes legados ainda
+# carregam decoy no raw_json e envenenam o retry. Rodar sempre antes do retry
+# garante que qualquer decoy que vaze (padrão novo, regressão no scraper) seja
+# neutralizado em ciclo único — e derruba o LaudoCache pra forçar re-extração.
+#
+# (3) retry: quando o scraper não acha o `laudo_pdf_url` no 1º passe (modal
+# lento, rede instável, layout diferente do grupo), o orquestrador cai em
+# `_laudo_sem_pdf` com confidence=0.5. Sem esse passe, o lote ia pra planilha
+# como "LAUDO NÃO CAPTURADO" até a próxima coleta. Cheap — pula listagem e
+# só visita a URL dos lotes pendentes (inclui os que o limpar_decoys marcou).
+CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1 # $CRON_MARK"
 
 if [[ "${1:-}" == "--remove" ]]; then
     echo "Removendo entrada do cron..."
@@ -33,12 +51,14 @@ if [[ ! -f "$REPO_DIR/.env" ]]; then
     echo "Aviso: .env não encontrado. Copie .env.example e preencha antes de rodar."
 fi
 
-# Adiciona ao cron (idempotente — remove entrada anterior antes)
-(crontab -l 2>/dev/null | grep -v "$CRON_MARK"; echo "$CRON_LINE") | crontab -
+# Adiciona ao cron (idempotente — remove entrada anterior antes).
+# `grep -v` retorna 1 quando crontab está vazio ou não tem a marca; com
+# `set -e` + pipefail isso matava o script. `|| true` neutraliza.
+(crontab -l 2>/dev/null | grep -v "$CRON_MARK" || true; echo "$CRON_LINE") | crontab -
 
 echo "✓ Cron configurado:"
 echo "  Horário: todo dia às 07:00 e 13:00"
-echo "  Comando: triagem_diaria.py --empresa carros_uberlandia"
+echo "  Comando: triagem_diaria.py + limpar_decoys_laudo.py + retry de laudos pendentes"
 echo "  Log:     $LOG"
 echo ""
 echo "Para verificar: crontab -l | grep carros-sa"

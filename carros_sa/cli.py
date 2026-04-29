@@ -89,7 +89,7 @@ def top(
     """
     from sqlmodel import select
 
-    from carros_sa.agents.calibracao_giro import roi_anualizado
+    from carros_sa.agents.calibracao_giro import lucro_reais_por_mes, roi_anualizado
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, Lote
 
@@ -154,11 +154,22 @@ def top(
     tbl.add_column("ROI%", justify="right")
     tbl.add_column("Dias", justify="right")
     tbl.add_column("ROI/ano%", justify="right")
+    tbl.add_column("R$/mês", justify="right")
     tbl.add_column("Pop.", justify="left")
     tbl.add_column("Risco", justify="right")
     for av, lote, roi_anual in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
+        # Lucro absoluto exato no preço-alvo:
+        #   score_roi = lucro / capital_alvo  ⇒  capital_alvo = preco_giro / (1 + score_roi)
+        #   lucro = preco_giro - capital_alvo = preco_giro × score_roi / (1 + score_roi)
+        # Substitui aproximação anterior `score_roi × preco_alvo` que subestimava
+        # ~10% (capital_alvo > preco_alvo por reforma/frete/taxas/custo_op).
+        lucro_esperado = (
+            int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
+            if av.score_roi > 0 and av.preco_giro > 0 else 0
+        )
+        r_mes = lucro_reais_por_mes(lucro_esperado, av.dias_giro_estimado)
         tbl.add_row(
             lote.id,
             f"{lote.marca} {lote.modelo[:30]}",
@@ -168,6 +179,7 @@ def top(
             f"{av.score_roi * 100:.1f}%",
             str(av.dias_giro_estimado) if av.dias_giro_estimado else "—",
             f"{roi_anual * 100:.1f}%",
+            f"R$ {r_mes:,}",
             bucket.value,
             f"{av.fator_risco:.2f}",
         )
@@ -230,7 +242,7 @@ def ingest(
 
     from carros_sa.db import get_session, init_db
     from carros_sa.models import Lote
-    from carros_sa.scraping.parsers import parse_card_lines
+    from carros_sa.scraping.parsers import extrair_loja_do_card, parse_card_lines
 
     init_db()
     data = json.loads(arquivo.read_text())
@@ -239,13 +251,19 @@ def ingest(
     falhas = 0
     for entry in lotes_raw:
         try:
-            parsed.append(parse_card_lines(entry["lines"], entry["loteId"], entry["href"]))
+            lote = parse_card_lines(entry["lines"], entry["loteId"], entry["href"])
+            parsed.append((lote, extrair_loja_do_card(entry["lines"])))
         except Exception:
             falhas += 1
 
     with get_session() as session:
-        for lote in parsed:
+        for lote, loja in parsed:
             existente = session.get(Lote, lote.lote_id)
+            raw = lote.model_dump(mode="json")
+            if loja:
+                raw["loja"] = loja
+            elif existente and isinstance(existente.raw_json, dict) and existente.raw_json.get("loja"):
+                raw["loja"] = existente.raw_json["loja"]
             row = Lote(
                 id=lote.lote_id,
                 leilao=lote.leilao,
@@ -258,7 +276,7 @@ def ingest(
                 fim_em=lote.fim_em,
                 origem_cidade=lote.origem_cidade,
                 origem_uf=lote.origem_uf,
-                raw_json=lote.model_dump(mode="json"),
+                raw_json=raw,
             )
             if existente:
                 for k, v in row.model_dump(exclude={"id"}).items():
@@ -391,7 +409,13 @@ def sheets(
 @app.command()
 def triagem(
     empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
-    horizonte_dias: int = typer.Option(7, help="Lotes com fim nos próximos N dias"),
+    horizonte_dias: int = typer.Option(
+        30,
+        help=(
+            "Janela de exibição na planilha (lotes com fim nos próximos N dias). "
+            "A coleta puxa tudo — isso filtra só o que aparece na Sheet."
+        ),
+    ),
     headless: bool = typer.Option(True, help="False = abre browser visível (debug)"),
     sem_sheets: bool = typer.Option(False, help="Pular exportação para Sheets"),
     top_n: int = typer.Option(10, "--top", help="Quantos lotes mostrar no ranking final"),
@@ -462,12 +486,15 @@ async def _run_triagem(
             f"\n[bold]Coletando leilões ({empresa_id}, horizonte {horizonte_dias}d)...[/bold]"
         )
         with get_session() as session:
+            # `horizonte_dias=None` → coleta toda a listagem (inclui leilões
+            # agendados pra daqui a semanas). O recorte de exibição acontece
+            # depois, no `SheetsExporter.exportar(horizonte_exibicao_dias=...)`.
             result = await orquestrar(
                 empresa_id=empresa_id,
                 session=session,
                 page=page,
                 vision_client=vision_client,
-                horizonte_dias=horizonte_dias,
+                horizonte_dias=None,
                 text_llm_client=text_llm_client,
             )
 
@@ -524,7 +551,11 @@ async def _run_triagem(
     try:
         exporter = SheetsExporter(spreadsheet_id=sheet_id, credentials_path=creds_path)
         with get_session() as session:
-            n = exporter.exportar(empresa_id=empresa_id, session=session)
+            n = exporter.exportar(
+                empresa_id=empresa_id,
+                session=session,
+                horizonte_exibicao_dias=horizonte_dias,
+            )
         console.print(f"[green]✓ {n} lotes exportados → aba \"{empresa_id}\"[/green]")
         console.print(f"  Sheet: {exporter.sheet_url}")
     except Exception as exc:

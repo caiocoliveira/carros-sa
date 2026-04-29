@@ -216,13 +216,8 @@ class TestPipelineLote:
         # Pode ter early_exit ou ser avaliado — o importante é não chamar extrair_laudo se early_exit
         assert res.lote_id == "L001"
 
-    def test_lote_ja_avaliado_nao_reavalia(self):
-        """Lote com AvaliacaoLote existente retorna resultado sem rodar pipeline."""
-        engine, session, lote = self._setup()
-        empresa = _empresa()
-
-        # Insere avaliação existente
-        av_existente = AvaliacaoLote(
+    def _inserir_avaliacao_existente(self, session):
+        session.add(AvaliacaoLote(
             empresa_id="carros_uberlandia",
             lote_id="L001",
             preco_alvo=18000,
@@ -239,8 +234,30 @@ class TestPipelineLote:
             preco_giro_aa=None,
             justificativa="Avaliação existente.",
             criado_em=datetime.utcnow(),
-        )
-        session.add(av_existente)
+        ))
+
+    def _inserir_laudo(self, session, lote_id: str, confidence: float):
+        from carros_sa.models import LaudoCache
+        session.add(LaudoCache(
+            lote_id=lote_id,
+            avarias_json=[],
+            severidade_geral="nenhuma",
+            motor_ok=True,
+            documentacao="ok",
+            categoria_veiculo="outro",
+            confidence=confidence,
+            modelo_llm="gemini-flash",
+            custo_usd=0.0,
+            extraido_em=datetime.utcnow(),
+        ))
+
+    def test_lote_ja_avaliado_com_laudo_ok_nao_reavalia(self):
+        """Short-circuit: avaliação existente + laudo com conf≥0.6 → retorna sem rodar pipeline."""
+        engine, session, lote = self._setup()
+        empresa = _empresa()
+
+        self._inserir_avaliacao_existente(session)
+        self._inserir_laudo(session, "L001", confidence=0.9)
         session.commit()
 
         mock_page = AsyncMock()
@@ -253,13 +270,75 @@ class TestPipelineLote:
                 res = loop.run_until_complete(
                     _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
                 )
-                # coletar_detalhe NÃO deve ter sido chamado
                 mock_det.assert_not_called()
         finally:
             loop.close()
 
         assert res.avaliado is True
         assert res.preco_alvo == 18000
+
+    def test_lote_ja_avaliado_mas_laudo_pendente_reavalia(self):
+        """Avaliação existente + laudo conf<0.6 → pipeline RE-executa (re-scrapa detalhe).
+
+        Proteção contra o bug de abril/2026: o retry `--somente-laudo-pendente`
+        escolhia lotes com conf<0.6, mas `_pipeline_lote` saía antes do
+        `coletar_detalhe` porque AvaliacaoLote existia. 104 lotes ativos
+        ficavam travados em confidence=0.5 para sempre.
+        """
+        engine, session, lote = self._setup()
+        empresa = _empresa()
+
+        self._inserir_avaliacao_existente(session)
+        # Laudo placeholder de `_laudo_sem_pdf` — é a situação clássica do 104.
+        self._inserir_laudo(session, "L001", confidence=0.5)
+        session.commit()
+
+        mock_page = AsyncMock()
+        vision_client = MagicMock()
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            with patch(
+                "carros_sa.orquestrador.coletar_detalhe",
+                new_callable=AsyncMock,
+                return_value=("", None),
+            ) as mock_det:
+                loop.run_until_complete(
+                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+                )
+                # coletar_detalhe DEVE ter sido chamado — a essência do fix.
+                mock_det.assert_called_once()
+        finally:
+            loop.close()
+
+    def test_lote_ja_avaliado_sem_laudo_reavalia(self):
+        """Avaliação existente + NENHUM LaudoCache → re-executa pipeline.
+        (caso dos lotes mais antigos onde o laudo cache foi derrubado mas a
+        avaliação ficou.)"""
+        engine, session, lote = self._setup()
+        empresa = _empresa()
+
+        self._inserir_avaliacao_existente(session)
+        session.commit()
+
+        mock_page = AsyncMock()
+        vision_client = MagicMock()
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            with patch(
+                "carros_sa.orquestrador.coletar_detalhe",
+                new_callable=AsyncMock,
+                return_value=("", None),
+            ) as mock_det:
+                loop.run_until_complete(
+                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+                )
+                mock_det.assert_called_once()
+        finally:
+            loop.close()
 
 
 # ---------------------------------------------------------------------------

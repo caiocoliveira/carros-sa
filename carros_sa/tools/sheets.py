@@ -24,6 +24,7 @@ from sqlmodel import Session, select
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
+from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
 from carros_sa.tools.tese import (
     calcular_tese,
     carregar_config_tese,
@@ -81,17 +82,21 @@ def _col_letter(idx_0based: int) -> str:
             return letters
 
 
-def _calcular_roi_no_maximo(av: AvaliacaoLote) -> float:
-    """ROI garantido se ganhar o lote exatamente pelo lance máximo.
+def _lucro_absoluto_no_alvo(av: AvaliacaoLote) -> int:
+    """Lucro esperado em R$ se a empresa comprar pelo preço-alvo (caso médio).
 
-    = (preco_giro - capital_total) / capital_total
-    onde capital_total = preco_max + reforma + frete + taxas (8% do max) + custo_op
+    Identidade exata: `score_roi = lucro / capital_alvo` ⇒
+        capital_alvo = preco_giro / (1 + score_roi)
+        lucro        = preco_giro - capital_alvo = preco_giro × score_roi / (1 + score_roi)
+
+    Usa só campos persistidos em AvaliacaoLote — não precisa do `custo_op` da
+    empresa em runtime. Substitui aproximação anterior `score_roi × preco_alvo`
+    que subestimava sistematicamente em ~10% (capital_alvo > preco_alvo por causa
+    de reforma/frete/taxas/custo_op).
     """
-    if av.preco_max <= 0:
-        return 0.0
-    capital = av.preco_max + av.reforma_estimada + av.frete_incluso + av.taxas_leilao
-    lucro = av.preco_giro - capital
-    return round(lucro / max(capital, 1) * 100, 1)
+    if av.score_roi <= 0 or av.preco_giro <= 0:
+        return 0
+    return int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
 
 
 class SheetsExporter:
@@ -174,13 +179,16 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
-            roi_max = _calcular_roi_no_maximo(av)
-            roi_anual = roi_anualizado(roi_max / 100.0, av.dias_giro_estimado) * 100
+            # ROI anualizado: usa `score_roi` (caso médio no preço-alvo, calibrado
+            # por risco/liquidez) — não `roi_max`, que cai num quase-constante
+            # `margem_min/(1-margem_min)` por construção (ver justificativa no
+            # docstring de precificador.py:154-162). Bate com a CLI `top`.
+            roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
             # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Baseado em
-            # score_roi × preco_alvo (lucro no caso médio do bid).
+            # "esse lote rende R$X/mês enquanto no pátio". Fórmula exata:
+            # lucro_absoluto = preco_giro × score_roi / (1 + score_roi).
             lucro_mes = lucro_reais_por_mes(
-                int(av.score_roi * av.preco_alvo), av.dias_giro_estimado,
+                _lucro_absoluto_no_alvo(av), av.dias_giro_estimado,
             )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -198,6 +206,13 @@ class SheetsExporter:
             # link clicável se a URL passa pelo `is_laudo_pdf_url`.
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
+
+            # PDF persistido em data/laudos_pdfs/ — quando temos o arquivo local
+            # mas a URL pré-assinada do storage já expirou (URLs do Auto Avaliar
+            # vivem ~1h), sinaliza ao operador que o laudo FOI analisado e está
+            # salvo, mas o link clicável não vai funcionar. Antes mostrava só
+            # "—" no mesmo caso de URL ausente sem PDF, ofuscando essa diferença.
+            pdf_local_existe = (PDF_DIR_DEFAULT / f"{av.lote_id}.pdf").exists()
 
             # Laudo só conta como "analisado" se veio de um PDF real — fallback
             # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
@@ -239,6 +254,7 @@ class SheetsExporter:
                 "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
+                "pdf_local_existe": pdf_local_existe,
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "laudo_analisado": laudo_analisado,
@@ -268,7 +284,14 @@ class SheetsExporter:
         for rank, r in enumerate(rows, start=1):
             nao_analisado = not r["laudo_analisado"]
             if nao_analisado:
-                situacao = "⚠ LAUDO NÃO ANALISADO"
+                # "NÃO CAPTURADO" descreve o sintoma com honestidade: o laudo
+                # quase sempre EXISTE no Auto Avaliar (status="Aprovado" no
+                # body_text), mas o scraper não conseguiu extrair a URL do PDF
+                # (modal lazy não rendeu, HTTP 429, etc — ver coletar_detalhe).
+                # Antes era "NÃO ANALISADO", o que sugeria que o laudo não
+                # existia — passou a impressão errada e levava operador a
+                # ignorar lotes recuperáveis.
+                situacao = "⚠ LAUDO NÃO CAPTURADO"
             elif r["viavel"]:
                 situacao = "✓ Viável"
             else:
@@ -280,13 +303,18 @@ class SheetsExporter:
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
-            # Link pro PDF do laudo. Se URL passou pelo filtro de decoy
-            # (is_laudo_pdf_url), vira HYPERLINK "Ver laudo"; se não, "—".
-            # Motivação: usuário quer conferir o laudo antes de dar lance
-            # sem precisar clicar no anúncio, abrir o modal e esperar carregar.
+            # Link pro PDF do laudo. Três estados:
+            #   1. URL válida (passa em is_laudo_pdf_url)  → HYPERLINK clicável.
+            #   2. PDF salvo localmente mas URL ausente/expirada → texto descritivo
+            #      "PDF salvo (link expirado)" — sinaliza que o laudo FOI analisado
+            #      e está em data/laudos_pdfs/<lote>.pdf, só o link assinado morreu.
+            #      (URLs do storage do Auto Avaliar têm validade ~1h.)
+            #   3. Sem URL e sem PDF local → "—" (laudo de fato não disponível).
             if r["laudo_url"]:
                 laudo_escaped = r["laudo_url"].replace('"', '""')
                 laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
+            elif r.get("pdf_local_existe"):
+                laudo_cell = "PDF salvo (link expirado)"
             else:
                 laudo_cell = "—"
 
@@ -463,8 +491,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO ANALISADO quando o PDF não foi extraído. Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. Se ⚠, não dê lance — os números numéricos ficam '—' até o retry do laudo rodar.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO quando o scraper não conseguiu extrair a URL do PDF (modal lazy, 429, etc). Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
+                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Os números numéricos ficam '—' até o retry do laudo rodar.",
             ],
             [
                 "Marca",
@@ -523,14 +551,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto (score_roi × preco_alvo) × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL)",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "ROI no máximo × 365 / dias_giro (floor 30d; fallback 90d). ROI no máximo = (preco_giro − capital_total) ÷ capital_total, com capital_total = lance_max + reforma + frete + taxas(~8%) + custo_op.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior",
+                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa).",
             ],
             [
                 "Reforma (R$)",
@@ -552,9 +580,9 @@ class SheetsExporter:
             ],
             [
                 "Laudo",
-                "Scraper detalhe",
-                "=HYPERLINK pro PDF do laudo cautelar do lote, rotulado 'Ver laudo'. URLs que não são laudo real (Relatório de Transparência, listagem) são filtradas e a célula fica '—'.",
-                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. '—' = laudo não achado ou selo 'SEM LAUDO'.",
+                "Scraper detalhe + PDF persistido",
+                "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs que não são laudo real (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url`; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL pré-assinada do storage já expirou (validade ~1h); (3) '—' quando não há URL nem PDF local.",
+                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (2) significa que o laudo FOI analisado (severidade/avarias estão certas), só o link clicável morreu — pra abrir, recolete o lote ou consulte data/laudos_pdfs/<lote>.pdf no laptop. Auditoria diária pelo `make auditar-laudos`.",
             ],
         ]
 

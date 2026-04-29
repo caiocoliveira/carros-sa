@@ -96,9 +96,10 @@ Critério de aceite pra merge em `main`:
 ## Memória persistente (compartilhada entre sessões)
 
 Leitura obrigatória ao começar algo novo:
-`/Users/caiocoliveira/.claude/projects/-Users-caiocoliveira-Carros-SA/memory/MEMORY.md`
+- `/Users/caiocoliveira/.claude/projects/-Users-caiocoliveira-Carros-SA/memory/MEMORY.md` — quirks específicos de fornecedor, flags de negócio, decisões fixadas
+- [`LESSONS.md`](LESSONS.md) — padrões de falha recorrentes + causa raiz + checklist pré-merge. Ler antes de declarar `✅` qualquer workstream.
 
-Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor) viram entrada nessa pasta — e a próxima sessão já lê sem precisar redescobrir.
+Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor) viram entrada em `memory/`. Padrões repetidos (falha silenciosa, validação N=1, premissa inventada) viram entrada em `LESSONS.md`.
 
 ## Red flags
 
@@ -113,3 +114,29 @@ Descobertas valiosas (flags de negócio, decisões fixadas, quirks de fornecedor
 - Lote real com dano estrutural: `data/laudos_amostra/21854782_fiesta.pdf` (Fiesta 2013, colunas B/C esquerdas reparadas). Use como gold test.
 - Listagem real de Uberlândia/MG: `data/scrapes/2026-04-14_uberlandia_listagem.json` (10 lotes variados).
 - Fixture de resposta Gemini: `tests/fixtures/21854782_visual_gemini.json`.
+
+## Princípios gerais de codagem
+
+Adaptado de https://github.com/forrestchang/andrej-karpathy-skills. Reforça o que já está no system prompt do Claude Code; em conflito, regras específicas deste arquivo prevalecem.
+
+1. **Pensar antes de codar.** Explicitar premissas. Se houver mais de uma interpretação, apresentar — não escolher silenciosamente. Se algo está confuso, parar e perguntar em vez de chutar.
+2. **Simplicidade primeiro.** Mínimo de código que resolve o pedido. Sem feature além do que foi pedido, sem abstração de uso único, sem "flexibilidade" não solicitada, sem error handling pra cenário impossível. Se escreveu 200 linhas e dava em 50, reescreve.
+3. **Mudanças cirúrgicas.** Tocar só o que precisa. Não "melhorar" código adjacente, formatação ou comentários. Match no estilo existente mesmo que você fizesse diferente. Código morto pré-existente: comenta, não apaga (a menos que peçam). Cada linha alterada precisa rastrear até o pedido do usuário.
+4. **Critério de sucesso verificável.** Transformar a tarefa em loop fechado: "adicionar validação" → "escrever testes pros inputs inválidos e fazer passar"; "consertar bug" → "escrever teste que reproduz, depois fazer passar"; "refatorar X" → "garantir que os testes passam antes e depois". Pra tarefa multi-step, listar plano curto com verificação por passo.
+
+## Padrões aprendidos (revisar antes de tocar nessas áreas)
+
+### Identidade econômica do precificador
+Por construção: `preco_max + reforma + frete + taxas_max + custo_op = preco_giro × (1 − margem_min)`. Equivalentemente: `capital_total_no_max = preco_giro × (1 − margem_min)`. Antes de inventar uma "ROI no máximo" derivada de `(preco_giro − capital) / capital`, lembre que o resultado vira `margem_min / (1 − margem_min)` — quase-constante por empresa, ~11% em Uberlândia. **Pra ranqueamento, sempre use `score_roi` (caso médio no preço-alvo).**
+
+### Lucro absoluto exato — fórmula fechada
+`score_roi = lucro / capital_alvo` ⇒ `capital_alvo = preco_giro / (1 + score_roi)` ⇒ `lucro_absoluto = preco_giro × score_roi / (1 + score_roi)`. Não use `score_roi × preco_alvo` como aproximação — subestima ~10% porque `capital_alvo > preco_alvo` (engloba reforma/frete/taxas/custo_op). Helper canônico em `sheets._lucro_absoluto_no_alvo`.
+
+### Naming hint — `preco_giro_fipe`
+O campo `preco_giro_fipe` em `Avaliacao`/`AvaliacaoLote` é literalmente `webmotors_mediana × f_km`, NÃO `min(FIPE × 0.95, webmotors_p25)`. Quando Webmotors live ainda não está conectado, `webmotors_mediana` é populado pelo `AvaliadorMercado` como `FIPE × 0.97` (ver `agents/avaliador_mercado.py:134`). Daí o nome ser inerte: a fonte primária é a mediana de mercado, com fallback indireto pra FIPE. `webmotors_p25` é exposto em `SinalMercado` mas hoje **não é consumido** pelo precificador (versão antiga usava). Não renomear o campo persistido sem coordenar — é contrato (models.py).
+
+### Antes de mexer em precificador / sheets / cli, rodar `make test` com olhos abertos
+Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_columns.py::test_roi_absurdo_reportado` são guard-rails das fórmulas — qualquer mudança que quebrá-los provavelmente está reintroduzindo um dos bugs anteriores (ROI tautológico ou lucro subestimado).
+
+### Workflow de revisão autônoma
+Quando o usuário pedir "revise e corrija" sem direcionar, o caminho que funcionou foi: (1) ler ROADMAP + precificador + sheets + tests existentes, (2) ESCREVER UM SCRIPT DE SIMULAÇÃO (`/tmp/sim.py`) com lote real conhecido (Polo Track 2024 do YAML) e validar identidades algébricas comparando docstring vs implementação, (3) só depois confirmar bugs e refatorar. Pular a simulação leva a "fixes" baseados em leitura — frequentemente errados.

@@ -18,8 +18,8 @@ from carros_sa.tools.sheets import (
     COLUMN_FORMATS,
     HEADER,
     SheetsExporter,
-    _calcular_roi_no_maximo,
     _col_letter,
+    _lucro_absoluto_no_alvo,
 )
 
 
@@ -110,23 +110,35 @@ def _exporter() -> SheetsExporter:
 # Testes
 # ---------------------------------------------------------------------------
 
-class TestCalcularRoiNoMaximo:
-    def test_roi_positivo(self):
-        """ROI se ganhar no lance máximo: (giro - capital_max) / capital_max."""
-        av = _avaliacao(preco_giro=35000, preco_max=25000)
-        av.reforma_estimada = 3000
-        av.frete_incluso = 1500
-        av.taxas_leilao = int(25000 * 0.08)  # 2000
-        # capital = 25000 + 3000 + 1500 + 2000 = 31500
-        # lucro = 35000 - 31500 = 3500
-        # roi = 3500 / 31500 * 100 ≈ 11.1
-        roi = _calcular_roi_no_maximo(av)
-        assert roi == pytest.approx(11.1, abs=0.5)
+class TestLucroAbsolutoNoAlvo:
+    """Fórmula exata do lucro absoluto no preço-alvo:
+        score_roi = lucro / capital_alvo  ⇒  capital_alvo = preco_giro / (1 + score_roi)
+        lucro = preco_giro − capital_alvo = preco_giro × score_roi / (1 + score_roi)
 
-    def test_preco_max_zero_retorna_zero(self):
-        av = _avaliacao()
-        av.preco_max = 0
-        assert _calcular_roi_no_maximo(av) == 0.0
+    Substitui a aproximação anterior `score_roi × preco_alvo`, que subestimava
+    sistematicamente em ~10% (capital_alvo > preco_alvo por causa de
+    reforma/frete/taxas/custo_op).
+    """
+
+    def test_lucro_exato_polo_track(self):
+        # Polo Track real: preco_giro=68000, score_roi=0.576 → lucro≈24864
+        av = _avaliacao(preco_giro=68000, score_roi=0.576)
+        lucro = _lucro_absoluto_no_alvo(av)
+        # 68000 × 0.576 / 1.576 ≈ 24852 (±2 por rounding)
+        assert lucro == pytest.approx(24852, abs=2)
+
+    def test_score_zero_retorna_zero(self):
+        av = _avaliacao(score_roi=0.0)
+        assert _lucro_absoluto_no_alvo(av) == 0
+
+    def test_score_negativo_retorna_zero(self):
+        # Lote com custos > preco_giro (deveria ter sido descartado upstream).
+        av = _avaliacao(score_roi=-0.1)
+        assert _lucro_absoluto_no_alvo(av) == 0
+
+    def test_preco_giro_zero_retorna_zero(self):
+        av = _avaliacao(preco_giro=0, score_roi=0.3)
+        assert _lucro_absoluto_no_alvo(av) == 0
 
 
 class TestSheetsExporterQuery:
@@ -159,6 +171,78 @@ class TestSheetsExporterQuery:
         call_args = mock_ws.update.call_args_list[0][0][0]
         assert "Última atualização" in call_args[0][0]
         assert call_args[1] == HEADER
+
+    def test_exportar_fipe_em_coluna_dedicada(self):
+        """Coluna FIPE (R$) renderiza `av.fipe` direto. Não depende do laudo —
+        fica visível mesmo quando o lote está com 'LAUDO NÃO ANALISADO'.
+        Registros sem fipe (pré-workstream K) caem pro placeholder '—'."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # L001: avaliação com fipe preenchido + laudo ok
+            session.add(_lote("L001"))
+            av1 = _avaliacao("L001")
+            av1.fipe = 32000
+            session.add(av1)
+            session.add(_laudo("L001"))
+            # L002: sem laudo (não analisado), mas com fipe — deve aparecer
+            session.add(_lote("L002", modelo="Gol", lance_atual=18000))
+            av2 = _avaliacao("L002")
+            av2.fipe = 25000
+            session.add(av2)
+            # L003: avaliação sem fipe (registro antigo, NULL) → '—'
+            session.add(_lote("L003", modelo="Onix", lance_atual=22000))
+            av3 = _avaliacao("L003")
+            av3.fipe = None
+            session.add(av3)
+            session.add(_laudo("L003"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_fipe = HEADER.index("FIPE (R$)")
+        idx_modelo = HEADER.index("Modelo")
+        # Mapeia modelo → fipe
+        fipe_por_modelo = {rows[i][idx_modelo]: rows[i][idx_fipe] for i in range(2, len(rows))}
+        assert fipe_por_modelo["Fiesta"] == 32000
+        assert fipe_por_modelo["Gol"] == 25000      # FIPE aparece mesmo sem laudo
+        assert fipe_por_modelo["Onix"] == "—"       # registro antigo sem fipe
+
+    def test_exportar_marca_e_modelo_em_colunas_separadas(self):
+        """Marca e Modelo são colunas dedicadas — operador filtra por fabricante
+        sem depender de string composta. Modelo cell guarda só `lote.modelo`."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", marca="Ford", modelo="Fiesta"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_marca = HEADER.index("Marca")
+        idx_modelo = HEADER.index("Modelo")
+        assert rows[2][idx_marca] == "Ford"
+        assert rows[2][idx_modelo] == "Fiesta"
 
     def test_exportar_viaveis_aparecem_primeiro(self):
         """Lotes com preco_max > lance_atual (viáveis) devem vir antes dos inviáveis."""
@@ -195,10 +279,12 @@ class TestSheetsExporterQuery:
         assert "Compass" in rows[3][idx_modelo]
         assert "Caro" in rows[3][idx_situacao]
 
-    def test_exportar_sem_laudo_marca_nao_analisado(self):
-        """Lote sem LaudoCache é exportado mas sinaliza "LAUDO NÃO ANALISADO" e zera
+    def test_exportar_sem_laudo_marca_nao_capturado(self):
+        """Lote sem LaudoCache é exportado mas sinaliza "LAUDO NÃO CAPTURADO" e zera
         campos numéricos derivados do laudo — operador não pode dar lance sem conferir
-        primeiro (feedback usuário 2026-04-18)."""
+        primeiro (feedback usuário 2026-04-18). Renomeado de "NÃO ANALISADO" pra
+        "NÃO CAPTURADO" porque na prática o laudo existe no AA quase sempre — quem
+        falhou foi o scraper (modal lazy / 429), não o anunciante."""
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))
@@ -220,7 +306,7 @@ class TestSheetsExporterQuery:
         assert n == 1
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
+        assert "LAUDO NÃO CAPTURADO" in data_row[HEADER.index("Situação")]
         # Numéricos derivados de um laudo vazio viram traço: piso de R$ 1k em
         # "Reforma" + ROI/preço-alvo calculados com reforma=piso seriam
         # tudo chute, então a planilha esconde.
@@ -229,7 +315,7 @@ class TestSheetsExporterQuery:
         assert data_row[HEADER.index("ROI anualizado (%)")] == "—"
         assert data_row[HEADER.index("Lucro/mês (R$)")] == "—"
 
-    def test_exportar_laudo_fallback_confidence_baixa_marca_nao_analisado(self):
+    def test_exportar_laudo_fallback_confidence_baixa_marca_nao_capturado(self):
         """LaudoCache com confidence=0.5 é fallback `_laudo_sem_pdf` — trata igual a
         laudo ausente. Limite 0.6 aceita só laudos realmente extraídos de PDF."""
         engine = _engine_mem()
@@ -256,7 +342,7 @@ class TestSheetsExporterQuery:
         assert n == 1
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" in data_row[HEADER.index("Situação")]
+        assert "LAUDO NÃO CAPTURADO" in data_row[HEADER.index("Situação")]
         assert data_row[HEADER.index("Reforma (R$)")] == "—"
 
     def test_exportar_laudo_confidence_alta_mantem_valores(self):
@@ -281,8 +367,70 @@ class TestSheetsExporterQuery:
 
         rows = mock_ws.update.call_args_list[0][0][0]
         data_row = rows[2]
-        assert "LAUDO NÃO ANALISADO" not in data_row[HEADER.index("Situação")]
+        assert "LAUDO NÃO CAPTURADO" not in data_row[HEADER.index("Situação")]
         assert data_row[HEADER.index("Reforma (R$)")] == 3000
+
+    def test_exportar_horizonte_exibicao_corta_lotes_muito_futuros(self):
+        """Quando `horizonte_exibicao_dias=N` é passado, lotes com fim > agora+N dias
+        ficam fora da planilha. Regressão do feedback 2026-04-23: a gente
+        passou a coletar o pipeline inteiro (sem cortar no scraper), então o
+        exporter é quem define a janela que o usuário enxerga."""
+        engine = _engine_mem()
+        agora = datetime.now()
+        with Session(engine) as session:
+            session.add(_lote("L_HOJE", fim_em=agora + timedelta(hours=4)))
+            session.add(_lote("L_DAQUI_15D", fim_em=agora + timedelta(days=15)))
+            session.add(_lote("L_DAQUI_45D", fim_em=agora + timedelta(days=45)))
+            session.add(_avaliacao("L_HOJE"))
+            session.add(_avaliacao("L_DAQUI_15D"))
+            session.add(_avaliacao("L_DAQUI_45D"))
+            session.add(_laudo("L_HOJE"))
+            session.add(_laudo("L_DAQUI_15D"))
+            session.add(_laudo("L_DAQUI_45D"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar(
+                    "uberlandia_mg", session, horizonte_exibicao_dias=30,
+                )
+
+        # L_HOJE e L_DAQUI_15D passam; L_DAQUI_45D fora da janela.
+        assert n == 2
+
+    def test_exportar_horizonte_exibicao_none_mantem_tudo(self):
+        """`horizonte_exibicao_dias=None` (default) NÃO filtra por janela — só
+        os filtros antigos (fim_em=None, encerrado) continuam ativos."""
+        engine = _engine_mem()
+        agora = datetime.now()
+        with Session(engine) as session:
+            session.add(_lote("L_HOJE", fim_em=agora + timedelta(hours=4)))
+            session.add(_lote("L_LONGE", fim_em=agora + timedelta(days=90)))
+            session.add(_avaliacao("L_HOJE"))
+            session.add(_avaliacao("L_LONGE"))
+            session.add(_laudo("L_HOJE"))
+            session.add(_laudo("L_LONGE"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                n = exporter.exportar("uberlandia_mg", session)
+
+        assert n == 2
 
     def test_exportar_sem_avaliacoes_retorna_zero(self):
         """Empresa sem avaliações deve retornar 0 sem erros."""
@@ -558,12 +706,19 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
-    def test_exportar_roi_baseado_no_lance_maximo(self):
-        """ROI anualizado deve ser calculado sobre o lance máximo, não sobre lance_atual."""
+    def test_exportar_roi_anualizado_baseado_em_score_roi(self):
+        """ROI anualizado = score_roi × 365 / dias_giro.
+
+        Antes a coluna usava `roi_max` (≈margem_min/(1−margem_min) ≈ constante por
+        empresa) — virava tautologia que só variava por dias_giro. Agora reflete
+        score_roi calibrado por risco/liquidez do lote, deixando a coluna
+        informativa pro ranking.
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=20000))
-            av = _avaliacao("L001", preco_giro=35000, preco_max=25000)
+            # score_roi=0.3 conhecido; dias_giro_estimado=None → fallback 90d
+            av = _avaliacao("L001", preco_giro=35000, preco_max=25000, score_roi=0.3)
             session.add(av)
             session.add(_laudo("L001"))
             session.commit()
@@ -579,13 +734,11 @@ class TestSheetsExporterQuery:
             with Session(engine) as session:
                 exporter.exportar("uberlandia_mg", session)
 
-        rows = mock_ws.update.call_args_list[0][0][0]  # primeira chamada = aba de dados (segunda é o Glossário)
+        rows = mock_ws.update.call_args_list[0][0][0]
         idx_roi = HEADER.index("ROI anualizado (%)")
         roi_val = rows[2][idx_roi]
-        # ROI no máximo ≈ 11%; sem dias_giro preenchido, fallback = 90d
-        # ROI anualizado ≈ 11 × 365/90 ≈ 44%. Faixa larga pra acomodar pequenas
-        # variações do preco_alvo/fator_risco.
-        assert 20 < roi_val < 80
+        # 0.3 × 365 / 90 = 121.67%
+        assert roi_val == pytest.approx(121.7, abs=0.5)
 
 
 class TestSheetsExporterFimEmObrigatorio:

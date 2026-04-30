@@ -594,14 +594,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
-                "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 60d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
+                "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade. Floor 60d evita o caso degenerado 'Lucro/mês = Lucro absoluto' que ocorria quando dias_giro=30d (defaults categóricos otimistas).",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa).",
+                "score_roi × 365 ÷ dias_giro (floor 60d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa). Valores >500% sinalizados pelo audit como provável otimismo (benchmark operacional real ~60-75% ao ano).",
             ],
             [
                 "Reforma (R$)",

@@ -196,6 +196,18 @@ def invalidar_cache() -> None:
     _cache.clear()
 
 
+# Floor mínimo realista de giro (em dias) — operação real do Reinaldo (21 carros)
+# teve média 92d entre compra e venda; Polo Track real do Caio levou 227d; Onix
+# Joy 278d. O prior categórico hardcoded em `_DIAS_GIRO_DEFAULT_POR_FAIXA` chega
+# a 25d (HATCH NOVO) — claramente otimista. Sem floor maior, `lucro_reais_por_mes`
+# vira `lucro_abs` (dias=30 → ×30/30=×1) e ROI anualizado infla pra 500-600%
+# (irreal: benchmark real é 60-75% ao ano).
+#
+# 60d é compromisso conservador: dobra o pior caso default (HATCH NOVO 25d) sem
+# zerar o sinal de lotes onde a calibração via Arrematado real já deu giro <60d.
+_FLOOR_DIAS_GIRO_DISPLAY = 60
+
+
 def lucro_reais_por_mes(
     lucro_absoluto_reais: int,
     dias_giro: Optional[int],
@@ -206,11 +218,14 @@ def lucro_reais_por_mes(
     enquanto tá no pátio". Permite comparar lotes com capitais e prazos
     muito diferentes na mesma unidade.
 
-    Floor de 30 dias (mesma lógica do roi_anualizado) evita números absurdos.
+    Floor de 60 dias evita o caso degenerado em que dias_giro<=30 (defaults
+    otimistas como HATCH NOVO=25d) faz `lucro_mes = lucro_abs × 30/30 = lucro_abs`
+    — operador via "Lucro/mês = Lucro total" e achava que recebia esse valor
+    todo mês. Com floor 60d o pior caso vira `lucro_abs/2` (mais honesto).
     """
     if lucro_absoluto_reais <= 0:
         return 0
-    dias = 90 if dias_giro is None else max(dias_giro, 30)
+    dias = 90 if dias_giro is None else max(dias_giro, _FLOOR_DIAS_GIRO_DISPLAY)
     # (lucro / dias) * 30 = lucro mensal esperado
     return int(round(lucro_absoluto_reais * 30.0 / dias))
 
@@ -221,13 +236,14 @@ def roi_anualizado(score_roi: float, dias_giro: Optional[int]) -> float:
     Distinção semântica:
       - `dias_giro is None` → estimativa ausente. Usa fallback 90 dias (4x ao ano,
         anualização conservadora).
-      - `dias_giro` numérico (até 0) → estimativa presente. Aplica floor de 30
-        dias pra evitar que carros com previsão "absurdo baixo" inflem o ROI.
+      - `dias_giro` numérico → estimativa presente. Aplica floor de 60 dias pra
+        evitar inflação sintética via dias_giro otimista (defaults categóricos
+        chegam a 25-30d, ROI saturava em 500-600% — irreal).
     """
     if score_roi is None:
         return 0.0
     if dias_giro is None:
         dias = 90
     else:
-        dias = max(dias_giro, 30)
+        dias = max(dias_giro, _FLOOR_DIAS_GIRO_DISPLAY)
     return score_roi * (365.0 / dias)

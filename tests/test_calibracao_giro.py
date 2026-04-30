@@ -196,17 +196,28 @@ def test_calibracao_filtra_por_empresa(session_isolada):
 # =============================================================================
 
 def test_roi_anualizado_aritmetica():
-    # 10% em 30 dias = ~121,67% ao ano
-    assert roi_anualizado(0.10, 30) == pytest.approx(0.10 * 365 / 30)
-    # 5% em 90 dias = ~20,28% ao ano
-    assert roi_anualizado(0.05, 90) == pytest.approx(0.05 * 365 / 90)
+    # 10% em 90 dias = ~40,56% ao ano (90d > floor 60d, sem clamp)
+    assert roi_anualizado(0.10, 90) == pytest.approx(0.10 * 365 / 90)
+    # 5% em 120 dias = ~15,21% ao ano
+    assert roi_anualizado(0.05, 120) == pytest.approx(0.05 * 365 / 120)
 
 
-def test_roi_anualizado_floor_30_dias():
-    """Lotes com dias_giro absurdo baixo (3, 1) capam em 30 pra evitar inflar."""
-    # 10% em "1 dia" capeado a 30 dias = 121,67% ao ano (não 3650%)
-    assert roi_anualizado(0.10, 1) == pytest.approx(0.10 * 365 / 30)
-    assert roi_anualizado(0.10, 0) == pytest.approx(0.10 * 365 / 30)
+def test_roi_anualizado_floor_60_dias():
+    """Lotes com dias_giro otimista (<60d) capam no floor de 60d.
+
+    Antes o floor era 30d, mas defaults categóricos chegam a 25d (HATCH NOVO)
+    e ROI saturava em 500-600% (irreal — benchmark operacional ~60-75%/ano).
+    Floor 60d comprime a anualização sintética sem zerar o ranking.
+    """
+    # 10% em "1 dia" capeado a 60 dias = 60.83% ao ano (não 3650%)
+    assert roi_anualizado(0.10, 1) == pytest.approx(0.10 * 365 / 60)
+    # 10% em 30d capeado a 60 dias = 60.83% ao ano (era 121.67% com floor antigo)
+    assert roi_anualizado(0.10, 30) == pytest.approx(0.10 * 365 / 60)
+    assert roi_anualizado(0.10, 0) == pytest.approx(0.10 * 365 / 60)
+    # 60d EXATO = sem clamp (borda)
+    assert roi_anualizado(0.10, 60) == pytest.approx(0.10 * 365 / 60)
+    # 61d > floor → sem clamp
+    assert roi_anualizado(0.10, 61) == pytest.approx(0.10 * 365 / 61)
 
 
 def test_roi_anualizado_dias_none_usa_fallback_90():

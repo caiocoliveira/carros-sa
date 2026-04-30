@@ -72,6 +72,46 @@ de várias rodadas de "operador vê, operador reclama, eu conserto". Muitos dos
 fixes acima teriam sido pegos em `make test` se o `audit.py` existisse em
 2026-04-10 (ex.: `fim_em=None` na planilha, ROI > 500%, severidade fora do enum).
 
+### P6. Magnitude inflada como falso positivo escondido (2026-04-30)
+
+Sintoma: o ranking funciona (lotes melhores no topo), mas o número absoluto da
+coluna está 5-8× fora da realidade operacional. Cada coluna individual passa
+nos testes; cada coluna individual tem invariante; mas a relação entre o
+número exibido e o benchmark do mundo real está quebrada.
+
+Caso canônico (workstream X, 2026-04-30): ROI anualizado mostrava 500-600%
+em lotes "saudáveis" (Polo Track 526%, Onix 515%) enquanto a operação real do
+Reinaldo (21 carros / 3 meses médios) rende ~60-75% ao ano. O ranqueamento
+estava certo, o operador olhava o "526%" e ou (a) achava número irreal e
+ignorava a planilha, ou (b) acreditava e tomava decisões mal calibradas.
+
+Causas compostas:
+- `_DIAS_GIRO_DEFAULT_POR_FAIXA` tem priors otimistas (HATCH NOVO=25d) sem
+  calibração real (workstream H destravado mas sem dados de overlap)
+- Floor de 30d em `lucro_reais_por_mes`/`roi_anualizado` permitia o caso
+  degenerado `lucro_mes = lucro_abs × 30/30 = lucro_abs` — operador via
+  "Lucro/mês = Lucro total" e cada lote "rápido" mostrava lucro absurdo
+- Audit threshold de ROI > 1000% era frouxo demais — todos os lotes do range
+  500-1000% passavam silenciosos
+
+**Antídoto operacional:** invariantes do audit precisam estar calibradas
+contra benchmark **operacional** (não matemático). Se "ROI > X%" for a regra,
+X precisa vir de "qual ROI o operador realmente faz" — não "qual o limite
+matemático do que `score_roi × 365/dias` pode produzir". Toda métrica derivada
+deveria ter um comentário com "benchmark operacional = N%" no código.
+
+### P7. Audit não espelhava o exporter (2026-04-30)
+
+Sintoma: audit reportava violações em lotes que o operador NÃO conseguia
+encontrar abrindo a planilha. O exporter filtra `lote.fim_em is None` (sumiu
+do leilão ativo) e lotes encerrados; o audit não filtrava `fim_em is None`.
+Resultado: ruído reativo ("audit fala de lote X mas eu não acho ele").
+
+**Antídoto operacional:** "audit deve auditar o que o usuário vê" é regra de
+ouro. Quando o exporter filtra alguma coisa, o audit replica o filtro EXATO
+no `_build_rows`. Teste de paridade obrigatório: lote filtrado pelo exporter
+NÃO pode aparecer em `audit()`.
+
 ---
 
 ## Parte 2 — Causa raiz: o que está por baixo dos padrões
@@ -224,3 +264,6 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | `02ad964` | RC4 | Short-circuit respeita laudo pendente |
 | `a142bcd` | RC4 | `motor_ok` default True quando ausente |
 | `e57bb3a` | P5 | Auditoria automática de colunas (hook) |
+| (X 2026-04-30) | P6 | Floor 60d em `lucro_reais_por_mes`/`roi_anualizado` + threshold ROI 1000→500% |
+| (X 2026-04-30) | P7 | Audit filtra `fim_em is None` pra espelhar o exporter |
+| (X 2026-04-30) | P5 | CROSS_CHECKS no audit (preco_giro/FIPE>1.10, preco_alvo>preco_max) |

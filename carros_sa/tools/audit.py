@@ -87,9 +87,15 @@ CHECKS: Dict[str, Validator] = {
         if isinstance(v, (int, float)) and v <= 0
         else None
     ),
+    # Threshold de 500% calibrado contra benchmark real do operador (Reinaldo:
+    # 21 carros, ~60-75% anual; Polo Track: 21% em 7m). ROI > 500% num negócio
+    # de leilão de carros é matematicamente possível mas operacionalmente irreal
+    # — quando aparece, geralmente significa `dias_giro_estimado` otimista
+    # (default 25d HATCH NOVO sem calibração via Arrematado), score_roi
+    # inflado por margem×fator alto, ou floor não aplicado. Sinaliza como suspeito.
     "ROI anualizado (%)": lambda v, r: (
-        "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d) ou score_roi inflado"
-        if isinstance(v, (int, float)) and v > 1000
+        "ROI anualizado >500% — provável dias_giro otimista ou margem×fator inflado (benchmark operacional ~60-75%/ano)"
+        if isinstance(v, (int, float)) and v > 500
         else (
             "ROI anualizado negativo — score_roi negativo (custos > preco_giro) deveria ter sido descartado"
             if isinstance(v, (int, float)) and v < 0
@@ -142,9 +148,11 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
 def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
     """Últimas N avaliações com JOIN Lote + LEFT JOIN LaudoCache, ordenadas e ranqueadas.
 
-    Espelha `SheetsExporter._query` — encerrados são filtrados, ativos viáveis
+    Espelha `SheetsExporter._query` — lotes sem `fim_em` (sumiram do leilão) e
+    encerrados (timer vencido / badge ARREMATADO) são filtrados; ativos viáveis
     vêm primeiro, desempate por folga de lance. Rank auditado coincide com o
-    que o operador vê na planilha.
+    que o operador vê na planilha. Sem essa paridade, audit reportava violações
+    em lotes invisíveis na UI — alarme falso que confunde o operador.
     """
     avaliacoes = session.exec(
         select(AvaliacaoLote).order_by(AvaliacaoLote.criado_em.desc()).limit(sample_size)
@@ -155,6 +163,10 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
     for av in avaliacoes:
         lote = session.get(Lote, av.lote_id)
         if lote is None:
+            continue
+        # Paridade com SheetsExporter._query: lote sem fim_em é sumido do leilão
+        # ativo do AA — não entra na planilha, então auditá-lo só gera ruído.
+        if lote.fim_em is None:
             continue
         laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)
 
@@ -208,6 +220,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "km": lote.km,
             "lance_atual": lote.lance_atual or 0,
             "preco_max": av.preco_max,
+            "preco_alvo": av.preco_alvo,
             "fipe": av.fipe,
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
@@ -242,6 +255,60 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
     return rows
 
 
+# Invariantes que CRUZAM colunas — não cabem em CHECKS porque não pertencem
+# a uma coluna individual. Rodam independente de COLUMN_EXTRACTORS / HEADER,
+# então não quebram a paridade test. Validator devolve `(label, motivo, valor_exemplo)`
+# ou None quando ok. Label não precisa estar em HEADER (vira chave de agregação).
+CrossValidator = Callable[[Dict[str, Any]], Optional[Tuple[str, str, Any]]]
+
+
+def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+    """preco_giro > FIPE × 1.10 sinaliza f_km saturando ou mediana inflada.
+
+    Por construção, preco_giro = webmotors_mediana × f_km. webmotors_mediana
+    pode ser FIPE × 0.97 (fallback) ou similares Auto Avaliar. f_km tem cap
+    1.15 (lote com km muito baixa). No pior caso teórico: 0.97 × 1.15 =
+    1.1155 — chega na borda mas não passa muito. Quando passa, geralmente
+    a mediana já vem inflada (similares premium dominando) ou f_km está
+    saturado num caso onde o lote real não é tão raro.
+    """
+    pg = row.get("preco_giro")
+    fipe = row.get("fipe")
+    if pg and fipe and pg > fipe * 1.10:
+        ratio_pct = round((pg / fipe) * 100, 1)
+        return (
+            "Preço-Giro vs FIPE",
+            f"preco_giro {ratio_pct}% da FIPE — f_km saturando ou mediana inflada (esperado <110%)",
+            pg,
+        )
+    return None
+
+
+def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+    """preco_alvo > preco_max viola a invariante do precificador.
+
+    Por construção, margem_aplicada >= margem_minima_absoluta, então o
+    desconto sobre preco_giro pra calcular preco_alvo é ≥ que pra preco_max.
+    preco_alvo > preco_max indicaria bug no precificador (ex.: regressão
+    em margem.minima_absoluta) ou registro corrompido.
+    """
+    av_alvo = row.get("preco_alvo")
+    av_max = row.get("preco_max")
+    if av_alvo is not None and av_max is not None and av_alvo > av_max:
+        return (
+            "Preço-Alvo vs Máximo",
+            "preco_alvo > preco_max — bug no precificador (margem mínima maior que margem aplicada?)",
+            av_alvo,
+        )
+    return None
+
+
+CROSS_CHECKS: List[CrossValidator] = [
+    _check_preco_giro_acima_fipe,
+    _check_preco_alvo_gt_preco_max,
+]
+
+
 def audit(engine, sample_size: int = 20) -> List[str]:
     """Retorna lista de violações. Vazia = tudo ok.
 
@@ -269,6 +336,22 @@ def audit(engine, sample_size: int = 20) -> List[str]:
             if motivo is None:
                 continue
             chave = (coluna, motivo)
+            if chave not in agregador:
+                agregador[chave] = {
+                    "count": 1,
+                    "exemplo_lote": row["lote_id"],
+                    "exemplo_valor": valor,
+                }
+            else:
+                agregador[chave]["count"] += 1
+
+        # Invariantes que cruzam colunas — não respeitam o loop por HEADER.
+        for cross in CROSS_CHECKS:
+            resultado = cross(row)
+            if resultado is None:
+                continue
+            label, motivo, valor = resultado
+            chave = (label, motivo)
             if chave not in agregador:
                 agregador[chave] = {
                     "count": 1,

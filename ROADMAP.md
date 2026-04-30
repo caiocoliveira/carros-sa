@@ -4,7 +4,23 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 328/328 testes passando
+✅ **Fundação + EstimadorReforma** — 369/369 testes passando
+
+### X — Segunda revisão de coerência da planilha (2026-04-30) ✅
+- **Branch:** `claude/sleepy-wright-8SK3X`
+- **Motivação:** Usuário pediu re-revisão das relações entre colunas. A revisão W (2026-04-29) corrigiu ROI tautológico e lucro absoluto subestimado. Esta passada simulou 5 lotes (Polo Track real + Fiesta estrutural + Compass 2019 + Onix sintético com km ultra-baixa pra forçar `f_km` no teto + Voyage sem `webmotors_km_mediana`) e expôs três problemas adicionais.
+- **Bugs encontrados e corrigidos:**
+  1. **Audit não espelhava o exporter.** `_build_rows` em [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) auditava todas as `AvaliacaoLote` recentes, incluindo lotes com `lote.fim_em is None` — que `SheetsExporter._query` filtra (sumiu do leilão ativo). Resultado: alarmes que o operador não conseguia confirmar abrindo a UI. Fix: filtro idêntico ao exporter (`if lote.fim_em is None: continue`). 3 testes novos em `TestAuditParidadeSheets` (sem fim_em ignorado, encerrado por timer ignorado, ativo continua auditado).
+  2. **Floor de 30d em `lucro_reais_por_mes`/`roi_anualizado` mascarava otimismo.** [`carros_sa/agents/calibracao_giro.py`](carros_sa/agents/calibracao_giro.py): `_DIAS_GIRO_DEFAULT_POR_FAIXA[HATCH][NOVO]=25d`, e `lucro_reais_por_mes` usava floor 30d → `lucro_mes = lucro_abs × 30/30 = lucro_abs`. Operador via "Lucro/mês = Lucro total" (Onix simulado: R$ 24.652 lucro_abs ≡ R$ 24.652 lucro_mes — só recebe esse valor uma vez, não todo mês). Real operacional Reinaldo (21 carros) = média 92d. Fix: floor `_FLOOR_DIAS_GIRO_DISPLAY=60` em ambas as funções. ROI anualizado caiu de 500-600% para 250-410% nos lotes simulados — ainda otimista (benchmark real ~60-75%/ano) mas a magnitude já não esconde o problema. 5 testes ajustados + 1 novo em `test_roi_anualizado_floor_60_dias`.
+  3. **Saturação de `f_km` produz `preco_giro > FIPE × 1.10` sem alerta.** Onix sintético (km=5k, mediana mercado=60k) → `f_km=1.15` (teto) × `webmotors_mediana=fipe×1.0` = `preco_giro=115% FIPE`. Audit só alertava `preco_max > FIPE × 1.05`, deixando passar a anomalia upstream. Fix: novo `CROSS_CHECKS` em [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) com 2 invariantes que cruzam colunas (não cabem em `CHECKS` por coluna): `preco_giro > FIPE × 1.10` e `preco_alvo > preco_max` (sanity). 3 testes novos em `TestAuditInvariantesCruzadas`.
+- **Threshold de ROI absurdo apertado:** `audit.py` flag de >1000% → >500%. Calibração: operação real Reinaldo (21 carros, R$ 161k lucro / R$ 1,08M invest = 14,9% absoluto / 3 meses) = ~60-75% ao ano linear. ROI anualizado >500% num negócio de leilão é matematicamente possível mas operacionalmente irreal — quase sempre indica `dias_giro` otimista colidindo com fator_risco/liquidez perto do teto. Mensagem mudou pra apontar a causa raiz provável.
+- **Glossário atualizado:** `Lucro/mês` e `ROI anualizado` em [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) refletem floor 60d + alerta de >500%.
+- **Cobertura:** 7 testes novos (`test_roi_300_pct_nao_reportado`, `TestAuditParidadeSheets×3`, `TestAuditInvariantesCruzadas×3`); 5 testes existentes ajustados (`test_roi_absurdo_reportado` migrou de threshold 1000→500, `test_roi_anualizado_*` migraram pro floor 60d, `_avaliacao` fixture do audit ajustada pra `preco_giro=87.5% FIPE`). Suite total: **369 verde** (era 362 antes desta sessão; +7 novos).
+- **Aprendizado fixado em LESSONS.md:** o número certo varia, mas sua MAGNITUDE absoluta deveria estar dentro do benchmark operacional. Quando uma coluna mostra valores 5-8× o benchmark, o ranking pode estar correto mas o número está enganando o leitor — vira ferramenta-ruim mesmo quando funciona como ranqueador.
+- **Limitações conhecidas:**
+  - Score_roi continua com componente tautológico (≈ margem_aplicada/(1-margem_aplicada)) — varia por fator_risco e fator_liquidez (não é constante por empresa como `roi_max` era), mas o número absoluto sem dimensão é difícil de interpretar. Não toquei nisso porque a fix anterior W já considerou e aceitar esse trade-off; revisitar quando tivermos calibração via Arrematado real.
+  - Floor 60d em `roi_anualizado` reduz a magnitude mas não corrige a causa raiz (`_DIAS_GIRO_DEFAULT_POR_FAIXA` otimista — HATCH NOVO=25d). A solução de raiz é elevar os priors após calibração com Arrematado real (workstream H destravado).
+  - Audit cross-check `preco_giro > FIPE × 1.10` cobre saturação visível, mas não captura o caso "FIPE errada de catálogo" (ex.: Tiggo 2.0 2015 com R$ 114k em vez de R$ 41k antes da fix v2).
 
 ### W — Revisão econômica das colunas da planilha (2026-04-29) ✅
 - **Branch:** `claude/sleepy-wright-kSiCR`

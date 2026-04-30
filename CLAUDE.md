@@ -140,3 +140,13 @@ Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_colum
 
 ### Workflow de revisão autônoma
 Quando o usuário pedir "revise e corrija" sem direcionar, o caminho que funcionou foi: (1) ler ROADMAP + precificador + sheets + tests existentes, (2) ESCREVER UM SCRIPT DE SIMULAÇÃO (`/tmp/sim.py`) com lote real conhecido (Polo Track 2024 do YAML) e validar identidades algébricas comparando docstring vs implementação, (3) só depois confirmar bugs e refatorar. Pular a simulação leva a "fixes" baseados em leitura — frequentemente errados.
+
+**Regra adicional (2026-04-30):** a simulação deve cobrir ≥3 cenários DIVERSOS, não só Polo Track. Adicionar um lote "extremo" (km ultra-baixa pra forçar `f_km` no teto) + um "fallback" (sem `webmotors_km_mediana`) + um "estrutural" (Fiesta) revela bugs invisíveis no caminho feliz. Foi assim que apareceu `preco_giro > FIPE × 1.15` no Onix sintético da revisão X.
+
+### Benchmark operacional vs limite matemático
+Toda invariante numérica do audit precisa de threshold calibrado contra **benchmark operacional**, não contra o limite teórico do cálculo. Exemplo (workstream X, 2026-04-30): ROI > 1000% é matematicamente possível, mas o operador real (Reinaldo, 21 carros / 3 meses médios) rende ~60-75% ao ano. Threshold de 1000% deixava passar lotes mostrando "526% ROI" — número correto pelo cálculo, irreal pelo negócio. Apertei pra 500% e mensagem explícita aponta a causa raiz provável (dias_giro otimista ou margem×fator inflado).
+
+Antes de fechar workstream que toca métrica derivada, anotar no código (comentário no audit.py por exemplo) o benchmark operacional usado pra calibrar o threshold. Se o número não está documentado, não está calibrado.
+
+### Audit deve espelhar o exporter
+Regra de ouro (workstream X, 2026-04-30): se `SheetsExporter._query` filtra alguma coisa, `audit._build_rows` filtra o MESMO predicado. Sem isso o audit reporta lote que o operador não consegue confirmar abrindo a UI — ruído puro. Teste de paridade obrigatório (ver `TestAuditParidadeSheets` em `tests/test_audit_columns.py`).

@@ -1,7 +1,7 @@
 # Carros SA — atalhos pra comandos comuns
 # Uso: `make <target>` (ex: `make test`)
 
-.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit limpar-decoys auditar-laudos
+.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit limpar-decoys auditar-laudos ciclo-laudos
 
 PY := PYTHONPATH=. .venv/bin/python
 
@@ -21,6 +21,7 @@ help:
 	@echo "  make setup-cron                    # ativa cron diário (7h e 13h)"
 	@echo "  make limpar-decoys                 # remove URLs-decoy de laudo do DB + força retry"
 	@echo "  make auditar-laudos [EMPRESA=<id>] # checa lotes ativos com laudo incompleto (PDF/cache/URL)"
+	@echo "  make ciclo-laudos [EMPRESA=<id>]   # reconciliação manual: limpar-decoys + retry×3 + auditar-laudos --strict"
 	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
 	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
 
@@ -59,6 +60,15 @@ limpar-decoys:
 
 auditar-laudos:
 	$(PY) scripts/auditar_laudos.py --empresa $(or $(EMPRESA),carros_uberlandia)
+
+# Reconciliação manual entre passes do cron — replica a sequência (2)→(4) do
+# setup_cron.sh sem re-rodar a triagem completa de listagem. Útil quando o
+# operador quer destravar lotes pendentes agora, sem esperar a próxima janela
+# de 7h/13h. Sai com código 1 quando ainda há incompletos no fim.
+ciclo-laudos:
+	@$(PY) scripts/limpar_decoys_laudo.py
+	$(PY) scripts/reprocessar_lotes_do_db.py --empresa $(or $(EMPRESA),carros_uberlandia) --somente-ativos --somente-laudo-pendente --max-tentativas 3
+	$(PY) scripts/auditar_laudos.py --empresa $(or $(EMPRESA),carros_uberlandia) --strict
 
 sheets:
 ifndef EMPRESA

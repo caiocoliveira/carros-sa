@@ -488,7 +488,27 @@ Já registrado:
 - **Cobertura:** 16 testes em `tests/test_laudo_audit.py`. Suite total: **342 passed, 2 skipped** (skip do guard de DB e do orquestrador-async sem playwright).
 - **Limitações conhecidas:**
   - URLs pré-assinadas do Google Storage expiram em ~1h. O estado "PDF salvo (link expirado)" é o melhor que dá pra fazer sem hospedar o PDF em outro lugar. Pra ter link permanente, o próximo passo é subir os PDFs no Google Drive (via service account já configurada) e armazenar `drive_file_id` no `LaudoCache` — mudança maior, fora deste workstream.
-  - `auditar_laudos.py` não integra com o cron ainda — operador precisa rodar manualmente. Adicionar ao `setup_cron.sh` quando o estado típico for ≥99% completo (hoje, com URLs expiradas frequentes, ia spammar log).
+  - ~~`auditar_laudos.py` não integra com o cron ainda~~ — resolvido em **W**.
+
+### W — Fechando o laço: retry loop + audit gate no cron ✅
+- **Branch:** `claude/great-turing-IIGh8`
+- **Motivação:** `make auditar-laudos` (workstream U) identificava lotes ativos sem laudo completo, mas era manual. O cron diário fazia `triagem → limpar_decoys → retry` em 1 passada só — quando falhava transientemente (modal lazy AA, Gemini 503, 429 no download), o lote ficava com `confidence=0.5` na planilha como "⚠ LAUDO NÃO CAPTURADO" até a próxima janela de 6h. Sem audit no fim do cron, ninguém percebia que sobrava 12-30 lotes presos por ciclo. Pedido do usuário: "garantir que todo carro na lista tem laudo baixado, revisado e link na planilha; se não, identificar razão e resolver pra nunca mais acontecer".
+- **Arquivos:**
+  - [`carros_sa/tools/laudo_reconciliacao.py`](carros_sa/tools/laudo_reconciliacao.py) — NOVO. `selecionar_pendentes(session, empresa_id, somente_*, max_lotes)` extraído do `scripts/reprocessar_lotes_do_db.py`. Centraliza o critério de "lote precisa de retry" (ATIVO + confidence<0.6 OU sem LaudoCache) e fica testável sem Playwright.
+  - [`scripts/reprocessar_lotes_do_db.py`](scripts/reprocessar_lotes_do_db.py) — novo flag `--max-tentativas N` (default 1, retrocompat). Loop externo re-consulta os pendentes a cada iteração via `selecionar_pendentes` e encerra cedo quando o set zera. Playwright session warm entre iterações — sem custo de re-login.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — pipeline diário agora é `triagem → limpar_decoys → retry --max-tentativas 3 → auditar_laudos --strict`. O 4º passo é o **gate observável**: `--strict` exit 1 no log se sobrar incompleto. `;` chained (não `&&`), então a falha NÃO derruba o pipeline — só vira sinal claro pro operador.
+  - [`Makefile`](Makefile) — novo alvo `make ciclo-laudos` replica os passos 2-4 do cron pra reconciliação manual entre janelas (operador destrava lotes na hora sem esperar 7h/13h).
+  - [`tests/test_laudo_reconciliacao.py`](tests/test_laudo_reconciliacao.py) — 9 testes cobrindo cada filtro isolado, combinações (uso de produção: ativo+pendente), respeito a `empresa_id`, limite `max_lotes`. **Teste central** `test_loop_de_retry_shrinka_ate_zero` simula o ciclo do `--max-tentativas`: lote pendente na 1ª iteração, após confidence subir pra 0.9 a 2ª chamada retorna lista vazia → loop encerra cedo sem reprocessar redundante.
+- **Como funciona o ciclo completo:**
+  1. **Triagem** (07h/13h) coleta listagem + roda pipeline em lotes novos + exporta planilha.
+  2. **`limpar_decoys`** zera URLs envenenadas em `raw_json.detalhe.laudo_pdf_url` e derruba `LaudoCache` stale (cache forte ≥0.6 é preservado mesmo com URL fora da allowlist).
+  3. **Retry com loop de 3 tentativas** ataca pendentes (confidence<0.6) com Playwright session warm. A cada iteração re-consulta o DB — lotes que tiveram sucesso somem da lista naturalmente.
+  4. **Audit `--strict`** roda no final. Se sobrar lote ATIVO sem todas as 3 condições (PDF + cache forte + URL), exit 1 com tabela de motivos no log + path de remediação printado. Operador (ou próxima sessão Claude) vê o alarme imediatamente.
+- **Cobertura:** 9 testes novos. Suite total: **381 passed, 2 skipped**.
+- **Limitações conhecidas:**
+  - 3 tentativas é teto razoável pra falhas transientes (rate limit + modal lazy normalmente cedem em ≤2 retries). Lote que persistir como pendente após 3 passes **provavelmente** não tem laudo no AA mesmo (raro: SHOWROOM, kuruma sem laudo anexado, link permanentemente quebrado). Audit `--strict` faz isso visível pra distinguir bug de pipeline vs realidade do fornecedor.
+  - O loop re-roda Playwright pipeline completo por lote a cada iteração — se 30 lotes ainda estão pendentes na 3ª passada, são ~30 × ~10s = 5min extra no cron. Aceitável (cron não tem deadline rígido) mas se virar gargalo, próximo passo seria backoff condicional (só retentar se erro foi transiente, não 404).
+  - Ainda não distingue "lote sem laudo no AA" de "extração falhou". Audit reporta os dois como `cache_confianca_baixa` — uma extensão futura analisaria `body_text` pra detectar `"Sem Laudo"` ou `"Não Possui Laudo"` e classificar como genuinamente sem laudo (não-actionable) vs falha (actionable).
 
 ---
 

@@ -22,7 +22,6 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from sqlmodel import Session, select
 
 load_dotenv()
 console = Console()
@@ -51,10 +50,21 @@ def main(
             "diária e tentar destravar lotes em que o scraper não achou o PDF."
         ),
     ),
+    max_tentativas: int = typer.Option(
+        1, "--max-tentativas",
+        help=(
+            "Número máximo de iterações do loop de reconciliação. Cada iteração "
+            "re-consulta os pendentes (`somente_laudo_pendente` shrinka conforme "
+            "lotes ganham confidence>=0.6) e tenta destravar de novo. Com "
+            "fornecedor instável (modal lazy AA, Gemini 503 transitivo, 429) "
+            "uma 2ª/3ª passada captura o que a 1ª perdeu, sem custo de re-login. "
+            "Loop encerra cedo quando não há mais pendentes."
+        ),
+    ),
 ) -> None:
     """Reprocessa lotes já ingeridos sem re-scraping da listagem."""
     asyncio.run(_run(empresa, max_lotes, headless, sem_sheets, somente_sem_avaliacao,
-                     somente_ativos, somente_laudo_pendente))
+                     somente_ativos, somente_laudo_pendente, max_tentativas))
 
 
 async def _run(
@@ -65,17 +75,16 @@ async def _run(
     somente_sem_avaliacao: bool = False,
     somente_ativos: bool = False,
     somente_laudo_pendente: bool = False,
+    max_tentativas: int = 1,
 ) -> None:
     from playwright.async_api import async_playwright
 
-    from datetime import datetime
-
     from carros_sa.agents.vision_clients import build_default_client
     from carros_sa.db import get_session, init_db
-    from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
     from carros_sa.orquestrador import _pipeline_lote
     from carros_sa.scraping.scraper_autoavaliar import garantir_autenticado
     from carros_sa.tenancy import carregar_empresa
+    from carros_sa.tools.laudo_reconciliacao import selecionar_pendentes
 
     email = os.environ.get("AUTOAVALIAR_EMAIL")
     password = os.environ.get("AUTOAVALIAR_PASSWORD")
@@ -104,64 +113,51 @@ async def _run(
         console.print("[green]✓ Sessão ativa[/green]")
 
         with get_session() as session:
-            query = select(Lote)
-            lotes = session.exec(query).all()
-            if somente_sem_avaliacao:
-                ja = {
-                    r.lote_id for r in session.exec(
-                        select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa.empresa_id)
-                    ).all()
-                }
-                lotes = [l for l in lotes if l.id not in ja]
-                console.print(f"[cyan]Filtro ativo: só lotes sem avaliação → {len(lotes)} candidatos[/cyan]")
-            if somente_ativos:
-                agora = datetime.now()
-                lotes = [l for l in lotes if l.fim_em is not None and l.fim_em > agora]
-                console.print(f"[cyan]Filtro ativo: só leilões abertos → {len(lotes)} candidatos[/cyan]")
-            if somente_laudo_pendente:
-                # Carrega só (lote_id, confidence) — IMPORTANTE: tupla, não entity.
-                # Se selecionarmos LaudoCache inteiro, os objetos vão pra identity
-                # map; depois `session.commit()` no meio de `_pipeline_lote` expira
-                # eles, e `session.get(LaudoCache, lote_id)` no `_upsert_laudo_cache`
-                # retorna None pra rows expirados → tenta INSERT → UNIQUE viola.
-                # (sintoma observado 2026-04-18 após processar ~105/139 lotes).
-                laudos = {
-                    row[0]: row[1]
-                    for row in session.exec(
-                        select(LaudoCache.lote_id, LaudoCache.confidence)
-                    ).all()
-                }
-                lotes = [
-                    l for l in lotes
-                    if laudos.get(l.id) is None or (laudos.get(l.id) or 0) < 0.6
-                ]
-                console.print(
-                    f"[cyan]Filtro ativo: só laudo pendente (ausente ou confidence<0.6) "
-                    f"→ {len(lotes)} candidatos[/cyan]"
+            for tentativa in range(1, max_tentativas + 1):
+                lotes = selecionar_pendentes(
+                    session,
+                    empresa_id=empresa.empresa_id,
+                    somente_sem_avaliacao=somente_sem_avaliacao,
+                    somente_ativos=somente_ativos,
+                    somente_laudo_pendente=somente_laudo_pendente,
+                    max_lotes=max_lotes,
                 )
-            if max_lotes:
-                lotes = lotes[:max_lotes]
-            console.print(f"[cyan]Reprocessando {len(lotes)} lotes…[/cyan]\n")
 
-            with Progress(
-                SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-                TextColumn("{task.completed}/{task.total}"), TimeElapsedColumn(),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Reprocessando", total=len(lotes))
-                for lote in lotes:
-                    try:
-                        res = await _pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir)
-                        if res.erro:
+                if not lotes:
+                    if tentativa > 1:
+                        console.print(
+                            f"[green]Iteração {tentativa}: sem pendentes → encerrando "
+                            f"loop antes de max_tentativas={max_tentativas}[/green]"
+                        )
+                    break
+
+                if max_tentativas > 1:
+                    console.print(
+                        f"\n[bold cyan]Iteração {tentativa}/{max_tentativas} — "
+                        f"{len(lotes)} candidatos[/bold cyan]"
+                    )
+                else:
+                    console.print(f"[cyan]Reprocessando {len(lotes)} lotes…[/cyan]\n")
+
+                with Progress(
+                    SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+                    TextColumn("{task.completed}/{task.total}"), TimeElapsedColumn(),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task("Reprocessando", total=len(lotes))
+                    for lote in lotes:
+                        try:
+                            res = await _pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir)
+                            if res.erro:
+                                n_erro += 1
+                            elif res.motivo_descarte:
+                                n_descartado += 1
+                            else:
+                                n_ok += 1
+                        except Exception as exc:
+                            console.print(f"  [red]exceção em {lote.id}: {exc}[/red]")
                             n_erro += 1
-                        elif res.motivo_descarte:
-                            n_descartado += 1
-                        else:
-                            n_ok += 1
-                    except Exception as exc:
-                        console.print(f"  [red]exceção em {lote.id}: {exc}[/red]")
-                        n_erro += 1
-                    progress.advance(task)
+                        progress.advance(task)
 
         await browser.close()
 

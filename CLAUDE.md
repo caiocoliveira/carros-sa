@@ -140,3 +140,14 @@ Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_colum
 
 ### Workflow de revisão autônoma
 Quando o usuário pedir "revise e corrija" sem direcionar, o caminho que funcionou foi: (1) ler ROADMAP + precificador + sheets + tests existentes, (2) ESCREVER UM SCRIPT DE SIMULAÇÃO (`/tmp/sim.py`) com lote real conhecido (Polo Track 2024 do YAML) e validar identidades algébricas comparando docstring vs implementação, (3) só depois confirmar bugs e refatorar. Pular a simulação leva a "fixes" baseados em leitura — frequentemente errados.
+
+### Fórmula vs domínio de validade — toda coluna visível tem dois testes
+Aprendizado W2 (2026-05-01): identidades algébricas batendo NÃO bastam. Polo Track tinha ROI 507%/ano na planilha porque `dias_giro` prior era 25d (otimista) — fórmula correta, prior errado. E lotes "✗ Caro demais" mostravam ROI fictício porque a fórmula `score_roi × 365 / dias` pressupõe "comprar pelo alvo", mas o alvo pode estar zerado pra lote inviável.
+
+Regra: ao tocar coluna derivada da planilha (precificador → sheets), perguntar:
+1. **A fórmula está correta?** (identidades fechadas, gold tests passam) — necessário, não suficiente.
+2. **O domínio de validade da fórmula é respeitado pela exibição?** Se a fórmula assume "lote viável", lote inviável precisa exibir `—` ou ser filtrado. Se a fórmula assume "calibração suficiente", fallback precisa ter prior conservador (não chute otimista).
+3. **Quando a divergência contra realidade for ordem de magnitude (>3x), é prior errado, não cálculo errado.** Comparar contra histórico real (`data/historico/uberlandia_arrematado.csv`).
+
+### Priors de `dias_giro` — calibração contra histórico real
+`_DIAS_GIRO_DEFAULT_POR_FAIXA` em `carros_sa/agents/avaliador_mercado.py` foi recalibrado em 2026-05-01 contra 94 vendas reais. **Não baixar nenhum prior abaixo de ~70% da média histórica daquela categoria** — o teste `test_priors_dias_giro_alinhados_com_historico_real` é guard-rail. Mexer aí exige (a) refazer calibração contra histórico atualizado, (b) atualizar testes que pinam dias_giro derivado de prior (ex.: `test_avaliador_fiesta_*`).

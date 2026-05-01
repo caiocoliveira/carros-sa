@@ -95,9 +95,10 @@ def test_avaliador_fiesta_com_similares_reais(fipe_responses, in_memory_session)
     # p25 (n=6): índice 0.25*5=1.25 entre 25k-ish
     assert 23200 <= sinal.webmotors_p25 <= 29500
     assert sinal.n_anuncios_competidores == 6
-    # Fiesta 2013 (idade 13) → hatch VELHO → prior 100d
-    # n>=6 → ajuste de liquidez: -5 = 95
-    assert sinal.dias_giro_estimado == 95
+    # Fiesta 2013 (idade 13) → hatch VELHO → prior 150d (calibrado contra histórico
+    # real 2026-05; média hatch geral = 127d, velho com cap conservador).
+    # n>=6 → ajuste de liquidez: -5 = 145
+    assert sinal.dias_giro_estimado == 145
 
     # 4 chamadas HTTP "esperadas": marcas, modelos, anos, valor
     assert len(fake.calls) == 4
@@ -188,6 +189,44 @@ def test_fallback_sem_similares(fipe_responses, in_memory_session):
     assert sinal.webmotors_mediana == round(30876 * 0.97)
     assert sinal.webmotors_p25 == round(30876 * 0.88)
     assert sinal.n_anuncios_competidores == 0
-    # Fiesta 2013 → hatch VELHO → prior 100d.
+    # Fiesta 2013 → hatch VELHO → prior 150d (recalibrado 2026-05).
     # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → prior puro.
-    assert sinal.dias_giro_estimado == 100
+    assert sinal.dias_giro_estimado == 150
+
+
+def test_priors_dias_giro_alinhados_com_historico_real():
+    """Guard-rail dos priors recalibrados em 2026-05-01.
+
+    Os priors anteriores (`hatch_novo=25d`, `sedan_novo=30d`, etc.) eram
+    OTIMISTAS DEMAIS — o histórico de 94 vendas reais (data/historico/
+    uberlandia_arrematado.csv) tem média 127d hatch / 98d sedan / 79d SUV /
+    64d picape. A consequência era ROI anualizado >500% e Lucro/mês >R$20k em
+    lotes Polo Track novos no fallback (real foi 227d → ROI bem mais modesto).
+
+    Esses asserts protegem contra regressão acidental pra cenário "não há
+    Arrematado pra calibrar — então uso prior baixo". Se decidirmos baixar
+    qualquer prior abaixo deste piso, o fix precisa vir com nova calibração
+    de histórico real (não pode ser mudança intuitiva).
+    """
+    from carros_sa.agents.avaliador_mercado import _DIAS_GIRO_DEFAULT_POR_FAIXA
+
+    # Pisos baseados em ~70% da média histórica por categoria
+    pisos_por_categoria = {
+        CategoriaVeiculo.HATCH: 80,
+        CategoriaVeiculo.SEDAN: 60,
+        CategoriaVeiculo.SUV: 50,
+        CategoriaVeiculo.PICAPE: 40,
+    }
+    for cat, piso in pisos_por_categoria.items():
+        for faixa in ("novo", "medio", "velho"):
+            valor = _DIAS_GIRO_DEFAULT_POR_FAIXA[cat][faixa]
+            assert valor >= piso, (
+                f"Prior {cat.value}/{faixa}={valor}d ficou abaixo do piso {piso}d. "
+                "Recalibrar em data/historico/ antes de baixar."
+            )
+
+    # Estrutura: novo < medio < velho dentro de cada categoria
+    for cat, faixas in _DIAS_GIRO_DEFAULT_POR_FAIXA.items():
+        assert faixas["novo"] <= faixas["medio"] <= faixas["velho"], (
+            f"Categoria {cat.value} quebrou ordem novo<=medio<=velho: {faixas}"
+        )

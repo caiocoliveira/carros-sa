@@ -360,8 +360,20 @@ class SheetsExporter:
                 tese_cell = "—"
             else:
                 preco_max_cell = r["preco_max"]
-                lucro_mes_cell = r["lucro_mes"]
-                roi_anual_cell = r["roi_anualizado"]
+                # Lucro/mês e ROI anualizado pressupõem que a empresa COMPRA o
+                # lote pelo preço-alvo. Se o lote é inviável (lance atual já
+                # passou do teto), o cálculo é fictício — capital_alvo e
+                # lucro_absoluto são derivados de preco_alvo que pode estar até
+                # zerado por margem aplicada alta. Mostrar números nesse caso
+                # induz operador a achar que "✗ Caro demais" tem ROI tangível.
+                # Lance Máximo e Reforma seguem visíveis (são fato/limite, não
+                # projeção condicional), Tese segue (não depende de comprar).
+                if not r["viavel"]:
+                    lucro_mes_cell = "—"
+                    roi_anual_cell = "—"
+                else:
+                    lucro_mes_cell = r["lucro_mes"]
+                    roi_anual_cell = r["roi_anualizado"]
                 reforma_cell = r["reforma_estimada"]
                 tese_cell = r["tese"]
 
@@ -594,13 +606,13 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo). Lotes ✗ Caro demais e ⚠ Laudo Não Capturado mostram '—' (cálculo pressupõe compra pelo preço-alvo; se inviável, número é fictício).",
                 "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
+                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote. Lotes ✗ Caro demais ou ⚠ Laudo Não Capturado mostram '—' (mesmo motivo do Lucro/mês).",
                 "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa).",
             ],
             [

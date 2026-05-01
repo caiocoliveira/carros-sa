@@ -21,21 +21,28 @@ from sqlmodel import Session, select
 from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, SinalMercado
 from carros_sa.tools.fipe import FipeClient
 
-# Heurística inicial de giro por (categoria, faixa_idade). Calibrada com
-# histórico do operador (2026-04): carros novos popularizam mais rápido;
-# carros velhos de nicho demoram muito. Valores aproximados — sobrescritos
-# por dados reais quando Arrematado tem ≥3 amostras pra (categoria, faixa).
+# Prior por (categoria, faixa_idade). Recalibrado 2026-05-01 contra o histórico
+# real (94 vendas em data/historico/uberlandia_arrematado.csv). Médias agregadas
+# por categoria observadas: hatch 127d, sedan 98d, suv 79d, picape 64d. Os
+# priors anteriores (hatch_velho=100d, hatch_novo=25d, etc.) eram OTIMISTAS
+# DEMAIS — vazavam pro Polo Track 2024 receber dias_giro=25d (real foi 227d),
+# o que inflava ROI anualizado a >500% e Lucro/mês a fantasia ~R$20k/mês.
+#
+# Estes priors valem APENAS quando a empresa não tem ≥3 amostras na (categoria,
+# faixa) — Arrematado calibrado sobrescreve via `calibrar_dias_giro`. Mantida a
+# estrutura novo<medio<velho (carro novo gira mais rápido), mas ancorada na
+# média histórica:
+#
+#   HATCH/SEDAN/SUV/PICAPE: medio ≈ média histórica; novo ≈ medio×0.7;
+#   velho ≈ medio×1.2 (cap em ~150d pra não inflar absurdo).
+#   UTILITARIO/OUTRO: sem dado histórico — mantém ordem de magnitude conservadora.
 _DIAS_GIRO_DEFAULT_POR_FAIXA = {
-    # (categoria, faixa_idade) → dias prior
-    # NOVO (≤3 anos): 1a mão, garantia, pool grande
-    # MEDIO (4-7 anos): rodado mas moderno
-    # VELHO (8+ anos): pool restrito, manutenção cara
-    CategoriaVeiculo.HATCH:      {"novo": 25, "medio": 50, "velho": 100},
-    CategoriaVeiculo.SEDAN:      {"novo": 30, "medio": 55, "velho": 110},
-    CategoriaVeiculo.SUV:        {"novo": 35, "medio": 60, "velho": 95},
-    CategoriaVeiculo.PICAPE:     {"novo": 35, "medio": 50, "velho": 85},
-    CategoriaVeiculo.UTILITARIO: {"novo": 45, "medio": 65, "velho": 120},
-    CategoriaVeiculo.OUTRO:      {"novo": 40, "medio": 60, "velho": 100},
+    CategoriaVeiculo.HATCH:      {"novo": 90, "medio": 125, "velho": 150},
+    CategoriaVeiculo.SEDAN:      {"novo": 70, "medio": 95,  "velho": 115},
+    CategoriaVeiculo.SUV:        {"novo": 55, "medio": 80,  "velho": 100},
+    CategoriaVeiculo.PICAPE:     {"novo": 45, "medio": 65,  "velho": 80},
+    CategoriaVeiculo.UTILITARIO: {"novo": 60, "medio": 90,  "velho": 130},
+    CategoriaVeiculo.OUTRO:      {"novo": 60, "medio": 90,  "velho": 115},
 }
 
 # Compatibilidade: fallback pra quando não temos `ano` (legado).

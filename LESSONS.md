@@ -224,3 +224,31 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | `02ad964` | RC4 | Short-circuit respeita laudo pendente |
 | `a142bcd` | RC4 | `motor_ok` default True quando ausente |
 | `e57bb3a` | P5 | Auditoria automática de colunas (hook) |
+| W2-2026-05-01 | P2, RC1 | Priors `_DIAS_GIRO_DEFAULT_POR_FAIXA` otimistas + Lucro/mês fictício em lotes inviáveis |
+
+---
+
+## Adição 2026-05-01 — "número visível na planilha" exige domínio explícito
+
+Caso novo do W2: priors hardcoded de `dias_giro` (hatch novo=25d) eram
+chute baseado em "novos giram mais rápido" — não em dado. Histórico real
+diz hatch médio 127d. Resultado: Polo Track 2024 saía com ROI 507%/ano e
+Lucro/mês R$ 19.986 na planilha, 8x maior que a operação real. **Não era
+bug de cálculo** — todas as identidades fechavam. Era **prior errado vazando
+pro output visível**.
+
+Combinado com isso, lotes "✗ Caro demais" exibiam ROI/Lucro fictícios
+(score_roi inflado quando margem aplicada zerou preco_alvo). Operador
+podia ler "ROI 369% num lote inviável" e tomar decisão errada.
+
+**Padrão por trás:** quando uma coluna é vista pelo operador, ela precisa
+sobreviver a "que cenário a torna mentira?". Não basta a fórmula estar
+certa: o **domínio de validade** da fórmula precisa ser respeitado pela
+exibição. Se a fórmula assume "comprar pelo preço-alvo", lote inviável
+(que não vai ser comprado) tem que mostrar `—`, não o número.
+
+**Antídoto operacional:** toda coluna derivada da planilha é uma fórmula
++ um domínio. Audit checa o número; revisão semestral checa o domínio
+(roda simulação com lote real conhecido e compara contra resultado real
+da operação). Quando a divergência for ordem de magnitude, é prior errado,
+não cálculo errado.

@@ -706,6 +706,78 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
+    def test_lote_inviavel_esconde_lucro_mes_e_roi_anualizado(self):
+        """Lote ✗ Caro demais NÃO mostra Lucro/mês nem ROI anualizado.
+
+        Esses dois números pressupõem que a empresa COMPRA o lote pelo preço-alvo
+        (`lucro_absoluto = preco_giro × score_roi / (1 + score_roi)`). Para um
+        lote inviável (lance atual > preco_max), a compra é hipotética: o
+        score_roi pode estar inflado por margem alta empurrando preco_alvo a 0,
+        dando ROI de 300%+ totalmente fictício. Mostrar isso na planilha
+        induzia o operador a pensar que tinha retorno tangível em "Caro demais".
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # Lance atual MAIOR que preco_max → ✗ Caro demais
+            session.add(_lote("L001", lance_atual=35000))
+            session.add(_avaliacao("L001", preco_giro=40000, preco_max=30000, score_roi=0.5))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_lucro = HEADER.index("Lucro/mês (R$)")
+        idx_roi = HEADER.index("ROI anualizado (%)")
+        idx_lance_max = HEADER.index("Lance Máximo (R$)")
+        idx_reforma = HEADER.index("Reforma (R$)")
+        idx_situacao = HEADER.index("Situação")
+        # Lote inviável → Lucro/mês e ROI ficam "—"; Lance Máximo e Reforma
+        # ainda aparecem (são fato/limite, não projeção condicional).
+        assert "Caro demais" in rows[2][idx_situacao]
+        assert rows[2][idx_lucro] == "—"
+        assert rows[2][idx_roi] == "—"
+        assert rows[2][idx_lance_max] == 30000   # teto continua visível
+        assert rows[2][idx_reforma] == 3000      # reforma é fato
+
+    def test_lote_viavel_mantem_lucro_mes_e_roi_anualizado(self):
+        """Cobertura espelho — lote viável (analisado) não tem '—' nessas colunas."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20000))   # < preco_max=30k → viável
+            session.add(_avaliacao("L001", preco_giro=40000, preco_max=30000, score_roi=0.3))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_lucro = HEADER.index("Lucro/mês (R$)")
+        idx_roi = HEADER.index("ROI anualizado (%)")
+        # Numérico, não "—"
+        assert rows[2][idx_lucro] != "—"
+        assert rows[2][idx_roi] != "—"
+        assert isinstance(rows[2][idx_lucro], int)
+        assert isinstance(rows[2][idx_roi], (int, float))
+
     def test_exportar_roi_anualizado_baseado_em_score_roi(self):
         """ROI anualizado = score_roi × 365 / dias_giro.
 

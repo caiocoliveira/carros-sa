@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
-from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
+from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT, RelatorioLaudos, auditar
 from carros_sa.tools.tese import (
     calcular_tese,
     carregar_config_tese,
@@ -80,6 +80,26 @@ def _col_letter(idx_0based: int) -> str:
         idx = idx // 26 - 1
         if idx < 0:
             return letters
+
+
+def _resumo_audit(rel: RelatorioLaudos) -> str:
+    """Frase curta com X/Y completos + breakdown das pendências.
+
+    Usado no banner da linha 1 da planilha. Quando `rel.total == 0` (DB vazio
+    ou empresa sem avaliações ainda), retorna mensagem neutra pra não confundir
+    o operador com "0/0 (0% completos)".
+    """
+    if rel.total == 0:
+        return "Laudos: aguardando 1ª triagem"
+    pct = rel.completos / rel.total * 100
+    base = f"Laudos: {rel.completos}/{rel.total} ({pct:.0f}% completos)"
+    if not rel.incompletos:
+        return base
+    return (
+        f"{base}  |  Pendentes: {len(rel.incompletos)} "
+        f"(sem PDF: {rel.sem_pdf}, URL inválida: {rel.url_invalida}, "
+        f"cache baixo: {rel.cache_baixa_conf})"
+    )
 
 
 def _lucro_absoluto_no_alvo(av: AvaliacaoLote) -> int:
@@ -142,7 +162,13 @@ class SheetsExporter:
                 -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
             ),
         )
-        self._write_sheet(empresa_id, rows_sorted)
+        # Audit espelha as 3 condições ("PDF baixado, revisado, link válido") sobre
+        # o MESMO recorte de lotes que o exporter renderiza. Bake na linha 1 da
+        # planilha pro operador ver "X/Y completos | Z pendentes" sem abrir log nem
+        # rodar `make auditar-laudos`. `auditar_laudos.py` continua existindo pra
+        # detalhe lote-a-lote.
+        relatorio_audit = auditar(session, empresa_id)
+        self._write_sheet(empresa_id, rows_sorted, relatorio_audit)
         self._write_cidades_frete_sheet(empresa_id, session)
         self._write_glossario_sheet()
         return len(rows_sorted)
@@ -286,8 +312,13 @@ class SheetsExporter:
             })
         return rows
 
-    def _write_sheet(self, empresa_id: str, rows: List[dict]) -> None:
-        """Abre/cria aba, limpa, escreve timestamp global + header + rows."""
+    def _write_sheet(
+        self,
+        empresa_id: str,
+        rows: List[dict],
+        relatorio_audit: RelatorioLaudos,
+    ) -> None:
+        """Abre/cria aba, limpa, escreve timestamp + audit summary + header + rows."""
         gc = self._client()
         sh = gc.open_by_key(self._spreadsheet_id)
 
@@ -299,11 +330,13 @@ class SheetsExporter:
 
         ts = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        # Linha 1: banner global "Última atualização" — deixa óbvio o quão fresco
-        # está o snapshot. Preenche a primeira célula e mantém o resto vazio pra
-        # não poluir o layout; o freeze(rows=2) congela tanto o banner quanto o
-        # header de colunas.
-        banner = [f"Última atualização da planilha: {ts}"] + [""] * (len(HEADER) - 1)
+        # Linha 1: banner global com (a) última atualização e (b) resumo do audit
+        # de laudos das 3 condições. Sem o resumo, operador só via gap por linha
+        # (situação=⚠) e nunca tinha visão agregada — agora vê "X/Y completos"
+        # numa olhada e sabe se precisa intervir antes do próximo cron.
+        banner = [
+            f"Última atualização da planilha: {ts}  |  {_resumo_audit(relatorio_audit)}"
+        ] + [""] * (len(HEADER) - 1)
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):
@@ -626,6 +659,12 @@ class SheetsExporter:
                 "Scraper detalhe + PDF persistido",
                 "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs que não são laudo real (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url`; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL pré-assinada do storage já expirou (validade ~1h); (3) '—' quando não há URL nem PDF local.",
                 "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (2) significa que o laudo FOI analisado (severidade/avarias estão certas), só o link clicável morreu — pra abrir, recolete o lote ou consulte data/laudos_pdfs/<lote>.pdf no laptop. Auditoria diária pelo `make auditar-laudos`.",
+            ],
+            [
+                "Banner — Laudos completos",
+                "Audit das 3 condições (laudo_audit.auditar)",
+                "Conta 'X/Y completos' onde Y = lotes ATIVOS exportados pra empresa. Lote 'completo' precisa das 3: PDF baixado em data/laudos_pdfs/<lote>.pdf (>5KB), LaudoCache.confidence >= 0.6 (veio de PDF real e não fallback `_laudo_sem_pdf`), e raw_json.detalhe.laudo_pdf_url passa em `is_laudo_pdf_url`. Quando há pendência, mostra breakdown (sem PDF / URL inválida / cache baixo).",
+                "Visão agregada da saúde do pipeline de laudos. Sem isso, operador só via gap por linha (Situação=⚠ LAUDO NÃO CAPTURADO) e nunca tinha visão consolidada. Cron diário roda `auditar_laudos.py` no fim e o resumo é re-derivado a cada export — em sincronia.",
             ],
         ]
 

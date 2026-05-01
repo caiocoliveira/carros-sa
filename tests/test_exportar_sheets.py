@@ -957,6 +957,103 @@ class TestSheetsExporterTimestamp:
         mock_ws.freeze.assert_any_call(rows=2)
 
 
+class TestSheetsExporterAuditBanner:
+    """Resumo do audit de laudos embutido no banner da linha 1.
+
+    As 3 condições espelham `auditar_laudos.py` (PDF baixado, LaudoCache com
+    confidence>=0.6, URL válida em raw_json). Sem esse resumo, o operador só
+    via gap por linha (Situação=⚠) e nunca tinha visão agregada — agora vê
+    "X/Y completos" numa olhada e sabe se precisa intervir manualmente.
+    """
+
+    URL_OK = "https://storage.googleapis.com/doc-b2b/laudo-abc.pdf"
+
+    def _criar_pdf(self, pdf_dir, lote_id):
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        p = pdf_dir / f"{lote_id}.pdf"
+        p.write_bytes(b"%PDF-1.4\n" + b"x" * 200_000)
+        return p
+
+    def _setup_lote(
+        self,
+        session,
+        lote_id,
+        *,
+        laudo_pdf_url=None,
+        confidence=0.95,
+    ):
+        detalhe = {"laudo_pdf_url": laudo_pdf_url}
+        lote = _lote(lote_id)
+        lote.raw_json = {"detalhe": detalhe}
+        session.add(lote)
+        session.add(_avaliacao(lote_id))
+        if confidence is not None:
+            laudo = _laudo(lote_id)
+            laudo.confidence = confidence
+            session.add(laudo)
+
+    def _exportar(self, engine):
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+        return mock_ws.update.call_args_list[0][0][0][0][0]
+
+    def test_banner_zero_avaliacoes_mostra_aguardando(self):
+        engine = _engine_mem()
+        banner = self._exportar(engine)
+        assert "aguardando 1ª triagem" in banner
+
+    def test_banner_tudo_completo_mostra_100pct(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("carros_sa.tools.laudo_audit.PDF_DIR_DEFAULT", tmp_path)
+        engine = _engine_mem()
+        with Session(engine) as session:
+            self._setup_lote(session, "L_OK", laudo_pdf_url=self.URL_OK,
+                             confidence=0.95)
+            session.commit()
+        self._criar_pdf(tmp_path, "L_OK")
+        banner = self._exportar(engine)
+        assert "Laudos: 1/1 (100% completos)" in banner
+        # Sem pendência, NÃO inclui breakdown.
+        assert "Pendentes" not in banner
+
+    def test_banner_pendentes_quebra_motivo_por_categoria(self, tmp_path, monkeypatch):
+        """3 lotes ativos com falhas distintas — banner detalha cada motivo."""
+        monkeypatch.setattr("carros_sa.tools.laudo_audit.PDF_DIR_DEFAULT", tmp_path)
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # L_OK: tudo certo.
+            self._setup_lote(session, "L_OK", laudo_pdf_url=self.URL_OK,
+                             confidence=0.95)
+            # L_SEM_PDF: cache OK, URL OK, falta arquivo no disco.
+            self._setup_lote(session, "L_SEM_PDF", laudo_pdf_url=self.URL_OK,
+                             confidence=0.95)
+            # L_URL_DECOY: cache OK, PDF OK, URL decoy.
+            decoy = ("https://repo-site-aav-production.storage.googleapis.com/"
+                     "app/uploads/Relatorio.pdf")
+            self._setup_lote(session, "L_URL_DECOY", laudo_pdf_url=decoy,
+                             confidence=0.95)
+            # L_CACHE_BAIXO: PDF OK, URL OK, fallback _laudo_sem_pdf.
+            self._setup_lote(session, "L_CACHE_BAIXO", laudo_pdf_url=self.URL_OK,
+                             confidence=0.5)
+            session.commit()
+        self._criar_pdf(tmp_path, "L_OK")
+        self._criar_pdf(tmp_path, "L_URL_DECOY")
+        self._criar_pdf(tmp_path, "L_CACHE_BAIXO")
+
+        banner = self._exportar(engine)
+        assert "Laudos: 1/4 (25% completos)" in banner
+        assert "Pendentes: 3" in banner
+        assert "sem PDF: 1" in banner
+        assert "URL inválida: 1" in banner
+        assert "cache baixo: 1" in banner
+
+
 class TestCidadesFreteSheet:
     """Aba de cidades do raio operacional + frete por categoria por cidade."""
 

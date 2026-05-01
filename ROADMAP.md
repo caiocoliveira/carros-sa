@@ -6,6 +6,18 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ✅ **Fundação + EstimadorReforma** — 328/328 testes passando
 
+### X — Banner de audit de laudos + audit no cron (2026-05-01) ✅
+- **Branch:** `claude/great-turing-2Q0de`
+- **Motivação:** Usuário pediu garantia sistêmica de que todo carro na lista tenha laudo baixado, revisado e link na planilha — e, se faltar, o motivo identificado e resolvido pra nunca mais acontecer. Audit existia (`auditar_laudos.py`) + retry+limpeza de decoys já no cron, mas faltavam dois elos: (a) operador não tinha visibilidade agregada (só via "⚠ LAUDO NÃO CAPTURADO" linha-a-linha), e (b) cron não rodava audit no fim, então qualquer resíduo passava silencioso até alguém abrir a planilha.
+- **Arquivos:**
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — novo helper `_resumo_audit(RelatorioLaudos) -> str`, exporter chama `auditar(session, empresa_id)` antes de escrever, banner da linha 1 ganha sufixo `Laudos: X/Y (Z% completos) | Pendentes: N (sem PDF: A, URL inválida: B, cache baixo: C)`. Glossário adiciona linha "Banner — Laudos completos" documentando a métrica.
+  - [`carros_sa/tools/laudo_audit.py`](carros_sa/tools/laudo_audit.py) — `pdf_dir` agora resolve em CALL-TIME (`Optional[Path] = None`) em vez de def-time, pra que monkeypatch nos testes funcione.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — pipeline diário ganha 4º step: `triagem → limpar_decoys → retry → auditar_laudos`. Resíduos restantes ficam no log com motivo agregado.
+  - [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — nova classe `TestSheetsExporterAuditBanner` com 3 testes (zero avaliações, 100% completo sem breakdown, mix com 4 lotes cobrindo cada motivo de pendência).
+- **Como funciona:** Audit espelha exatamente as 3 condições do `auditar_laudos.py` sobre o MESMO recorte de lotes que o exporter renderiza (avaliados + ativos + não-encerrados). Operador vê "1/4 (25% completos) | Pendentes: 3 (sem PDF: 1, URL inválida: 1, cache baixo: 1)" na primeira linha sem precisar abrir log nem rodar `make auditar-laudos`.
+- **Cobertura:** 378/378 testes verde. Banner tem teste pra cada estado relevante; auditar continua coberto pelas 16 cases de `test_laudo_audit.py`.
+- **Limitações conhecidas:** O cron usa `auditar_laudos.py` sem `--strict`, então o exit code 0 mesmo com pendentes — intencional pra não derrubar o cron por falha conhecida. Operador deve checar o banner ou o tail do log.
+
 ### W — Revisão econômica das colunas da planilha (2026-04-29) ✅
 - **Branch:** `claude/sleepy-wright-kSiCR`
 - **Motivação:** Usuário pediu sanity-check da relação entre as colunas (FIPE × Lance Máximo × Giro FIPE × ROI × Lucro/mês). Simulação com Polo Track real expôs três bugs compostos.

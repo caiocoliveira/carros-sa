@@ -88,9 +88,17 @@ def _motivo(s: StatusLaudo) -> Optional[str]:
 def verificar_laudo_completo(
     lote: Lote,
     laudo: Optional[LaudoCache],
-    pdf_dir: Path = PDF_DIR_DEFAULT,
+    pdf_dir: Optional[Path] = None,
 ) -> StatusLaudo:
-    """Status individual: 3 condições + motivo agregado quando incompleto."""
+    """Status individual: 3 condições + motivo agregado quando incompleto.
+
+    `pdf_dir=None` resolve pra `PDF_DIR_DEFAULT` em CALL-TIME — não em def-time
+    como Python faz por default. Importante pra testes que monkeypatcham
+    `PDF_DIR_DEFAULT` no módulo: defaults bound at def-time congelariam o
+    valor antigo e ignorariam o monkeypatch.
+    """
+    if pdf_dir is None:
+        pdf_dir = PDF_DIR_DEFAULT
     pdf_path = pdf_dir / f"{lote.id}.pdf"
     pdf_ok = pdf_path.exists() and pdf_path.stat().st_size > _PDF_MIN_BYTES
 
@@ -115,7 +123,7 @@ def auditar(
     session: Session,
     empresa_id: str,
     *,
-    pdf_dir: Path = PDF_DIR_DEFAULT,
+    pdf_dir: Optional[Path] = None,
     apenas_ativos: bool = True,
 ) -> RelatorioLaudos:
     """Audita lotes que apareceriam na planilha de uma empresa.

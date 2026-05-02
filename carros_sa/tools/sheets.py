@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
-from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
+from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT, verificar_laudo_completo
 from carros_sa.tools.tese import (
     calcular_tese,
     carregar_config_tese,
@@ -142,7 +142,15 @@ class SheetsExporter:
                 -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
             ),
         )
-        self._write_sheet(empresa_id, rows_sorted)
+        # Resumo de auditoria pra exibir no banner — "laudo completo" exige as
+        # 3 condições de `verificar_laudo_completo` (PDF + cache conf>=0.6 +
+        # URL válida). Sem essa contagem agregada o operador só percebia laudos
+        # incompletos clicando lote a lote; com ela, qualquer regressão (decoy
+        # novo, scraper não pegando PDF, retry falhando) salta no topo da
+        # planilha em todo export.
+        n_completos = sum(1 for r in rows_sorted if r["laudo_completo"])
+        audit_summary = f"Laudos completos: {n_completos}/{len(rows_sorted)}"
+        self._write_sheet(empresa_id, rows_sorted, audit_summary=audit_summary)
         self._write_cidades_frete_sheet(empresa_id, session)
         self._write_glossario_sheet()
         return len(rows_sorted)
@@ -239,6 +247,15 @@ class SheetsExporter:
             # "—" no mesmo caso de URL ausente sem PDF, ofuscando essa diferença.
             pdf_local_existe = (PDF_DIR_DEFAULT / f"{av.lote_id}.pdf").exists()
 
+            # Status agregado das 3 condições de "laudo completo" — espelha
+            # `laudo_audit.verificar_laudo_completo` pra ter uma fonte única de
+            # verdade. Usado pro contador no banner. Não substitui as flags
+            # individuais acima (pdf_local_existe, laudo_url, laudo_analisado),
+            # que continuam dirigindo o rendering por linha.
+            laudo_completo = verificar_laudo_completo(
+                lote, laudo, pdf_dir=PDF_DIR_DEFAULT,
+            ).completo
+
             # Laudo só conta como "analisado" se veio de um PDF real — fallback
             # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
             # confidence <= 0.55. Sem essa distinção o usuário via reforma de
@@ -280,14 +297,27 @@ class SheetsExporter:
                 "url": lote.url,
                 "laudo_url": laudo_url,
                 "pdf_local_existe": pdf_local_existe,
+                "laudo_completo": laudo_completo,
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "laudo_analisado": laudo_analisado,
             })
         return rows
 
-    def _write_sheet(self, empresa_id: str, rows: List[dict]) -> None:
-        """Abre/cria aba, limpa, escreve timestamp global + header + rows."""
+    def _write_sheet(
+        self,
+        empresa_id: str,
+        rows: List[dict],
+        audit_summary: str = "",
+    ) -> None:
+        """Abre/cria aba, limpa, escreve timestamp global + header + rows.
+
+        `audit_summary` (opcional) é apensado ao banner pra deixar o status de
+        completude do laudo visível em todo export — formato típico:
+        `"Laudos completos: 27/30"`. Quando todas as linhas têm os 3 sinais
+        (PDF + cache + URL), os números batem; quando algo regrediu (decoy
+        novo, retry falhando), o gap fica óbvio na primeira olhada.
+        """
         gc = self._client()
         sh = gc.open_by_key(self._spreadsheet_id)
 
@@ -303,7 +333,10 @@ class SheetsExporter:
         # está o snapshot. Preenche a primeira célula e mantém o resto vazio pra
         # não poluir o layout; o freeze(rows=2) congela tanto o banner quanto o
         # header de colunas.
-        banner = [f"Última atualização da planilha: {ts}"] + [""] * (len(HEADER) - 1)
+        banner_text = f"Última atualização da planilha: {ts}"
+        if audit_summary:
+            banner_text = f"{banner_text}  ·  {audit_summary}"
+        banner = [banner_text] + [""] * (len(HEADER) - 1)
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):

@@ -369,3 +369,106 @@ class TestExporterLaudoCelula:
         celula_laudo = captured_rows[0][2][-1]
         assert celula_laudo.startswith("=HYPERLINK(")
         assert "Ver laudo" in celula_laudo
+
+
+# ---------------------------------------------------------------------------
+# Banner: contador agregado "Laudos completos: X/Y"
+# ---------------------------------------------------------------------------
+
+class TestBannerAuditSummary:
+    """Banner da aba da empresa expõe `Laudos completos: X/Y` em todo export.
+
+    Sem essa contagem, regressões silenciosas (decoy novo, scraper falhando em
+    grupo específico, retry não destravando) só viravam visíveis quando o
+    operador clicava lote a lote. Aqui a contagem aparece na primeira olhada
+    da planilha — quando X<Y, há lote pra investigar.
+    """
+
+    def _exportar_e_capturar_banner(self, engine, tmp_path, monkeypatch):
+        monkeypatch.setattr("carros_sa.tools.sheets.PDF_DIR_DEFAULT", tmp_path)
+        captured_rows = []
+        mock_ws = MagicMock()
+        mock_ws.update.side_effect = lambda rows, **kw: captured_rows.append(rows)
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = SheetsExporter(spreadsheet_id="x", credentials_path="/x")
+            with Session(engine) as session:
+                exporter.exportar("carros_uberlandia", session)
+        # Primeira chamada de update = aba da empresa; rows[0][0] = banner.
+        return captured_rows[0][0][0]
+
+    def test_todos_completos_banner_mostra_n_de_n(self, tmp_path, monkeypatch):
+        """3 lotes com PDF + cache + URL → banner '3/3'."""
+        engine = _engine_mem()
+        for i in range(3):
+            lote_id = f"L_OK_{i}"
+            _criar_pdf_fake(tmp_path, lote_id)
+            with Session(engine) as session:
+                session.add(_lote(lote_id, laudo_pdf_url=URL_OK))
+                session.add(_avaliacao(lote_id))
+                session.add(_laudo(lote_id, confidence=0.95))
+                session.commit()
+
+        banner = self._exportar_e_capturar_banner(engine, tmp_path, monkeypatch)
+        assert "Laudos completos: 3/3" in banner
+        # O banner antigo (timestamp) NÃO é substituído — é estendido.
+        assert "Última atualização da planilha" in banner
+
+    def test_alguns_incompletos_banner_mostra_gap(self, tmp_path, monkeypatch):
+        """2 lotes completos + 1 sem PDF → banner '2/3'. Operador precisa
+        ver o gap pra ir investigar — sem a contagem, regressão fica escondida."""
+        engine = _engine_mem()
+        # 2 lotes OK
+        for i in range(2):
+            lote_id = f"L_OK_{i}"
+            _criar_pdf_fake(tmp_path, lote_id)
+            with Session(engine) as session:
+                session.add(_lote(lote_id, laudo_pdf_url=URL_OK))
+                session.add(_avaliacao(lote_id))
+                session.add(_laudo(lote_id, confidence=0.95))
+                session.commit()
+        # 1 lote sem PDF (mesmo com URL e cache OK, está incompleto)
+        with Session(engine) as session:
+            session.add(_lote("L_SEM_PDF", laudo_pdf_url=URL_OK))
+            session.add(_avaliacao("L_SEM_PDF"))
+            session.add(_laudo("L_SEM_PDF", confidence=0.95))
+            session.commit()
+
+        banner = self._exportar_e_capturar_banner(engine, tmp_path, monkeypatch)
+        assert "Laudos completos: 2/3" in banner
+
+    def test_url_decoy_conta_como_incompleto(self, tmp_path, monkeypatch):
+        """URL decoy (Transparência Salarial) NÃO conta como completo, mesmo
+        com PDF e cache presentes — o link da planilha não funcionaria."""
+        engine = _engine_mem()
+        _criar_pdf_fake(tmp_path, "L_DECOY")
+        with Session(engine) as session:
+            session.add(_lote("L_DECOY", laudo_pdf_url=URL_DECOY))
+            session.add(_avaliacao("L_DECOY"))
+            session.add(_laudo("L_DECOY", confidence=0.95))
+            session.commit()
+
+        banner = self._exportar_e_capturar_banner(engine, tmp_path, monkeypatch)
+        assert "Laudos completos: 0/1" in banner
+
+    def test_cache_baixa_confianca_conta_como_incompleto(self, tmp_path, monkeypatch):
+        """Cache com confidence=0.5 (fallback `_laudo_sem_pdf`) NÃO é completo."""
+        engine = _engine_mem()
+        _criar_pdf_fake(tmp_path, "L_CACHE_FRACO")
+        with Session(engine) as session:
+            session.add(_lote("L_CACHE_FRACO", laudo_pdf_url=URL_OK))
+            session.add(_avaliacao("L_CACHE_FRACO"))
+            session.add(_laudo("L_CACHE_FRACO", confidence=0.5))
+            session.commit()
+
+        banner = self._exportar_e_capturar_banner(engine, tmp_path, monkeypatch)
+        assert "Laudos completos: 0/1" in banner
+
+    def test_db_vazio_banner_mostra_zero_de_zero_sem_crash(self, tmp_path, monkeypatch):
+        """Com 0 lotes ativos, ainda escreve banner — não divide por zero."""
+        engine = _engine_mem()
+        banner = self._exportar_e_capturar_banner(engine, tmp_path, monkeypatch)
+        assert "Laudos completos: 0/0" in banner

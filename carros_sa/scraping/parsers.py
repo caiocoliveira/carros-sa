@@ -147,7 +147,13 @@ def parse_card_lines(
     modelo multi-linha, sem rating) são toleradas desde que as âncoras existam:
         cidade/uf, ano fab/mod, combustível, km, timer.
     """
-    agora = agora or datetime.utcnow()
+    # `datetime.now()` (LOCAL) — não `utcnow()`. Toda a stack downstream
+    # (sheets.py, audit.py, laudo_audit.py, scraper_autoavaliar.py) compara
+    # `lote.fim_em` contra `datetime.now()` local. Default em UTC quebrava
+    # essas comparações em fusos != UTC: lotes encerrados há até |offset|
+    # horas vazavam pra planilha como ativos, e o `strftime` exibia o horário
+    # adiantado pro operador. Em Brasil (UTC-3) eram 3h de gap silencioso.
+    agora = agora or datetime.now()
     cleaned = [ln.strip() for ln in lines if ln.strip()]
 
     # Âncoras por regex/set

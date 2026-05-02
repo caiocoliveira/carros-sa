@@ -27,6 +27,9 @@ from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
+# Severidades >= MEDIA exigem reforma > 0. NENHUMA/LEVE/desconhecido podem ter R$ 0.
+_SEVERIDADES_QUE_EXIGEM_REFORMA = {"media", "grave", "estrutural"}
+
 
 # Validator retorna None se ok; string com motivo se suspeito.
 Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
@@ -82,10 +85,30 @@ CHECKS: Dict[str, Validator] = {
     # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
     # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
     # de scraping/cache do client FIPE.
+    #
+    # Cross-field: `preco_giro_fipe` é a âncora de revenda (webmotors_mediana × f_km).
+    # Por construção fica próximo de FIPE — quando AA "Talvez se interesse" não
+    # tem dados, fallback é FIPE × 0.97; quando tem, é mediana de similares (que
+    # historicamente bate em ±15% da FIPE). Divergência grande sinaliza:
+    #  - mediana de similares poluída (regex pegou R$ de outras seções, ver
+    #    `_extrai_precos_similares` em parsers.py)
+    #  - FIPE da consulta cacheada está stale ou veio de marca/modelo errado
+    #  - f_km saturado (lote km muito acima/abaixo da mediana real do mercado)
+    # Threshold ±25% é largo de propósito: f_km contribui no máximo ±15%,
+    # então gap >25% praticamente exige outra fonte de erro.
     "FIPE (R$)": lambda v, r: (
         "FIPE não-positivo — provável falha do client FIPE ou cache stale"
         if isinstance(v, (int, float)) and v <= 0
-        else None
+        else (
+            f"preco_giro_fipe R$ {r.get('preco_giro_fipe')} divergente da FIPE R$ {v} "
+            f"(>25%) — checar mediana similares ou cache FIPE"
+            if (
+                isinstance(v, (int, float)) and v > 0
+                and r.get("preco_giro_fipe") is not None
+                and abs(r["preco_giro_fipe"] - v) / v > 0.25
+            )
+            else None
+        )
     ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d) ou score_roi inflado"
@@ -102,7 +125,19 @@ CHECKS: Dict[str, Validator] = {
         else None
     ),
     "Reforma (R$)": lambda v, r: (
-        "Reforma negativa" if v is not None and v < 0 else None
+        "Reforma negativa"
+        if v is not None and v < 0
+        else (
+            # Cross-field: severidade média/grave/estrutural com reforma R$ 0 é
+            # contradição. Deterministico sempre soma adicional pra grave/estrutural;
+            # LLM ocasionalmente devolve 0. Indica que a estimativa não levou
+            # em conta o laudo — operador veria "✓ Viável, reforma 0" em lote
+            # estrutural, falso conforto.
+            f"Reforma R$ 0 com severidade '{r.get('severidade')}' "
+            f"(esperado >0 quando severidade ≥ média)"
+            if v == 0 and str(r.get("severidade") or "").lower() in _SEVERIDADES_QUE_EXIGEM_REFORMA
+            else None
+        )
     ),
     # Coluna informativa. Valores esperados: texto com emoji prefixo (🟢/🟡/🔴)
     # ou "—" quando config/tese.yaml não carrega ou laudo pendente. String vazia

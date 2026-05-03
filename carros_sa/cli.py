@@ -391,15 +391,40 @@ def sheets(
         raise typer.Exit(1)
 
     from carros_sa.db import get_session, init_db
+    from carros_sa.tools.laudo_audit import auditar
     from carros_sa.tools.sheets import SheetsExporter
 
     init_db()
     exporter = SheetsExporter(spreadsheet_id=sheet_id, credentials_path=credentials)
     with get_session() as session:
         n = exporter.exportar(empresa_id=empresa, session=session)
+        # Auditoria de completude do laudo logo após o export — dá ao operador
+        # o gap visível (PDF/cache/URL faltando) na mesma execução em que
+        # publicou a planilha. Sem isso, "✓ Viável" + Laudo "—" passa silencioso.
+        rel = auditar(session, empresa)
 
     console.print(f"[green]✓ {n} lotes exportados → aba \"{empresa}\"[/green]")
     console.print(f"  Sheet: {exporter.sheet_url}")
+    if rel.total:
+        if rel.incompletos:
+            console.print(
+                f"\n[yellow]⚠ {len(rel.incompletos)}/{rel.total} lotes ativos "
+                f"com laudo incompleto[/yellow] "
+                f"(sem PDF: {rel.sem_pdf} · cache fraco: {rel.cache_baixa_conf} "
+                f"· URL inválida: {rel.url_invalida})"
+            )
+            console.print(
+                "  Rode [code]make auditar-laudos[/code] pra ver detalhes "
+                "e [code]make limpar-decoys && make backfill-drive[/code] pra resolver."
+            )
+        else:
+            extra = (
+                f" · {rel.com_drive} com link Drive permanente"
+                if rel.com_drive else ""
+            )
+            console.print(
+                f"[green]✓ {rel.total}/{rel.total} lotes ativos com laudo completo{extra}[/green]"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +473,7 @@ async def _run_triagem(
     from carros_sa.db import get_session, init_db
     from carros_sa.orquestrador import orquestrar
     from carros_sa.scraping.scraper_autoavaliar import garantir_autenticado
+    from carros_sa.tools.laudo_drive import build_default_drive_client
 
     init_db()
     vision_client = build_default_client()
@@ -461,6 +487,18 @@ async def _run_triagem(
     except RuntimeError:
         text_llm_client = None
         console.print("[yellow]Reforma LLM: desabilitado (sem API key) → usando tabela determinística[/yellow]")
+
+    # Drive client pra link permanente do laudo na planilha. Sem
+    # GOOGLE_DRIVE_LAUDOS_FOLDER_ID configurado, segue sem (URL pré-assinada
+    # do AA expira em ~1h, sheet cai em "PDF salvo (link expirado)" depois).
+    drive_client = build_default_drive_client()
+    if drive_client is not None:
+        console.print("[cyan]Drive (link permanente):[/cyan] habilitado")
+    else:
+        console.print(
+            "[yellow]Drive (link permanente): desabilitado "
+            "(GOOGLE_DRIVE_LAUDOS_FOLDER_ID não setado)[/yellow]"
+        )
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
@@ -496,6 +534,7 @@ async def _run_triagem(
                 vision_client=vision_client,
                 horizonte_dias=None,
                 text_llm_client=text_llm_client,
+                drive_client=drive_client,
             )
 
         await browser.close()

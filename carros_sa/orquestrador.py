@@ -453,6 +453,23 @@ class OrquestradorResult:
 # Pipeline por lote (async — roda dentro do event loop do orquestrador)
 # ---------------------------------------------------------------------------
 
+def _persistir_drive_link(lote: Lote, file_id: str, web_view_link: str, session: Session) -> None:
+    """Grava `laudo_drive_id` + `laudo_drive_url` em `raw_json["detalhe"]`.
+
+    Sem mudar `models.py` — é o mesmo padrão de persistência usado pelo
+    `laudo_pdf_url`. O exporter lê de lá pra renderizar o HYPERLINK permanente.
+    """
+    from carros_sa.tools.laudo_drive import DRIVE_FILE_ID_KEY, DRIVE_URL_KEY
+
+    raw = dict(lote.raw_json or {})
+    det = dict(raw.get("detalhe") or {})
+    det[DRIVE_FILE_ID_KEY] = file_id
+    det[DRIVE_URL_KEY] = web_view_link
+    raw["detalhe"] = det
+    lote.raw_json = raw
+    session.add(lote)
+
+
 async def _pipeline_lote(
     lote: Lote,
     page,
@@ -461,6 +478,7 @@ async def _pipeline_lote(
     session: Session,
     tmp_dir: Path,
     text_llm_client=None,
+    drive_client=None,
 ) -> ResultadoLote:
     """Roda pipeline completo para um lote. Retorna ResultadoLote."""
 
@@ -548,6 +566,26 @@ async def _pipeline_lote(
                     lote.raw_json = raw_atual
                     session.add(lote)
                     session.commit()
+                else:
+                    # PDF é laudo de verdade — sobe pro Drive pra link permanente.
+                    # URLs do storage do AA expiram em ~1h; a planilha fica no ar
+                    # dias/semanas. Drive resolve "link na planilha funciona sempre".
+                    # Fail-soft: erro no Drive não derruba o pipeline; cai pro
+                    # estado anterior (URL pré-assinada / "PDF salvo (link expirado)").
+                    if drive_client is not None:
+                        try:
+                            up = drive_client.upload(lote.id, pdf_dest)
+                            _persistir_drive_link(
+                                lote, up.file_id, up.web_view_link, session,
+                            )
+                            session.commit()
+                        except Exception as exc:
+                            import sys
+                            print(
+                                f"[pipeline_lote] Drive upload falhou em {lote.id}: "
+                                f"{type(exc).__name__}: {exc}",
+                                file=sys.stderr, flush=True,
+                            )
             except Exception:
                 pdf_dest = None
 
@@ -683,6 +721,7 @@ async def orquestrar(
     vision_client,
     horizonte_dias: Optional[int] = None,
     text_llm_client=None,
+    drive_client=None,
 ) -> OrquestradorResult:
     """
     Coleta listagem, ingere lotes novos e roda pipeline de avaliação.
@@ -745,6 +784,7 @@ async def orquestrar(
         res = await _pipeline_lote(
             lote, page, vision_client, empresa, session, tmp_dir,
             text_llm_client=text_llm_client,
+            drive_client=drive_client,
         )
         result.lotes.append(res)
         if res.erro:

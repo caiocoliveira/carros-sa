@@ -490,6 +490,33 @@ Já registrado:
   - URLs pré-assinadas do Google Storage expiram em ~1h. O estado "PDF salvo (link expirado)" é o melhor que dá pra fazer sem hospedar o PDF em outro lugar. Pra ter link permanente, o próximo passo é subir os PDFs no Google Drive (via service account já configurada) e armazenar `drive_file_id` no `LaudoCache` — mudança maior, fora deste workstream.
   - `auditar_laudos.py` não integra com o cron ainda — operador precisa rodar manualmente. Adicionar ao `setup_cron.sh` quando o estado típico for ≥99% completo (hoje, com URLs expiradas frequentes, ia spammar log).
 
+### V — Link permanente do laudo via Google Drive ✅
+- **Branch:** `claude/great-turing-vivoI`
+- **Arquivos:**
+  - [`carros_sa/tools/laudo_drive.py`](carros_sa/tools/laudo_drive.py) — NOVO. `LaudoDriveClient` com upload idempotente (procura `<lote>.pdf` na pasta antes de subir), tornar público com link, raw HTTP via `AuthorizedSession` (zero deps novas — `google-auth` e `requests` já estavam transitivamente). `build_default_drive_client()` lê env vars e fail-soft retorna None quando não configurado.
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — `_pipeline_lote` recebe `drive_client` e, após `_pdf_eh_laudo_valido` aprovar o PDF, sobe pro Drive. Erro no Drive não derruba pipeline (cai pro estado anterior). Persiste `laudo_drive_id` + `laudo_drive_url` em `raw_json["detalhe"]` (sem mexer em `models.py` — segue o padrão já usado pelo `laudo_pdf_url`).
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — coluna "Laudo" passa a ter 4 estados em ordem de preferência: Drive URL → URL AA fresca → "PDF salvo (link expirado)" → "—". Glossário atualizado.
+  - [`carros_sa/tools/laudo_audit.py`](carros_sa/tools/laudo_audit.py) — `verificar_laudo_completo` aceita Drive URL como satisfação da condição "URL clicável" (sem precisar passar `is_laudo_pdf_url`). Novo campo `drive_persistente: bool` no `StatusLaudo` + `com_drive` no `RelatorioLaudos` distinguem completos com link permanente dos que dependem da URL AA-fresca.
+  - [`scripts/backfill_laudos_drive.py`](scripts/backfill_laudos_drive.py) — NOVO. Sobe PDFs de `data/laudos_pdfs/` que ainda não têm Drive URL. Filtra por `confidence ≥ 0.6` (não desperdiça quota), prioriza ATIVOS, `--dry-run` e `--limite N` pra runs controlados, idempotente.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — pipeline diário virou 5 passos: triagem → limpar-decoys → retry → backfill-drive → auditar `--strict`. Fail-soft no backfill e na auditoria pra não derrubar o cron, mas exit code != 0 deixa rastro óbvio no log.
+  - [`carros_sa/cli.py`](carros_sa/cli.py) + [`scripts/triagem_diaria.py`](scripts/triagem_diaria.py) — instanciam `build_default_drive_client()` e injetam no `orquestrar`. Logam habilitado/desabilitado.
+  - [`carros_sa/cli.py:sheets`](carros_sa/cli.py) — após o export chama `auditar()` e printa warning + instruções (`make limpar-decoys && make backfill-drive`) quando há gaps. Sem gaps, mostra resumo "✓ N/N completos · M com link Drive permanente".
+  - [`Makefile`](Makefile) — alvo `make backfill-drive [EMPRESA=<id>]`.
+  - [`.env.example`](.env.example) — documenta `GOOGLE_DRIVE_LAUDOS_FOLDER_ID`.
+- **Motivação:** usuário pediu garantir que todo carro tem laudo baixado, revisado E LINK NA PLANILHA, com diagnóstico+fix pra "nunca mais acontecer". URLs do `storage.googleapis.com/doc-b2b/...` (pré-assinadas pelo Auto Avaliar) expiram em ~1h, então a planilha publicada de manhã ficava com links mortos à tarde. Workstream U havia identificado isso como next-step explícito.
+- **Como funciona o ciclo "nunca mais":**
+  1. **Triagem** valida PDF (`_pdf_eh_laudo_valido`), sobe pro Drive, persiste `laudo_drive_url` em `raw_json`. Pipeline robusto a falha do Drive (continua sem ele).
+  2. **Cron diário** roda backfill pra promover lotes legados (PDF local existente + cache forte + sem Drive URL ainda) e fecha com `auditar --strict`.
+  3. **Exporter** prefere Drive URL > URL AA fresca > "PDF salvo (link expirado)" > "—" — operador sempre vê o estado mais útil.
+  4. **`make sheets`** mostra warning na hora se algo está incompleto, com receita pra resolver.
+  5. **`auditar_laudos`** distingue agora "completo com Drive" de "completo só com URL AA" — operador pode rodar `make backfill-drive` se a 2ª contagem for grande.
+- **Setup necessário (one-time):** criar pasta no Drive → compartilhar com o e-mail do service-account → setar `GOOGLE_DRIVE_LAUDOS_FOLDER_ID` no `.env`. Sem isso, sistema fail-soft volta ao comportamento anterior (URL AA-fresca + "PDF salvo (link expirado)").
+- **Cobertura:** 24 testes novos — 11 em [`tests/test_laudo_drive.py`](tests/test_laudo_drive.py) (upload idempotente, resumable, permissão público com tolerância a duplicate, fail-soft sem env), 8 em [`tests/test_backfill_laudos_drive.py`](tests/test_backfill_laudos_drive.py) (filtros PDF/cache/já-tem-Drive/empresa, dry-run, idempotência, erro num lote não derruba o loop), 5 em [`tests/test_laudo_audit.py`](tests/test_laudo_audit.py) (Drive satisfaz `url_persistida_ok` mesmo com AA decoy, `com_drive` separado de `completos`, prioridade Drive>AA no exporter). Suite total: **396 passed, 2 skipped**.
+- **Limitações conhecidas:**
+  - Mock-heavy nos testes (regra do CLAUDE.md: nada de chamada externa em testes). Validação ao vivo requer rodar 1x com a folder ID setada — recomendo backfill `--limite 5 --dry-run` primeiro.
+  - Cota da Drive API: free-tier permite ~1B requests/dia, então as ~5 chamadas/lote (search+upload+permission) folgam mesmo com 600 lotes/mês. Se rampar muito, monitorar.
+  - PDF do laudo é imutável por construção (mesmo lote → mesmo conteúdo). `upload()` não substitui — se um dia precisar (re-extração com novo seletor), expor `forcar=True` no backfill.
+
 ---
 
 ## Marcos (do plano arquitetural original)

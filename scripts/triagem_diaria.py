@@ -57,6 +57,7 @@ async def _run(empresa_id: str, horizonte_dias: int, headless: bool, sem_sheets:
     from carros_sa.db import get_session, init_db
     from carros_sa.orquestrador import orquestrar
     from carros_sa.scraping.scraper_autoavaliar import garantir_autenticado
+    from carros_sa.tools.laudo_drive import build_default_drive_client
 
     init_db()
 
@@ -69,6 +70,15 @@ async def _run(empresa_id: str, horizonte_dias: int, headless: bool, sem_sheets:
     except RuntimeError:
         text_llm_client = None
         console.print("[yellow]Reforma LLM: desabilitado → usando tabela determinística[/yellow]")
+
+    drive_client = build_default_drive_client()
+    if drive_client is not None:
+        console.print("[cyan]Drive (link permanente):[/cyan] habilitado")
+    else:
+        console.print(
+            "[yellow]Drive (link permanente): desabilitado "
+            "(GOOGLE_DRIVE_LAUDOS_FOLDER_ID não setado)[/yellow]"
+        )
 
     # --- Playwright ---
     async with async_playwright() as pw:
@@ -102,6 +112,7 @@ async def _run(empresa_id: str, horizonte_dias: int, headless: bool, sem_sheets:
                 vision_client=vision_client,
                 horizonte_dias=horizonte_dias,
                 text_llm_client=text_llm_client,
+                drive_client=drive_client,
             )
 
         await browser.close()

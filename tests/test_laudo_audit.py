@@ -53,12 +53,16 @@ def _lote(
     lote_id: str = "L001",
     *,
     laudo_pdf_url: Optional[str] = URL_OK,
+    laudo_drive_url: Optional[str] = None,
     fim_em: Optional[datetime] = None,
     encerrado: bool = False,
 ) -> Lote:
     if fim_em is None:
         fim_em = datetime.now() + timedelta(days=3)
     detalhe = {"laudo_pdf_url": laudo_pdf_url}
+    if laudo_drive_url:
+        detalhe["laudo_drive_url"] = laudo_drive_url
+        detalhe["laudo_drive_id"] = "FID_X"
     if encerrado:
         detalhe["encerrado"] = True
     return Lote(
@@ -185,6 +189,49 @@ class TestVerificarLaudoCompleto:
         assert "cache_confianca_baixa" in s.motivo
         assert "url_invalida_ou_ausente" in s.motivo
 
+    def test_drive_url_satisfaz_url_persistida_mesmo_sem_aa(self, tmp_path):
+        """Lote com Drive URL e SEM URL AA continua válido — Drive é o estado
+        ouro (link permanente)."""
+        _criar_pdf_fake(tmp_path, "L001")
+        s = verificar_laudo_completo(
+            _lote(
+                "L001",
+                laudo_pdf_url=None,
+                laudo_drive_url="https://drive.google.com/file/d/ABC/view",
+            ),
+            _laudo(confidence=0.9),
+            pdf_dir=tmp_path,
+        )
+        assert s.url_persistida_ok is True
+        assert s.drive_persistente is True
+        assert s.completo is True
+
+    def test_drive_url_satisfaz_mesmo_quando_aa_e_decoy(self, tmp_path):
+        """Drive presente → ignora decoy persistido em laudo_pdf_url legado."""
+        _criar_pdf_fake(tmp_path, "L001")
+        s = verificar_laudo_completo(
+            _lote(
+                "L001",
+                laudo_pdf_url=URL_DECOY,
+                laudo_drive_url="https://drive.google.com/file/d/ABC/view",
+            ),
+            _laudo(confidence=0.9),
+            pdf_dir=tmp_path,
+        )
+        assert s.url_persistida_ok is True
+        assert s.drive_persistente is True
+
+    def test_sem_drive_url_aa_decoy_ainda_marca_invalido(self, tmp_path):
+        """Sem Drive e com AA decoy, é incompleto — `url_persistida_ok=False`."""
+        _criar_pdf_fake(tmp_path, "L001")
+        s = verificar_laudo_completo(
+            _lote("L001", laudo_pdf_url=URL_DECOY),
+            _laudo(),
+            pdf_dir=tmp_path,
+        )
+        assert s.url_persistida_ok is False
+        assert s.drive_persistente is False
+
 
 # ---------------------------------------------------------------------------
 # auditar — agregação + filtro de ativos
@@ -270,6 +317,33 @@ class TestAuditar:
             rel = auditar(session, "carros_uberlandia", pdf_dir=tmp_path)
 
         assert rel.total == 0
+
+    def test_contagem_de_drive_diferencia_completos_persistentes(self, tmp_path):
+        """`com_drive` distingue lote com link permanente de lote com URL AA
+        ainda fresca. Operador usa essa diferença pra rodar `make backfill-drive`.
+        """
+        engine = _engine_mem()
+        _criar_pdf_fake(tmp_path, "L_DRIVE")
+        _criar_pdf_fake(tmp_path, "L_AA_FRESCA")
+        with Session(engine) as session:
+            session.add(_lote(
+                "L_DRIVE",
+                laudo_pdf_url=URL_OK,
+                laudo_drive_url="https://drive.google.com/file/d/ABC/view",
+            ))
+            session.add(_avaliacao("L_DRIVE"))
+            session.add(_laudo("L_DRIVE", confidence=0.95))
+
+            session.add(_lote("L_AA_FRESCA", laudo_pdf_url=URL_OK))
+            session.add(_avaliacao("L_AA_FRESCA"))
+            session.add(_laudo("L_AA_FRESCA", confidence=0.95))
+            session.commit()
+
+            rel = auditar(session, "carros_uberlandia", pdf_dir=tmp_path)
+
+        assert rel.total == 2
+        assert rel.completos == 2
+        assert rel.com_drive == 1
 
 
 # ---------------------------------------------------------------------------
@@ -369,3 +443,43 @@ class TestExporterLaudoCelula:
         celula_laudo = captured_rows[0][2][-1]
         assert celula_laudo.startswith("=HYPERLINK(")
         assert "Ver laudo" in celula_laudo
+
+    def test_drive_url_tem_prioridade_sobre_url_aa(self, tmp_path, monkeypatch):
+        """Quando Drive URL está populada, ela é a fonte do HYPERLINK — mesmo
+        que a URL AA pré-assinada ainda esteja válida. Drive nunca expira."""
+        monkeypatch.setattr("carros_sa.tools.sheets.PDF_DIR_DEFAULT", tmp_path)
+
+        engine = _engine_mem()
+        drive_url = "https://drive.google.com/file/d/FID_X/view"
+        with Session(engine) as session:
+            lote = _lote("L_DRIVE", laudo_pdf_url=URL_OK)
+            lote.raw_json = {
+                "detalhe": {
+                    "laudo_pdf_url": URL_OK,
+                    "laudo_drive_url": drive_url,
+                    "laudo_drive_id": "FID_X",
+                }
+            }
+            session.add(lote)
+            session.add(_avaliacao("L_DRIVE"))
+            session.add(_laudo("L_DRIVE", confidence=0.95))
+            session.commit()
+
+        captured_rows = []
+        mock_ws = MagicMock()
+        mock_ws.update.side_effect = lambda rows, **kw: captured_rows.append(rows)
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = SheetsExporter(spreadsheet_id="x", credentials_path="/x")
+            with Session(engine) as session:
+                exporter.exportar("carros_uberlandia", session)
+
+        celula_laudo = captured_rows[0][2][-1]
+        assert celula_laudo.startswith("=HYPERLINK(")
+        # Drive URL aparece, NÃO a URL AA.
+        assert drive_url in celula_laudo
+        assert URL_OK not in celula_laudo

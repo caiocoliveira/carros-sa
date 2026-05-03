@@ -10,9 +10,16 @@ Critério "laudo completo" — TODAS as 3 condições simultaneamente:
      i.e. veio de PDF real (visão Gemini ou textual com avarias) e não do
      fallback `_laudo_sem_pdf` (confidence 0.5/0.55).
 
-  3. **URL clicável** — `raw_json.detalhe.laudo_pdf_url` passa em
-     `is_laudo_pdf_url` — i.e. é uma URL de laudo de fato (não decoy nem
-     None). É o que o exporter renderiza como `=HYPERLINK("...", "Ver laudo")`.
+  3. **Link clicável na planilha** — pelo menos UM dos dois:
+     - `raw_json.detalhe.laudo_drive_url` (permanente, populada quando Drive
+       está configurado — esse é o estado "ouro").
+     - `raw_json.detalhe.laudo_pdf_url` que passa em `is_laudo_pdf_url`
+       (URL pré-assinada do AA, vive ~1h — aceita pra auditar planilha
+       publicada logo após uma triagem).
+
+Adicional informativo (não afeta `completo`): `drive_persistente` indica
+quando o link já é permanente. Operador pode rodar `make backfill-drive` pra
+promover lotes que estão só com URL AA-fresca (estado 2) → Drive (estado 1).
 
 Sem essa fonte única, cada camada do pipeline (`is_laudo_pdf_url` no scraper,
 `_pdf_eh_laudo_valido` no orquestrador, `limpar_decoys` no cron) cuida de UM
@@ -37,6 +44,7 @@ from sqlmodel import Session, select
 
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
+from carros_sa.tools.laudo_drive import DRIVE_URL_KEY
 
 # Diretório onde o orquestrador persiste PDFs baixados em produção. Espelha
 # `_PDF_STORAGE_DIR` do orquestrador. Mantido fora de tmp_dir pra permitir
@@ -51,12 +59,19 @@ _PDF_MIN_BYTES = 5_000
 
 @dataclass
 class StatusLaudo:
-    """Status individual de um lote — 3 booleanos + motivo agregado."""
+    """Status individual de um lote.
+
+    `url_persistida_ok` cobre os dois caminhos de link clicável (Drive ou AA
+    fresca) — é o que o exporter usa pra renderizar o HYPERLINK. Já
+    `drive_persistente` é informativo: distingue lotes com link permanente
+    dos que dependem da URL pré-assinada (que vai expirar em ~1h).
+    """
     lote_id: str
     modelo: str
     pdf_local: bool
     laudo_cache_ok: bool
     url_persistida_ok: bool
+    drive_persistente: bool = False
     motivo: Optional[str] = None  # None se completo
 
     @property
@@ -72,6 +87,9 @@ class RelatorioLaudos:
     sem_pdf: int = 0
     cache_baixa_conf: int = 0
     url_invalida: int = 0
+    # Quantos lotes COMPLETOS já têm Drive URL permanente. Diferença com
+    # `completos` indica candidatos a `make backfill-drive`.
+    com_drive: int = 0
 
 
 def _motivo(s: StatusLaudo) -> Optional[str]:
@@ -97,8 +115,15 @@ def verificar_laudo_completo(
     laudo_ok = laudo is not None and (laudo.confidence or 0) >= 0.6
 
     detalhe = (lote.raw_json or {}).get("detalhe") if isinstance(lote.raw_json, dict) else None
-    url = (detalhe or {}).get("laudo_pdf_url") if isinstance(detalhe, dict) else None
-    url_ok = is_laudo_pdf_url(url)
+    if isinstance(detalhe, dict):
+        url_aa = detalhe.get("laudo_pdf_url")
+        url_drive = detalhe.get(DRIVE_URL_KEY)
+    else:
+        url_aa = url_drive = None
+    # Link clicável existe quando QUALQUER um dos dois está válido. Drive não
+    # passa por `is_laudo_pdf_url` (allowlist é de hosts AA); ele tem URL
+    # canônica `drive.google.com/file/d/<id>/view`.
+    url_ok = bool(url_drive) or is_laudo_pdf_url(url_aa)
 
     s = StatusLaudo(
         lote_id=lote.id,
@@ -106,6 +131,7 @@ def verificar_laudo_completo(
         pdf_local=pdf_ok,
         laudo_cache_ok=laudo_ok,
         url_persistida_ok=url_ok,
+        drive_persistente=bool(url_drive),
     )
     s.motivo = _motivo(s)
     return s
@@ -147,6 +173,8 @@ def auditar(
         relatorio.total += 1
         if s.completo:
             relatorio.completos += 1
+            if s.drive_persistente:
+                relatorio.com_drive += 1
         else:
             relatorio.incompletos.append(s)
             if not s.pdf_local:

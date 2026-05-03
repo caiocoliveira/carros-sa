@@ -1,7 +1,7 @@
 # Carros SA — atalhos pra comandos comuns
 # Uso: `make <target>` (ex: `make test`)
 
-.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit limpar-decoys auditar-laudos
+.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit limpar-decoys auditar-laudos backfill-drive
 
 PY := PYTHONPATH=. .venv/bin/python
 
@@ -21,6 +21,7 @@ help:
 	@echo "  make setup-cron                    # ativa cron diário (7h e 13h)"
 	@echo "  make limpar-decoys                 # remove URLs-decoy de laudo do DB + força retry"
 	@echo "  make auditar-laudos [EMPRESA=<id>] # checa lotes ativos com laudo incompleto (PDF/cache/URL)"
+	@echo "  make backfill-drive [EMPRESA=<id>] # sobe PDFs locais pro Drive e popula link permanente"
 	@echo "  make worktree-new WS=<nome>        # cria worktree + branch feat/<nome>"
 	@echo "  make worktree-remove WS=<nome>     # remove worktree (após merge)"
 
@@ -59,6 +60,9 @@ limpar-decoys:
 
 auditar-laudos:
 	$(PY) scripts/auditar_laudos.py --empresa $(or $(EMPRESA),carros_uberlandia)
+
+backfill-drive:
+	$(PY) scripts/backfill_laudos_drive.py $(if $(EMPRESA),--empresa $(EMPRESA),)
 
 sheets:
 ifndef EMPRESA

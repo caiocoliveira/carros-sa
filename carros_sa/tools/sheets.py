@@ -25,6 +25,7 @@ from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
 from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
+from carros_sa.tools.laudo_drive import DRIVE_URL_KEY
 from carros_sa.tools.tese import (
     calcular_tese,
     carregar_config_tese,
@@ -226,17 +227,16 @@ class SheetsExporter:
             )
             encerrado = encerrado_por_badge or encerrado_por_timer
 
-            # URL do PDF do laudo — filtra decoys (Transparência, listing) que
-            # ainda podem estar em `raw_json` de coletas antigas. Só exibimos
-            # link clicável se a URL passa pelo `is_laudo_pdf_url`.
+            # URL do laudo na planilha — 3 fontes em ordem de preferência:
+            #   1. Drive URL (permanente, NÃO expira) — populada pelo orquestrador
+            #      quando GOOGLE_DRIVE_LAUDOS_FOLDER_ID está configurado.
+            #   2. URL pré-assinada do storage do AA (`laudo_pdf_url`) — funciona
+            #      por ~1h após a coleta. Bom pra runs frescos, expira depois.
+            #   3. PDF salvo localmente em data/laudos_pdfs/ — fallback informativo
+            #      "PDF salvo (link expirado)" quando 1 e 2 não estão disponíveis.
+            laudo_drive_url = detalhe_raw.get(DRIVE_URL_KEY)
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
-            laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
-
-            # PDF persistido em data/laudos_pdfs/ — quando temos o arquivo local
-            # mas a URL pré-assinada do storage já expirou (URLs do Auto Avaliar
-            # vivem ~1h), sinaliza ao operador que o laudo FOI analisado e está
-            # salvo, mas o link clicável não vai funcionar. Antes mostrava só
-            # "—" no mesmo caso de URL ausente sem PDF, ofuscando essa diferença.
+            laudo_aa_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
             pdf_local_existe = (PDF_DIR_DEFAULT / f"{av.lote_id}.pdf").exists()
 
             # Laudo só conta como "analisado" se veio de um PDF real — fallback
@@ -278,7 +278,8 @@ class SheetsExporter:
                 "reforma_estimada": av.reforma_estimada,
                 "tese": tese_texto,
                 "url": lote.url,
-                "laudo_url": laudo_url,
+                "laudo_drive_url": laudo_drive_url,
+                "laudo_aa_url": laudo_aa_url,
                 "pdf_local_existe": pdf_local_existe,
                 "viavel": viavel,
                 "encerrado": encerrado,
@@ -328,15 +329,14 @@ class SheetsExporter:
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
-            # Link pro PDF do laudo. Três estados:
-            #   1. URL válida (passa em is_laudo_pdf_url)  → HYPERLINK clicável.
-            #   2. PDF salvo localmente mas URL ausente/expirada → texto descritivo
-            #      "PDF salvo (link expirado)" — sinaliza que o laudo FOI analisado
-            #      e está em data/laudos_pdfs/<lote>.pdf, só o link assinado morreu.
-            #      (URLs do storage do Auto Avaliar têm validade ~1h.)
-            #   3. Sem URL e sem PDF local → "—" (laudo de fato não disponível).
-            if r["laudo_url"]:
-                laudo_escaped = r["laudo_url"].replace('"', '""')
+            # Link pro PDF do laudo. Quatro estados em ordem de preferência:
+            #   1. Drive URL (permanente)               → HYPERLINK "Ver laudo"
+            #   2. URL pré-assinada do AA (fresca)      → HYPERLINK "Ver laudo"
+            #   3. PDF salvo localmente                 → "PDF salvo (link expirado)"
+            #   4. Nada                                 → "—"
+            laudo_link = r.get("laudo_drive_url") or r.get("laudo_aa_url")
+            if laudo_link:
+                laudo_escaped = laudo_link.replace('"', '""')
                 laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
             elif r.get("pdf_local_existe"):
                 laudo_cell = "PDF salvo (link expirado)"
@@ -623,9 +623,9 @@ class SheetsExporter:
             ],
             [
                 "Laudo",
-                "Scraper detalhe + PDF persistido",
-                "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs que não são laudo real (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url`; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL pré-assinada do storage já expirou (validade ~1h); (3) '—' quando não há URL nem PDF local.",
-                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (2) significa que o laudo FOI analisado (severidade/avarias estão certas), só o link clicável morreu — pra abrir, recolete o lote ou consulte data/laudos_pdfs/<lote>.pdf no laptop. Auditoria diária pelo `make auditar-laudos`.",
+                "Drive (permanente) → URL AA pré-assinada → PDF local",
+                "Quatro estados em ordem de preferência: (1) =HYPERLINK pro Drive do laudo (permanente, NÃO expira) quando GOOGLE_DRIVE_LAUDOS_FOLDER_ID está configurado; (2) =HYPERLINK pra URL pré-assinada do storage do Auto Avaliar (vive ~1h após coleta) — usada quando Drive ainda não foi populado pra esse lote; (3) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas (1) e (2) não estão disponíveis; (4) '—' quando não há nada.",
+                "Evidência material pra confirmar Reforma e avarias antes do lance. O fluxo correto é (1) — link permanente. Estado (2) é normal logo após uma triagem antes do upload pro Drive subir; (3) sinaliza que o laudo FOI analisado mas o link morreu (rode `make backfill-drive` pra promover legacy pra Drive); (4) é um gap real auditado por `make auditar-laudos --strict`.",
             ],
         ]
 

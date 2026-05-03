@@ -134,21 +134,17 @@ def _calcular_frete(lote: Lote, empresa: EmpresaConfig) -> CustoLogistico:
         else:
             distancia_km = 700
 
-    # Categoria do veículo — usa OUTRO se não tiver laudo ainda
-    categoria = CategoriaVeiculo.OUTRO
+    # Categoria do veículo — usa a heurística canônica de
+    # `agents.calibracao_giro._categoria_de_modelo` pra não duplicar listas
+    # (drift histórico: aqui só tinha 5 marcas hatch/sedan/suv/picape, enquanto
+    # o módulo canônico cobre ~50 modelos com lançamentos recentes — Polo, Pulse,
+    # Fastback, Tiggo, etc. Resultado: lote VW Polo virava OUTRO aqui mas HATCH
+    # na calibração de giro, ativando frete da categoria errada).
+    from carros_sa.agents.calibracao_giro import _categoria_de_modelo
     try:
-        # Tenta inferir da marca/modelo (heurística simples)
-        modelo_lower = (lote.modelo or "").lower()
-        if any(k in modelo_lower for k in ("hilux", "s10", "saveiro", "strada", "ranger")):
-            categoria = CategoriaVeiculo.PICAPE
-        elif any(k in modelo_lower for k in ("compass", "hr-v", "tracker", "creta", "haval", "evoque")):
-            categoria = CategoriaVeiculo.SUV
-        elif any(k in modelo_lower for k in ("onix", "hb20", "gol", "fiesta", "polo", "ka ")):
-            categoria = CategoriaVeiculo.HATCH
-        elif any(k in modelo_lower for k in ("cruze", "corolla", "civic", "jetta")):
-            categoria = CategoriaVeiculo.SEDAN
+        categoria = _categoria_de_modelo(lote.modelo or "")
     except Exception:
-        pass
+        categoria = CategoriaVeiculo.OUTRO
 
     frete = empresa.frete_para(distancia_km, categoria)
 

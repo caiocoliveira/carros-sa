@@ -27,6 +27,14 @@ from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
+# Limite acima do qual `preco_giro_fipe` (= webmotors_mediana × f_km) começa a
+# ficar suspeito. Por construção pode chegar a ~1.115×FIPE no fallback
+# `webmotors_mediana = FIPE × 0.97` somado a `f_km = 1.15` (km do lote MUITO
+# abaixo da mediana). Acima de 1.10 = combinação otimista das duas premissas
+# rodando ao mesmo tempo — sinal pra checar a entrada de Webmotors live ou km
+# do mercado. Não é bug matemático, é dado fraco.
+_PRECO_GIRO_FIPE_RATIO_MAX = 1.10
+
 
 # Validator retorna None se ok; string com motivo se suspeito.
 Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
@@ -69,14 +77,35 @@ CHECKS: Dict[str, Validator] = {
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
         else (
-            # Sanidade de cabeça: por construção `preco_max ≤ preco_giro × (1−margem_min)`
-            # < FIPE, tirando casos extremos (km do lote MUITO abaixo da mediana de
-            # mercado → f_km próximo do teto 1.15). Lance Máximo > FIPE × 1.05 é
-            # red flag — indica dado desalinhado (FIPE errada, mediana inflada,
-            # f_km saturado num caso onde não devia).
-            f"Lance Máximo R$ {v} > FIPE × 1.05 (FIPE={r.get('fipe')}) — checar âncora de revenda"
-            if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
-            else None
+            # Cross-check: preco_alvo > preco_max é violação por construção.
+            # `margem_aplicada >= margem.minima_absoluta` ⇒ `preco_alvo ≤ preco_max`
+            # sempre. Se inverteu, há bug ou dado corrompido (round-off não causa
+            # isso porque ambos usam o mesmo `int(round(...))` truncation).
+            f"preco_alvo R$ {r.get('preco_alvo')} > Lance Máximo R$ {v} — viola identidade do precificador"
+            if v is not None and r.get("preco_alvo") is not None and r["preco_alvo"] > v
+            else (
+                # Zona apertada: lance_atual já passou do alvo (entrada acima da
+                # margem calibrada) mas ainda cabe no teto. ROI/Lucro/mês exibidos
+                # devem usar `_score_roi_efetivo` — caso contrário, número otimista.
+                # Sinaliza pro operador que a folga é só pra margem mínima.
+                f"Zona apertada: lance_atual R$ {r.get('lance_atual')} > preco_alvo R$ {r.get('preco_alvo')} (Lance Máximo R$ {v}) — ROI realista < ROI alvo"
+                if (
+                    v is not None and r.get("preco_alvo") is not None
+                    and r.get("lance_atual") is not None
+                    and r["lance_atual"] > r["preco_alvo"]
+                    and r["lance_atual"] <= v
+                )
+                else (
+                    # Sanidade de cabeça: por construção `preco_max ≤ preco_giro × (1−margem_min)`
+                    # < FIPE, tirando casos extremos (km do lote MUITO abaixo da mediana de
+                    # mercado → f_km próximo do teto 1.15). Lance Máximo > FIPE × 1.05 é
+                    # red flag — indica dado desalinhado (FIPE errada, mediana inflada,
+                    # f_km saturado num caso onde não devia).
+                    f"Lance Máximo R$ {v} > FIPE × 1.05 (FIPE={r.get('fipe')}) — checar âncora de revenda"
+                    if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
+                    else None
+                )
+            )
         )
     ),
     # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
@@ -85,7 +114,20 @@ CHECKS: Dict[str, Validator] = {
     "FIPE (R$)": lambda v, r: (
         "FIPE não-positivo — provável falha do client FIPE ou cache stale"
         if isinstance(v, (int, float)) and v <= 0
-        else None
+        else (
+            # Sinaliza quando preco_giro_fipe (âncora de revenda usada no
+            # precificador) está muito acima da FIPE pura. Combinação típica
+            # que dispara: webmotors_mediana=FIPE×0.97 (fallback sem live data)
+            # + f_km saturado a 1.15 (km do lote << km mediana). Não é bug
+            # matemático, é dado fraco — duas premissas otimistas combinadas.
+            f"preco_giro_fipe R$ {r.get('preco_giro_fipe')} > FIPE × {_PRECO_GIRO_FIPE_RATIO_MAX:.2f} (FIPE={v}) — checar Webmotors live e km mediana"
+            if (
+                isinstance(v, (int, float)) and v > 0
+                and r.get("preco_giro_fipe") is not None
+                and r["preco_giro_fipe"] > int(v * _PRECO_GIRO_FIPE_RATIO_MAX)
+            )
+            else None
+        )
     ),
     "ROI anualizado (%)": lambda v, r: (
         "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d) ou score_roi inflado"
@@ -165,10 +207,14 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        # ROI anualizado = score_roi (caso médio no preço-alvo) anualizado.
-        # Igual ao SheetsExporter: ROI no máximo era quase-constante por empresa
-        # (≈margem_min/(1-margem_min)), virava tautologia inútil pra ranking.
-        roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
+        # ROI anualizado HONESTO: usa `score_roi_efetivo` que considera entrada
+        # por max(lance_atual, preco_alvo). Bate com o que o SheetsExporter
+        # exibe na planilha — auditoria não deve "ver" um ROI diferente do
+        # operador. Quando lance_atual ≤ preco_alvo, equivale a `score_roi`
+        # original (entrada pelo alvo é factível).
+        from carros_sa.tools.sheets import _score_roi_efetivo
+        score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
+        roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -207,6 +253,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "fim_em": fim_em_str,
             "km": lote.km,
             "lance_atual": lote.lance_atual or 0,
+            "preco_alvo": av.preco_alvo,
             "preco_max": av.preco_max,
             "fipe": av.fipe,
             "preco_giro_fipe": av.preco_giro_fipe,

@@ -224,3 +224,32 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | `02ad964` | RC4 | Short-circuit respeita laudo pendente |
 | `a142bcd` | RC4 | `motor_ok` default True quando ausente |
 | `e57bb3a` | P5 | Auditoria automática de colunas (hook) |
+| (2026-05-03) | P1, RC3, RC5 | ROI/Lucro mensal usavam `score_roi` puro; "viável" mas com lance > alvo exibia ROI ~2× otimista. Fix: `_score_roi_efetivo` no display + audit "Zona apertada" + glossário atualizado. |
+| (2026-05-03) | P5 | Audit `preco_giro_fipe > FIPE × 1.10` flag pra detectar fallback FIPE×0.97 + f_km saturado em série (dado fraco). Adicionado também cross-check `preco_alvo > preco_max` (impossível por construção, mas defesa em profundidade). |
+| (2026-05-03) | P3 | `_calcular_frete` no orquestrador tinha cópia reduzida da heurística de `_categoria_de_modelo` (5 marcas vs 50). Polo/Pulse/Fastback caíam em OUTRO no frete mas HATCH/SUV no giro. Refator: importar canônica. |
+
+---
+
+## Parte 4 — Padrão de "métricas otimistas em zona cinza"
+
+Sintoma identificado em 2026-05-03 durante revisão econômica autônoma:
+quando uma métrica derivada é calculada assumindo o cenário-alvo (ex.: ROI =
+score_roi calibrado pra entrada no preço-alvo), mas exibida sem condicionar
+ao estado atual do leilão, o operador vê números otimistas em lotes onde a
+entrada real seria mais cara.
+
+**Sinal:** `lance_atual > preco_alvo` mas a coluna ROI/Lucro mensal continua
+mostrando o cálculo do alvo. Operador conclui "ainda vale lance" baseado em
+ROI inflado.
+
+**Causa raiz:** confusão entre métrica intrínseca (caso médio, bom pra ranking
+algorítmico) vs métrica realista (entrada hoje, boa pra decisão humana). O
+DB persiste o intrinsic; a planilha exibe pro humano.
+
+**Antídoto:** toda coluna de "rendimento" exibida pro operador precisa
+considerar o `lance_atual`. Helper em `sheets._score_roi_efetivo` faz a
+conversão; testes em `TestScoreRoiEfetivo` cobrem casos limites.
+
+**Generalizando:** quando você publicar uma métrica derivada, pergunte:
+"essa métrica responde 'qual é o cenário X?' ou 'o que acontece se eu agir
+agora?'". Se for a segunda, o estado atual precisa entrar no cálculo.

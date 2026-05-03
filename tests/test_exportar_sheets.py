@@ -19,7 +19,9 @@ from carros_sa.tools.sheets import (
     HEADER,
     SheetsExporter,
     _col_letter,
+    _lucro_absoluto_efetivo,
     _lucro_absoluto_no_alvo,
+    _score_roi_efetivo,
 )
 
 
@@ -139,6 +141,72 @@ class TestLucroAbsolutoNoAlvo:
     def test_preco_giro_zero_retorna_zero(self):
         av = _avaliacao(preco_giro=0, score_roi=0.3)
         assert _lucro_absoluto_no_alvo(av) == 0
+
+    def test_score_roi_none_nao_quebra(self):
+        """Defesa contra registros antigos com NULL — `None <= 0` levantava
+        TypeError e quebrava planilha inteira. Agora cai no caminho de zero."""
+        av = _avaliacao(score_roi=0.3)
+        av.score_roi = None
+        assert _lucro_absoluto_no_alvo(av) == 0
+
+
+class TestScoreRoiEfetivo:
+    """ROI honesto: quando lance_atual > preco_alvo, o capital empatado real
+    cresce e o ROI efetivo cai. Quando lance_atual ≤ preco_alvo, mantém o
+    score_roi original (entrada pelo alvo é factível)."""
+
+    def test_lance_abaixo_do_alvo_devolve_score_roi(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        # lance abaixo do alvo (default=25000) → score_efetivo = score_roi
+        assert _score_roi_efetivo(av, 20000) == pytest.approx(0.4, abs=1e-9)
+
+    def test_lance_no_alvo_devolve_score_roi(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        assert _score_roi_efetivo(av, 25000) == pytest.approx(0.4, abs=1e-9)
+
+    def test_lance_acima_do_alvo_reduz_score(self):
+        # capital_alvo = 50000 / 1.4 ≈ 35714. Lance 30k > alvo 25k:
+        # capital_ef = 35714 + (30000-25000) = 40714. score_ef = (50000-40714)/40714 ≈ 0.228
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        score_ef = _score_roi_efetivo(av, 30000)
+        assert score_ef < 0.4
+        assert score_ef == pytest.approx(0.228, abs=0.01)
+
+    def test_lance_none_devolve_score_roi(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        assert _score_roi_efetivo(av, None) == pytest.approx(0.4, abs=1e-9)
+
+    def test_lance_destruidor_zera_score(self):
+        # Lance absurdo > preco_giro torna capital_ef > preco_giro → ROI<0,
+        # cai pra 0 (não exibimos ROI negativo realista — operador já tem o
+        # sinal de "Caro demais").
+        av = _avaliacao(score_roi=0.4, preco_giro=50000, preco_max=30000)
+        score_ef = _score_roi_efetivo(av, 100000)
+        assert score_ef <= 0.0  # capital_ef >= preco_giro
+
+    def test_score_roi_none_nao_quebra(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        av.score_roi = None
+        assert _score_roi_efetivo(av, 30000) == 0.0
+
+
+class TestLucroAbsolutoEfetivo:
+    """Espelha _lucro_absoluto_no_alvo mas usando o capital efetivo (lance > alvo)."""
+
+    def test_lance_abaixo_do_alvo_igual_a_lucro_no_alvo(self):
+        av = _avaliacao(score_roi=0.3, preco_giro=50000)
+        assert _lucro_absoluto_efetivo(av, 20000) == _lucro_absoluto_no_alvo(av)
+
+    def test_lance_acima_do_alvo_reduz_lucro(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        lucro_alvo = _lucro_absoluto_no_alvo(av)
+        lucro_ef = _lucro_absoluto_efetivo(av, 30000)
+        assert lucro_ef > 0
+        assert lucro_ef < lucro_alvo
+
+    def test_lance_destruidor_zera_lucro(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        assert _lucro_absoluto_efetivo(av, 100000) == 0
 
 
 class TestSheetsExporterQuery:

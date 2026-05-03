@@ -200,6 +200,75 @@ class TestAuditDeteccao:
 # Agregação por coluna (várias linhas → uma única violação com contagem)
 # ---------------------------------------------------------------------------
 
+class TestAuditCrossCheck:
+    """Invariantes que cruzam mais de uma coluna (preco_alvo vs preco_max,
+    preco_giro_fipe vs FIPE, lance_atual vs preco_alvo).
+    """
+
+    def test_preco_giro_fipe_acima_de_fipe_x_110_sinalizado(self):
+        """Combinação fallback FIPE×0.97 + f_km saturado a 1.15 produz
+        preco_giro_fipe ≈ 1.115 × FIPE — duas premissas otimistas em série.
+        Audit avisa pra checar Webmotors live e km mediana de mercado.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                fipe=70_000,
+                preco_giro_fipe=80_000,  # 80k / 70k = 1.143 > 1.10
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("preco_giro_fipe" in v and "1.10" in v for v in violacoes), (
+            f"Esperava violação preco_giro_fipe > FIPE×1.10 em {violacoes}"
+        )
+
+    def test_preco_giro_fipe_dentro_da_tolerancia_nao_sinaliza(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001",
+                fipe=70_000,
+                preco_giro_fipe=75_000,  # 75k / 70k = 1.071 < 1.10
+            ))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("preco_giro_fipe" in v for v in violacoes), (
+            f"Não esperava violação dentro da tolerância: {violacoes}"
+        )
+
+    def test_zona_apertada_lance_acima_do_alvo_sinalizada(self):
+        """`lance_atual > preco_alvo` mas ainda `≤ preco_max` é zona apertada:
+        operador pode dar lance, mas o ROI exibido deve usar score_efetivo
+        (não o intrinsic). Audit avisa pra confirmar que o ROI realista bate.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=27_000))  # alvo=25k, max=30k
+            session.add(_avaliacao("L001", preco_max=30_000))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Zona apertada" in v for v in violacoes), (
+            f"Esperava aviso de zona apertada em {violacoes}"
+        )
+
+    def test_lance_abaixo_do_alvo_nao_dispara_zona_apertada(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20_000))  # alvo=25k, max=30k
+            session.add(_avaliacao("L001", preco_max=30_000))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Zona apertada" in v for v in violacoes), (
+            f"Não esperava zona apertada quando lance < alvo: {violacoes}"
+        )
+
+
 class TestAuditAgregacao:
     def test_multiplas_linhas_problema_mesma_coluna_agrupadas(self):
         engine = _engine_mem()

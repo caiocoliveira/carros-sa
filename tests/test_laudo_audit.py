@@ -53,12 +53,15 @@ def _lote(
     lote_id: str = "L001",
     *,
     laudo_pdf_url: Optional[str] = URL_OK,
+    laudo_drive_url: Optional[str] = None,
     fim_em: Optional[datetime] = None,
     encerrado: bool = False,
 ) -> Lote:
     if fim_em is None:
         fim_em = datetime.now() + timedelta(days=3)
     detalhe = {"laudo_pdf_url": laudo_pdf_url}
+    if laudo_drive_url is not None:
+        detalhe["laudo_drive_url"] = laudo_drive_url
     if encerrado:
         detalhe["encerrado"] = True
     return Lote(
@@ -184,6 +187,31 @@ class TestVerificarLaudoCompleto:
         assert "pdf_ausente" in s.motivo
         assert "cache_confianca_baixa" in s.motivo
         assert "url_invalida_ou_ausente" in s.motivo
+
+    def test_drive_url_satisfaz_url_persistida_mesmo_sem_storage_url(self, tmp_path):
+        """Drive URL é link permanente — basta dela existir pra audit considerar
+        URL satisfeita. Storage pré-assinada expira em ~1h, Drive não."""
+        _criar_pdf_fake(tmp_path, "L001")
+        s = verificar_laudo_completo(
+            _lote("L001",
+                  laudo_pdf_url=None,  # storage expirou/sumiu
+                  laudo_drive_url="https://drive.google.com/file/d/abc/view"),
+            _laudo(confidence=0.9),
+            pdf_dir=tmp_path,
+        )
+        assert s.url_persistida_ok is True
+        assert s.completo is True
+
+    def test_drive_url_e_storage_url_ambas_validas_continua_completo(self, tmp_path):
+        _criar_pdf_fake(tmp_path, "L001")
+        s = verificar_laudo_completo(
+            _lote("L001", laudo_pdf_url=URL_OK,
+                  laudo_drive_url="https://drive.google.com/file/d/abc/view"),
+            _laudo(confidence=0.9),
+            pdf_dir=tmp_path,
+        )
+        assert s.url_persistida_ok is True
+        assert s.completo is True
 
 
 # ---------------------------------------------------------------------------

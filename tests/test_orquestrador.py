@@ -388,6 +388,133 @@ class TestValidadorPdfLaudo:
         assert path.parent.exists()  # função cria o dir
 
 
+class TestPersistirDriveUrl:
+    """Hook do orquestrador que sobe o PDF pro Drive e persiste o webViewLink.
+
+    Caminho-padrão (Drive não configurado) tem que ser no-op silencioso —
+    pipeline NUNCA quebra por causa do upload, link permanente é melhoramento.
+    """
+
+    def _lote_com_pdf_url(self, lote_id: str, drive_url: Optional[str] = None) -> Lote:
+        from datetime import datetime as _dt
+        detalhe = {"laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/x.pdf?sig=tmp"}
+        if drive_url is not None:
+            detalhe["laudo_drive_url"] = drive_url
+        return Lote(
+            id=lote_id,
+            leilao="auto_avaliar",
+            url=f"https://autoavaliar.com.br/lote/{lote_id}",
+            marca="Ford",
+            modelo="Fiesta",
+            ano=2017,
+            km=50_000,
+            lance_atual=15_000,
+            fim_em=_dt(2030, 1, 1),
+            origem_cidade="Uberlândia",
+            origem_uf="MG",
+            raw_json={"detalhe": detalhe},
+            scraped_at=_dt.utcnow(),
+        )
+
+    def test_sem_config_drive_e_no_op(self, tmp_path, monkeypatch):
+        """Sem GOOGLE_DRIVE_FOLDER_ID, função sai sem chamar API e sem mexer no DB."""
+        monkeypatch.delenv("GOOGLE_DRIVE_FOLDER_ID", raising=False)
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_PATH", raising=False)
+        from carros_sa.orquestrador import _persistir_drive_url
+
+        engine = _engine()
+        pdf_path = tmp_path / "L001.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n" + b"x" * 10_000)
+
+        with Session(engine) as session:
+            lote = self._lote_com_pdf_url("L001")
+            session.add(lote)
+            session.commit()
+            _persistir_drive_url(lote, pdf_path, session)
+            assert (lote.raw_json or {}).get("detalhe", {}).get("laudo_drive_url") is None
+
+    def test_drive_url_ja_persistida_pula_upload(self, tmp_path, monkeypatch):
+        """Idempotência: lote com laudo_drive_url já presente não chama uploader."""
+        monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "folder-abc")
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_PATH", "/fake.json")
+        from carros_sa.orquestrador import _persistir_drive_url
+
+        engine = _engine()
+        pdf_path = tmp_path / "L001.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n" + b"x" * 10_000)
+
+        uploader_mock = MagicMock()
+        with Session(engine) as session:
+            lote = self._lote_com_pdf_url("L001", drive_url="https://drive.google.com/file/d/old/view")
+            session.add(lote)
+            session.commit()
+
+            with patch("carros_sa.tools.drive_uploader.build_default_uploader", return_value=uploader_mock):
+                _persistir_drive_url(lote, pdf_path, session)
+
+        uploader_mock.upload_pdf.assert_not_called()
+
+    def test_upload_persiste_drive_url_no_raw_json(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "folder-abc")
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_PATH", "/fake.json")
+        from carros_sa.orquestrador import _persistir_drive_url
+
+        engine = _engine()
+        pdf_path = tmp_path / "L001.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n" + b"x" * 10_000)
+
+        web_link = "https://drive.google.com/file/d/novo/view"
+        uploader_mock = MagicMock()
+        uploader_mock.upload_pdf.return_value = web_link
+
+        with Session(engine) as session:
+            lote = self._lote_com_pdf_url("L001")
+            session.add(lote)
+            session.commit()
+
+            with patch("carros_sa.tools.drive_uploader.build_default_uploader", return_value=uploader_mock):
+                _persistir_drive_url(lote, pdf_path, session)
+
+            # Re-fetch pra confirmar persistência
+            lote_persistido = session.get(Lote, "L001")
+            assert lote_persistido.raw_json["detalhe"]["laudo_drive_url"] == web_link
+            # PDF original (storage) não foi alterado
+            assert "laudo_pdf_url" in lote_persistido.raw_json["detalhe"]
+
+        uploader_mock.upload_pdf.assert_called_once()
+        # file_name=<lote>.pdf (essencial pra idempotência via busca por nome)
+        kwargs = uploader_mock.upload_pdf.call_args.kwargs
+        assert kwargs["file_name"] == "L001.pdf"
+
+    def test_upload_falha_nao_quebra_pipeline(self, tmp_path, monkeypatch, caplog):
+        """Falha de rede/API loga warning mas pipeline segue — DB não é mutado."""
+        import logging
+        monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "folder-abc")
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_PATH", "/fake.json")
+        from carros_sa.orquestrador import _persistir_drive_url
+
+        engine = _engine()
+        pdf_path = tmp_path / "L001.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n" + b"x" * 10_000)
+
+        uploader_mock = MagicMock()
+        uploader_mock.upload_pdf.side_effect = RuntimeError("rede caiu")
+
+        with Session(engine) as session:
+            lote = self._lote_com_pdf_url("L001")
+            session.add(lote)
+            session.commit()
+
+            with patch("carros_sa.tools.drive_uploader.build_default_uploader", return_value=uploader_mock):
+                with caplog.at_level(logging.WARNING):
+                    _persistir_drive_url(lote, pdf_path, session)
+
+            lote_persistido = session.get(Lote, "L001")
+            assert "laudo_drive_url" not in (lote_persistido.raw_json.get("detalhe") or {})
+
+        assert any("drive_upload falhou" in rec.message for rec in caplog.records)
+
+
 class TestPersistencia:
     def test_upsert_lote_novo(self):
         from carros_sa.models import LoteRaw

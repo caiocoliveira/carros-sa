@@ -95,6 +95,46 @@ def _pdf_eh_laudo_valido(pdf_path: Path) -> bool:
     return True
 
 
+def _persistir_drive_url(lote: Lote, pdf_path: Path, session) -> None:
+    """Sobe PDF pro Drive (se configurado) e persiste webViewLink no raw_json.
+
+    Fail-soft em qualquer estágio: sem GOOGLE_DRIVE_FOLDER_ID o builder retorna
+    None e a função vira no-op; falha de rede/API loga warning e segue.
+    A pipeline NUNCA quebra por causa do upload — link permanente é
+    melhoramento, não pré-requisito da avaliação.
+    """
+    from carros_sa.tools.drive_uploader import build_default_uploader
+
+    uploader = build_default_uploader()
+    if uploader is None:
+        return
+
+    # Já temos URL permanente persistida? Pula upload (idempotência também é
+    # garantida pelo `_buscar_existente` no uploader, mas evitar a chamada de
+    # API quando já sabemos a resposta economiza ~1 round-trip por lote).
+    detalhe_atual = (lote.raw_json or {}).get("detalhe") or {}
+    if detalhe_atual.get("laudo_drive_url"):
+        return
+
+    try:
+        web_link = uploader.upload_pdf(pdf_path, file_name=f"{lote.id}.pdf")
+    except Exception as exc:
+        # Loga mas não quebra — usuário continua com URL pré-assinada como fallback.
+        import logging
+        logging.getLogger(__name__).warning(
+            "drive_upload falhou pro lote %s: %s", lote.id, exc,
+        )
+        return
+
+    raw_atual = dict(lote.raw_json or {})
+    det_atual = dict(raw_atual.get("detalhe") or {})
+    det_atual["laudo_drive_url"] = web_link
+    raw_atual["detalhe"] = det_atual
+    lote.raw_json = raw_atual
+    session.add(lote)
+    session.commit()
+
+
 # ---------------------------------------------------------------------------
 # Frete heurístico (sem geo lookup externo)
 # ---------------------------------------------------------------------------
@@ -544,12 +584,22 @@ async def _pipeline_lote(
                     raw_atual = dict(lote.raw_json or {})
                     det_atual = dict(raw_atual.get("detalhe") or {})
                     det_atual["laudo_pdf_url"] = None
+                    # Drive URL também precisa ser limpada: o PDF foi rejeitado,
+                    # não temos certeza se um upload anterior tinha o mesmo arquivo.
+                    det_atual.pop("laudo_drive_url", None)
                     raw_atual["detalhe"] = det_atual
                     lote.raw_json = raw_atual
                     session.add(lote)
                     session.commit()
             except Exception:
                 pdf_dest = None
+
+        # Upload pro Drive — link permanente que sobrevive à expiração da URL
+        # pré-assinada do storage Auto Avaliar (~1h). Idempotente por nome do
+        # arquivo (`<lote_id>.pdf`), então rodar a triagem de novo não duplica.
+        # No-op silencioso quando GOOGLE_DRIVE_FOLDER_ID não está setado.
+        if pdf_dest is not None:
+            _persistir_drive_url(lote, pdf_dest, session)
 
         if pdf_dest is not None:
             try:

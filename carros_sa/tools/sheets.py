@@ -232,6 +232,12 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
+            # URL permanente no Google Drive — quando configurado (env
+            # GOOGLE_DRIVE_FOLDER_ID), o orquestrador sobe o PDF e persiste o
+            # webViewLink em `detalhe.laudo_drive_url`. Tem precedência sobre
+            # a URL pré-assinada do storage (que expira em ~1h).
+            laudo_drive_url = detalhe_raw.get("laudo_drive_url") or None
+
             # PDF persistido em data/laudos_pdfs/ — quando temos o arquivo local
             # mas a URL pré-assinada do storage já expirou (URLs do Auto Avaliar
             # vivem ~1h), sinaliza ao operador que o laudo FOI analisado e está
@@ -279,6 +285,7 @@ class SheetsExporter:
                 "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
+                "laudo_drive_url": laudo_drive_url,
                 "pdf_local_existe": pdf_local_existe,
                 "viavel": viavel,
                 "encerrado": encerrado,
@@ -328,14 +335,18 @@ class SheetsExporter:
                 url_cell = f'=HYPERLINK("{url_escaped}"; "Abrir anúncio")'
             else:
                 url_cell = "—"
-            # Link pro PDF do laudo. Três estados:
-            #   1. URL válida (passa em is_laudo_pdf_url)  → HYPERLINK clicável.
-            #   2. PDF salvo localmente mas URL ausente/expirada → texto descritivo
-            #      "PDF salvo (link expirado)" — sinaliza que o laudo FOI analisado
-            #      e está em data/laudos_pdfs/<lote>.pdf, só o link assinado morreu.
-            #      (URLs do storage do Auto Avaliar têm validade ~1h.)
-            #   3. Sem URL e sem PDF local → "—" (laudo de fato não disponível).
-            if r["laudo_url"]:
+            # Link pro PDF do laudo. Quatro estados, em ordem de preferência:
+            #   1. Drive URL persistida (link permanente, sobrevive entre runs).
+            #      É o estado-alvo quando GOOGLE_DRIVE_FOLDER_ID está configurado.
+            #   2. URL pré-assinada do storage (válida ~1h após a triagem).
+            #   3. PDF salvo localmente mas sem URL renderizável → texto
+            #      descritivo "PDF salvo (link expirado)". Cobre o gap até o
+            #      sync_laudos_drive popular o Drive URL retroativamente.
+            #   4. Sem nada → "—" (laudo de fato não disponível).
+            if r.get("laudo_drive_url"):
+                drive_escaped = r["laudo_drive_url"].replace('"', '""')
+                laudo_cell = f'=HYPERLINK("{drive_escaped}"; "Ver laudo")'
+            elif r["laudo_url"]:
                 laudo_escaped = r["laudo_url"].replace('"', '""')
                 laudo_cell = f'=HYPERLINK("{laudo_escaped}"; "Ver laudo")'
             elif r.get("pdf_local_existe"):
@@ -623,9 +634,9 @@ class SheetsExporter:
             ],
             [
                 "Laudo",
-                "Scraper detalhe + PDF persistido",
-                "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs que não são laudo real (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url`; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL pré-assinada do storage já expirou (validade ~1h); (3) '—' quando não há URL nem PDF local.",
-                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (2) significa que o laudo FOI analisado (severidade/avarias estão certas), só o link clicável morreu — pra abrir, recolete o lote ou consulte data/laudos_pdfs/<lote>.pdf no laptop. Auditoria diária pelo `make auditar-laudos`.",
+                "Drive (preferencial) + PDF persistido + scraper detalhe",
+                "Quatro estados, em ordem de preferência: (1) =HYPERLINK pro Drive URL permanente quando GOOGLE_DRIVE_FOLDER_ID está configurado e o PDF foi sincronizado; (2) =HYPERLINK pra URL pré-assinada do storage (válida só ~1h após a triagem); (3) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas nenhuma URL renderizável; (4) '—' quando não há nada.",
+                "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (1) é o alvo — link sobrevive entre runs. Estado (2) só é estável dentro da janela de ~1h pós-triagem. Estado (3) significa que o laudo FOI analisado (severidade/avarias estão certas), mas precisa rodar `make sync-laudos-drive` pra subir pro Drive e voltar pro estado (1). Auditoria diária pelo `make auditar-laudos`.",
             ],
         ]
 

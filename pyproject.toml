@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "typer>=0.12",
     "gspread>=6.0",
+    "google-api-python-client>=2.100",  # Drive uploader (link permanente do laudo)
     # Adicionados explicitamente no upgrade 3.9 → 3.12 (estavam só no venv
     # antigo, sem trilha em pyproject — recriar venv quebrava o pipeline).
     "anthropic>=0.40",      # vision/text fallback

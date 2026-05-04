@@ -542,6 +542,75 @@ class TestSheetsExporterQuery:
         assert "doc-b2b/laudos/L001/laudo.pdf" in cell
         assert "Ver laudo" in cell
 
+    def test_exportar_laudo_drive_url_tem_precedencia_sobre_storage(self):
+        """Quando há tanto Drive URL quanto storage URL, o Drive é o link
+        clicável renderizado (permanente vs efêmero ~1h). Sem isso, a planilha
+        seguiria mostrando o link expirado mesmo com upload no Drive feito."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.raw_json = {
+                "detalhe": {
+                    "laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/laudos/L001/laudo.pdf?sig=tmp",
+                    "laudo_drive_url": "https://drive.google.com/file/d/abc123/view",
+                }
+            }
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_laudo = HEADER.index("Laudo")
+        cell = rows[2][idx_laudo]
+        assert cell.startswith("=HYPERLINK(")
+        assert "drive.google.com/file/d/abc123/view" in cell
+        assert "doc-b2b" not in cell, "storage URL não deveria aparecer quando Drive existe"
+        assert "Ver laudo" in cell
+
+    def test_exportar_drive_url_sozinha_vira_hyperlink(self):
+        """Drive URL sem storage URL ainda renderiza link clicável."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.raw_json = {
+                "detalhe": {
+                    "laudo_drive_url": "https://drive.google.com/file/d/xyz/view",
+                }
+            }
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_laudo = HEADER.index("Laudo")
+        cell = rows[2][idx_laudo]
+        assert "drive.google.com/file/d/xyz/view" in cell
+        assert "Ver laudo" in cell
+
     def test_exportar_laudo_url_decoy_transparencia_vira_placeholder(self):
         """URL de Relatório de Transparência (decoy conhecido) NÃO deve virar
         hyperlink — célula fica '—'. Evita o usuário clicar num PDF de RH

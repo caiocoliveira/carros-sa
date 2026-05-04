@@ -13,10 +13,12 @@ PYTHON="$REPO_DIR/.venv/bin/python3"
 SCRIPT="$REPO_DIR/scripts/triagem_diaria.py"
 RETRY_SCRIPT="$REPO_DIR/scripts/reprocessar_lotes_do_db.py"
 DECOY_SCRIPT="$REPO_DIR/scripts/limpar_decoys_laudo.py"
+DRIVE_SYNC_SCRIPT="$REPO_DIR/scripts/sync_laudos_drive.py"
+AUDIT_SCRIPT="$REPO_DIR/scripts/auditar_laudos.py"
 LOG="/tmp/carros_sa_triagem.log"
 CRON_MARK="carros-sa-triagem"
-# Pipeline diário: (1) triagem completa → (2) limpeza de decoys de laudo →
-# (3) retry automático de laudos pendentes.
+# Pipeline diário: (1) triagem → (2) limpa decoys → (3) retry de pendentes →
+# (4) sync de PDFs pro Drive → (5) auditoria final.
 #
 # (2) limpar_decoys: até abril/2026, um seletor JS frouxo do scraper pegava o
 # link do "Relatório de Transparência Salarial" (rodapé institucional) como se
@@ -31,7 +33,18 @@ CRON_MARK="carros-sa-triagem"
 # `_laudo_sem_pdf` com confidence=0.5. Sem esse passe, o lote ia pra planilha
 # como "LAUDO NÃO CAPTURADO" até a próxima coleta. Cheap — pula listagem e
 # só visita a URL dos lotes pendentes (inclui os que o limpar_decoys marcou).
-CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1 # $CRON_MARK"
+#
+# (4) sync_laudos_drive: as URLs pré-assinadas do storage Auto Avaliar expiram
+# em ~1h. Sem este passe, qualquer planilha consultada >1h depois da triagem
+# tem link morto na coluna Laudo. O sync sobe o PDF persistido em
+# data/laudos_pdfs/<lote>.pdf pro Google Drive (idempotente — já existente é
+# reusado) e persiste o webViewLink. No-op silencioso quando GOOGLE_DRIVE_FOLDER_ID
+# não está setado.
+#
+# (5) auditar_laudos: relatório final de completude (PDF + cache + URL). Sem
+# --strict pra não derrubar o cron por incompletude conhecida; o operador lê
+# o tail do log se quiser saber o estado.
+CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DRIVE_SYNC_SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$AUDIT_SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1 # $CRON_MARK"
 
 if [[ "${1:-}" == "--remove" ]]; then
     echo "Removendo entrada do cron..."
@@ -58,7 +71,7 @@ fi
 
 echo "✓ Cron configurado:"
 echo "  Horário: todo dia às 07:00 e 13:00"
-echo "  Comando: triagem_diaria.py + limpar_decoys_laudo.py + retry de laudos pendentes"
+echo "  Pipeline: triagem → limpar_decoys → retry → sync_laudos_drive → auditar_laudos"
 echo "  Log:     $LOG"
 echo ""
 echo "Para verificar: crontab -l | grep carros-sa"

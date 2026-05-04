@@ -98,7 +98,12 @@ def verificar_laudo_completo(
 
     detalhe = (lote.raw_json or {}).get("detalhe") if isinstance(lote.raw_json, dict) else None
     url = (detalhe or {}).get("laudo_pdf_url") if isinstance(detalhe, dict) else None
-    url_ok = is_laudo_pdf_url(url)
+    drive_url = (detalhe or {}).get("laudo_drive_url") if isinstance(detalhe, dict) else None
+    # Aceita qualquer URL renderizável: Drive permanente OU storage pré-assinado.
+    # O Drive é o estado-alvo (sobrevive entre runs); o storage é fallback de
+    # curta duração. Audit considera URL ok se qualquer um dos dois existir e
+    # for válido — espelha a precedência do exporter.
+    url_ok = bool(drive_url) or is_laudo_pdf_url(url)
 
     s = StatusLaudo(
         lote_id=lote.id,

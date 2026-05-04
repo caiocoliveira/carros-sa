@@ -171,6 +171,34 @@ class TestCalcularFrete:
         assert frete_sp.distancia_km < frete_am.distancia_km
         assert frete_sp.frete_estimado <= frete_am.frete_estimado
 
+    def test_frete_categoria_explicita_usada(self):
+        """Quando categoria é passada (caso de uso real do pipeline), usa-se
+        ela direto — não re-deriva do nome do modelo."""
+        empresa = _empresa()
+        lote = _lote(uf="GO")
+        lote.origem_cidade = "Goiânia"
+        # Goiânia → Uberlândia haversine ~270km → faixa 0-300.
+        # PICAPE=1500, HATCH=800.
+        frete_picape = _calcular_frete(lote, empresa, categoria=CategoriaVeiculo.PICAPE)
+        frete_hatch = _calcular_frete(lote, empresa, categoria=CategoriaVeiculo.HATCH)
+        assert frete_picape.frete_estimado == 1500
+        assert frete_hatch.frete_estimado == 800
+        assert frete_picape.categoria_veiculo == CategoriaVeiculo.PICAPE
+
+    def test_frete_fallback_usa_categoria_de_modelo_alinhada(self):
+        """Sem categoria explícita, usa `_categoria_de_modelo` (mesma lista de
+        calibracao_giro). Toro era OUTRO antes do fix; agora PICAPE.
+
+        Faixa 0-300: PICAPE=1500, OUTRO=1200. Diferença prova alinhamento.
+        """
+        empresa = _empresa()
+        lote = _lote(uf="MG")
+        lote.modelo = "Toro Volcano 2.0 Diesel"
+        lote.origem_cidade = "Araguari"  # ~40km do pátio (Uberlândia)
+        frete = _calcular_frete(lote, empresa)
+        assert frete.categoria_veiculo == CategoriaVeiculo.PICAPE
+        assert frete.frete_estimado == 1500  # PICAPE 0-300, não OUTRO 1200
+
 
 # ---------------------------------------------------------------------------
 # Testes de _pipeline_lote

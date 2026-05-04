@@ -140,3 +140,17 @@ Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_colum
 
 ### Workflow de revisão autônoma
 Quando o usuário pedir "revise e corrija" sem direcionar, o caminho que funcionou foi: (1) ler ROADMAP + precificador + sheets + tests existentes, (2) ESCREVER UM SCRIPT DE SIMULAÇÃO (`/tmp/sim.py`) com lote real conhecido (Polo Track 2024 do YAML) e validar identidades algébricas comparando docstring vs implementação, (3) só depois confirmar bugs e refatorar. Pular a simulação leva a "fixes" baseados em leitura — frequentemente errados.
+
+**Cenários adversariais obrigatórios na simulação** (revisão 2026-05-04 — pular esses leva a bugs raros mas catastróficos):
+- **Outlier num agregador.** n=2 com 1 elemento muito acima/abaixo. Mediana isolada NÃO defende contra outlier categórico (similar de outro modelo) — precisa cap declarado em conhecimento de domínio.
+- **Saturação de bounds.** severidade ESTRUTURAL + motor NÃO OK + doc PENDENCIA_GRAVE + confidence 0.5 simultâneos. Se o resultado vira `score_roi` >100% ou `margem_aplicada` >0.50, há fórmula explodindo.
+- **Heurística DRY.** Quando 2 funções diferentes inferem categoria/tipo/bucket pelo mesmo input, conferir se as listas batem. Drift entre elas = bug arquitetural silencioso (ex.: Toro era PICAPE em `_categoria_de_modelo` mas OUTRO em `_calcular_frete` antes do fix).
+
+### Cap como defesa contra fornecedor adversarial
+Auto Avaliar pode trazer "similares" de outro modelo/versão (Tiggo 7 entre Tiggo 2, Cherokee entre Compass). Se a amostra é pequena (n<5), 1 outlier puxa a mediana e o sistema recomenda lance ACIMA da FIPE. Sempre que houver agregação estatística sobre fonte externa instável: declarar TETO em domínio (ex.: "Civic vende até ~110% FIPE legitimamente, cap em 120%") e logar warning quando aciona. `statistics.median` por si não defende contra outlier categórico — só contra outlier numérico de mesma distribuição. Implementação canônica em `agents/avaliador_mercado.py` linha ~133 (cap `FIPE × 1.20` quando `n < 5`).
+
+### Cap absoluto em margem_aplicada (≤ 0.50)
+`margem_calculada = base × fator_risco × fator_liquidez` pode chegar a 90% em Uberlândia (0.25×2.0×1.8) e mais em SP. Sem cap, lotes inviáveis (estrutural+motor ruim+saturado) saem com score_roi >100% e poluem audit/logs. Cap em 0.50 mantém ranking de lotes calibrados (≤0.50 cobre todos realistas) e dá número honesto pros extremos. Trade-off: empresas com bounds altos (SP) saturam — perde-se diferenciação pelo eixo "alvo" (`preco_alvo`) entre lotes inviáveis, mas o eixo "teto" (`preco_max` via `minima_absoluta`) continua diferenciando empresas exigentes vs conservadoras. Implementação em `precificador.py` linha ~141.
+
+### Categoria do veículo é canônica em `calibracao_giro._categoria_de_modelo`
+Tem que ser fonte ÚNICA pra (frete, dias_giro, popularidade). `_calcular_frete(lote, empresa, categoria=None)` aceita o resultado já resolvido pelo `_pipeline_lote` (laudo + fallback `_categoria_de_modelo`). Quando `categoria=None`, fallback ao MESMO `_categoria_de_modelo`. Não criar terceira lista de keywords pra qualquer feature nova — passa pela função canônica. Antes do fix de 2026-05-04, drift entre listas dava frete errado em Toro/Pulse/Tucson silenciosamente.

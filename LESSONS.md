@@ -72,6 +72,23 @@ de várias rodadas de "operador vê, operador reclama, eu conserto". Muitos dos
 fixes acima teriam sido pegos em `make test` se o `audit.py` existisse em
 2026-04-10 (ex.: `fim_em=None` na planilha, ROI > 500%, severidade fora do enum).
 
+### P6. Estatística de fornecedor instável aplicada sem cap
+
+Sintoma: agregação (mediana, média) sobre dados externos pequenos e ruidosos
+contamina derivações downstream. Um único outlier no AA com n=2 puxa a mediana
+pra 150% da FIPE, e o lance máximo recomendado fica >FIPE — operador
+compraria carro acima do valor de tabela.
+
+Casos:
+- **Mediana de similares Auto Avaliar** (workstream X, 2026-05-04) — `statistics.median([80k, 180k])=130k` para um Corolla com FIPE=85k → preco_max=130% FIPE. AA inclui similares de outro modelo (Tiggo 7 entre Tiggo 2, Cherokee entre Compass) sem que o AvaliadorMercado filtrasse por similaridade. Fix: cap em `FIPE × 1.20` quando `n < 5`. Razão do cap: amostra pequena de fonte adversarial não merece confiança total na cauda; carros legítimos no Brasil raramente vendem >120% FIPE.
+- **`margem_aplicada` × bounds da empresa** — base × fator_risco × fator_liquidez no pior caso (lote estrutural + motor não OK + mercado saturado) podia chegar a 71% em Uberlândia e ainda mais em SP, gerando score_roi >100% que poluía audit. Cap em 0.50.
+
+**Antídoto operacional:** toda agregação estatística sobre fornecedor externo
+tem teto explícito justificado em conhecimento de domínio (ex.: "Civic e
+Corolla vendem até ~110% FIPE legitimamente; cap em 120% é teto generoso"),
+e o teto loga warning quando aciona. Mediana isolada não é defesa suficiente
+contra outlier categórico — precisa cap declarado.
+
 ---
 
 ## Parte 2 — Causa raiz: o que está por baixo dos padrões
@@ -224,3 +241,6 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | `02ad964` | RC4 | Short-circuit respeita laudo pendente |
 | `a142bcd` | RC4 | `motor_ok` default True quando ausente |
 | `e57bb3a` | P5 | Auditoria automática de colunas (hook) |
+| _workstream X_ | P6, RC2 | Cap mediana_AA inflada em FIPE×1.20 quando n<5 |
+| _workstream X_ | P6 | Cap absoluto margem_aplicada ≤ 0.50 |
+| _workstream X_ | P4 | DRY de categoria do veículo (frete × calibração) |

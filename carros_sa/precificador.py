@@ -137,9 +137,16 @@ def precificar(
     fator_risco = calcular_fator_risco(laudo, empresa.fator_risco_bounds)
     fator_liquidez = calcular_fator_liquidez(mercado, empresa.fator_liquidez_bounds)
 
-    # 3. Margem — respeita o piso absoluto da empresa
+    # 3. Margem — respeita o piso absoluto da empresa, com teto absoluto de 50%.
+    # Pior caso teórico em Uberlândia (base=0.25 × risco=2.0 × liquidez=1.8 = 0.90)
+    # só aparece em lotes inviáveis (severidade ESTRUTURAL + motor NÃO OK + mercado
+    # saturado). Esses lotes já são filtrados antes de virar ranking, mas o
+    # `score_roi` calculado vinha 100%+ e poluía logs/audit. Cap em 0.50 mantém
+    # ranking inalterado pra todos os lotes calibrados (≤0.50 cobre todas as
+    # combinações realistas) e dá número honesto pros casos extremos.
     margem_calculada = empresa.margem.base * fator_risco * fator_liquidez
     margem_aplicada = max(margem_calculada, empresa.margem.minima_absoluta)
+    margem_aplicada = min(margem_aplicada, 0.50)
 
     # 4. Custos fixos (exceto taxas, calculadas abaixo sobre o lance vencedor)
     frete_incluso = frete.frete_estimado

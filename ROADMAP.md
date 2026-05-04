@@ -4,7 +4,32 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 328/328 testes passando
+✅ **Fundação + EstimadorReforma** — 378/378 testes passando
+
+### X — Sanity-check de inter-relação FIPE × Giro × Lance Máximo (2026-05-04) ✅
+- **Branch:** `claude/sleepy-wright-M0XDG`
+- **Motivação:** Usuário pediu auditoria das relações entre colunas — "faz sentido um lance máximo muito maior que a FIPE? faz sentido o giro FIPE ser muito diferente da FIPE?". Simulação com 5 cenários (Polo Track 2024, Fiesta estrutural, km baixa, Civic com outlier, Corolla n=2 com outlier severo) expôs 3 bugs compostos.
+- **Bugs encontrados e corrigidos:**
+  1. **Mediana de similares Auto Avaliar pode produzir Lance Máximo a 130% da FIPE.** [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py) confiava cegamente em `statistics.median(similares_precos)`. Quando o AA inclui similares de outro modelo/versão (Tiggo 7 entre Tiggo 2, Cherokee entre Compass) e a amostra é pequena (n=2), 1 outlier puxa a mediana pra 153% da FIPE — e como `preco_giro = mediana × f_km`, o lance máximo subia ACIMA da FIPE. Operador podia comprar carro a 130% do valor de tabela. Fix: cap em `FIPE × 1.20` quando `n < 5` (n grande dilui outlier estatisticamente). Civic e Corolla legítimamente vendem ~110% FIPE em alta — cap respeita esse range. Loga `mediana_similares_inflada` quando aciona.
+  2. **`margem_aplicada` podia chegar a 71% em lotes ESTRUTURAL + motor NÃO OK + saturado**, gerando `score_roi` >100% que poluía logs e o validador "ROI > 1000%" deixava passar. Como esses lotes já são filtrados antes do ranking, o score absurdo só polui auditoria — mas confunde debug. Fix: cap absoluto de 0.50 em [`carros_sa/precificador.py`](carros_sa/precificador.py). Validado em testes: Gol calibrado (0.46) não muda; Fiesta saturado (0.71→0.50). Ranking de lotes saudáveis intocado.
+  3. **`_calcular_frete` no orquestrador re-derivava categoria com lista DIFERENTE de `calibracao_giro._categoria_de_modelo`.** Toro virava PICAPE no calibrador (dias_giro alinhado) mas OUTRO no frete (frete sub-estimado em R$ 400 na faixa 300-600 do Triângulo). Bug arquitetural — duas heurísticas semi-paralelas. Fix: `_calcular_frete(lote, empresa, categoria=None)` aceita categoria pré-resolvida; o `_pipeline_lote` passa a categoria já calculada (laudo + fallback `_categoria_de_modelo`). Fallback (sem categoria) usa a MESMA tabela canônica do calibrador — eliminado drift.
+- **Cobertura:** 6 testes novos. 378/378 verde.
+  - `test_cap_mediana_inflada_amostra_pequena` (Fiesta n=2 com 100k outlier → mediana cappada em FIPE×1.20).
+  - `test_cap_mediana_nao_acionado_quando_amostra_grande` (n=5 sem cap, mediana legítima >FIPE preservada).
+  - `test_cap_margem_aplicada_em_lote_pessimo` (lote ESTRUTURAL não passa de 0.50).
+  - `test_cap_margem_aplicada_nao_afeta_lote_calibrado` (Gol médio sem alteração).
+  - `test_frete_categoria_explicita_usada` (PICAPE vs HATCH em Goiânia → 1500 vs 800).
+  - `test_frete_fallback_usa_categoria_de_modelo_alinhada` (Toro → PICAPE, não OUTRO).
+- **Validação real (simulação 5 lotes pré/pós-fix):**
+  - Polo Track 2024 limpo: lance_max=79% FIPE (intocado).
+  - Fiesta estrutural: score_roi caiu de 109%→100% (cap em margem).
+  - km baixa (5k vs 50k mercado): lance_max=92% FIPE (intocado, dentro do range esperado de f_km saturado).
+  - Civic com outlier (3 similares, n<5): mediana cappada de 110k→102k (FIPE×1.20).
+  - Corolla com outlier severo (n=2): mediana cappada de 130k→102k. Lance máximo passa a respeitar a FIPE como teto generoso.
+- **Limitações conhecidas:**
+  - Cap de mediana ativa só `n < 5`. Se o AA enviar 5+ similares onde TODOS são de outro modelo (cenário extremo), cap não atua. Mitigação futura: filtrar similares por similaridade de string com o modelo do lote.
+  - Cap de margem em 0.50 é heurística. Empresas com bounds muito altos (`fator_risco × fator_liquidez ≥ 2.0` na config) saturam mais cedo — perde-se sinal de diferenciação entre lotes inviáveis. Aceitável porque inviáveis já são filtrados.
+  - O test de multi-tenancy `test_multi_empresa_mesmo_lote_rankings_divergem` mudou de asserção (`preco_alvo` → `preco_max`): com cap, empresas exigentes saturam e perdem distinção pelo eixo do alvo, mas continuam diferenciando pelo `minima_absoluta` (eixo do teto).
 
 ### W — Revisão econômica das colunas da planilha (2026-04-29) ✅
 - **Branch:** `claude/sleepy-wright-kSiCR`

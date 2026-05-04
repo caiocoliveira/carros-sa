@@ -221,11 +221,18 @@ def test_gol_2015_em_goiania_com_frete(
 def test_multi_empresa_mesmo_lote_rankings_divergem(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
 ):
-    """Mesmo Gol em Goiânia deve ter preco_alvo MAIS BAIXO pra empresa_fake_sp:
-    - Margem base 30% (vs 25% de Uberlândia) → exige mais desconto
+    """Mesmo Gol em Goiânia: empresa_fake_sp é mais exigente que Uberlândia.
+
+    A semântica "mais exigente" se manifesta no `preco_max` (teto absoluto),
+    NÃO necessariamente no `preco_alvo`: com o cap de 0.50 em margem_aplicada,
+    empresas com bounds altos (SP sai 0.625 sem cap → 0.50 com cap) saturam e
+    deixam de diferenciar pelo eixo da margem calculada. O eixo confiável é o
+    `minima_absoluta` (Uber 0.10 vs SP 0.18) que entra no `preco_max`.
+
+    - Margem base 30% (vs 25% de Uberlândia)
+    - minima_absoluta 0.18 (vs 0.10) → preco_max mais baixo em SP
     - Pátio em SP está mais longe de Goiânia que Uberlândia (frete maior)
     - taxa_leilao_pct 8% (vs 0% de Uberlândia, que usa fixa de 999)
-    - bounds de risco/liquidez mais largos (operação mais exigente)
     """
     empresa_uber = carregar_empresa("carros_uberlandia")
     empresa_sp = carregar_empresa("empresa_fake_sp")
@@ -237,10 +244,13 @@ def test_multi_empresa_mesmo_lote_rankings_divergem(
     av_uber = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete_uber, empresa_uber)
     av_sp = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete_sp, empresa_sp)
 
-    # SP deve oferecer MENOS pelo mesmo lote
-    assert av_sp.preco_alvo < av_uber.preco_alvo
-    # E a margem aplicada deve ser maior em SP
-    assert av_sp.margem_aplicada > av_uber.margem_aplicada
+    # SP deve oferecer MENOS no LANCE MÁXIMO (teto absoluto, dirigido pela
+    # margem mínima absoluta — não pelo cap)
+    assert av_sp.preco_max < av_uber.preco_max
+    # E a margem aplicada em SP deve estar no cap (saturação esperada)
+    assert av_sp.margem_aplicada == 0.50
+    # Uber não satura (0.46 < 0.50)
+    assert av_uber.margem_aplicada < 0.50
     # Consistência do empresa_id
     assert av_uber.empresa_id == "carros_uberlandia"
     assert av_sp.empresa_id == "empresa_fake_sp"
@@ -597,3 +607,44 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
     # preço-alvo sobe com f_km > 1
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
     assert "f_km=1.15" in av_com_ajuste.justificativa
+
+
+# =============================================================================
+# Cap absoluto da margem aplicada
+# =============================================================================
+
+def test_cap_margem_aplicada_em_lote_pessimo(
+    gol_2015_lote, gol_2015_mercado, gol_2015_reforma
+):
+    """Lote ESTRUTURAL + motor NÃO OK + mercado saturado dispararia margem ~71%
+    (0.25 × 2.0 × 1.43 ≈ 0.715). Cap em 0.50 mantém score_roi sano (≤100%) sem
+    afetar lotes calibrados.
+
+    Sem cap, score_roi >100% poluía logs e o validador "ROI > 1000%" ainda
+    aceitava 109% como OK. Cap traz number absoluto pra range honesto.
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    laudo_pessimo = LaudoEstruturado(
+        avarias=[], severidade_geral=SeveridadeAvaria.ESTRUTURAL,
+        motor_ok=False, documentacao=StatusDocumentacao.PENDENCIA_GRAVE,
+        categoria_veiculo=CategoriaVeiculo.HATCH, confidence=0.5,
+    )
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    av = precificar(gol_2015_lote, laudo_pessimo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+    assert av.margem_aplicada == 0.50, (
+        f"margem_aplicada deveria estar cappada em 0.50, veio {av.margem_aplicada}"
+    )
+    # Score_roi correspondente ≈ 0.50 / 0.50 = 1.00 no teto teórico — não +100%
+    assert av.score_roi <= 1.05
+
+
+def test_cap_margem_aplicada_nao_afeta_lote_calibrado(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
+):
+    """Lote calibrado (margem ~46%) NÃO é afetado pelo cap em 0.50."""
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+    assert av.margem_aplicada < 0.50, (
+        f"lote calibrado não deveria saturar o cap, veio {av.margem_aplicada}"
+    )

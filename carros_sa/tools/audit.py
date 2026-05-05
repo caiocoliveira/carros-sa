@@ -230,11 +230,11 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         })
 
     # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
-    # primeiro, desempate por folga de lance.
+    # primeiro, desempate por ROI anualizado desc (mesma métrica do CLI top).
     rows = [r for r in rows if not r["encerrado"]]
     rows.sort(key=lambda r: (
         0 if r["viavel"] else 1,
-        -(r["preco_max"] - r["lance_atual"]),
+        -(r["roi_anualizado"] or 0),
     ))
     for idx, r in enumerate(rows, start=1):
         r["rank"] = idx

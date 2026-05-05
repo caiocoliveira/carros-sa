@@ -244,6 +244,57 @@ class TestSheetsExporterQuery:
         assert rows[2][idx_marca] == "Ford"
         assert rows[2][idx_modelo] == "Fiesta"
 
+    def test_exportar_ranking_por_roi_anualizado_entre_viaveis(self):
+        """Entre lotes viáveis com laudo analisado, rank é por ROI anualizado desc.
+
+        Bug histórico: planilha ranqueava por folga absoluta `preco_max - lance_atual`
+        (ver sheets.py:142 antes do fix de 2026-05). CLI `top` ranqueia por ROI
+        anualizado; resultado: operador via duas ordens conflitantes da mesma
+        fonte. Métrica única agora.
+
+        Cenário deste teste:
+          - Lote BARATO: lance baixo (folga grande) mas ROI baixo → deve vir DEPOIS
+          - Lote LUCRATIVO: lance alto (folga pequena) mas ROI alto → deve vir ANTES
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # BARATO: folga = R$ 25k, ROI = 10% → 0.10 × 365 / 90 = 40.6%
+            session.add(_lote("L_BARATO", marca="VW", modelo="Gol", lance_atual=5000))
+            av_b = _avaliacao(
+                "L_BARATO", score_roi=0.10, preco_giro=35000, preco_max=30000,
+            )
+            av_b.dias_giro_estimado = 90
+            session.add(av_b)
+            session.add(_laudo("L_BARATO"))
+            # LUCRATIVO: folga = R$ 5k, ROI = 50% → 0.50 × 365 / 90 = 202.8%
+            session.add(_lote("L_LUCRATIVO", marca="VW", modelo="Polo", lance_atual=70000))
+            av_l = _avaliacao(
+                "L_LUCRATIVO", score_roi=0.50, preco_giro=120000, preco_max=75000,
+            )
+            av_l.dias_giro_estimado = 90
+            session.add(av_l)
+            session.add(_laudo("L_LUCRATIVO"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_modelo = HEADER.index("Modelo")
+        # rows[0]=banner, rows[1]=header, rows[2]=rank 1, rows[3]=rank 2
+        assert rows[2][idx_modelo] == "Polo", (
+            f"Esperava L_LUCRATIVO no rank 1 (ROI maior), veio {rows[2][idx_modelo]}"
+        )
+        assert rows[3][idx_modelo] == "Gol"
+
     def test_exportar_viaveis_aparecem_primeiro(self):
         """Lotes com preco_max > lance_atual (viáveis) devem vir antes dos inviáveis."""
         engine = _engine_mem()

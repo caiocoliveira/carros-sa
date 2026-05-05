@@ -6,6 +6,18 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ✅ **Fundação + EstimadorReforma** — 328/328 testes passando
 
+### X — Revisão econômica + alinhamento de ranking CLI ↔ Planilha (2026-05-05) ✅
+- **Branch:** `claude/sleepy-wright-C2HzV`
+- **Motivação:** Usuário pediu nova revisão das colunas (FIPE × Lance Máximo × Giro FIPE × ROI × Lucro/mês). Simulação algébrica em 5 cenários (Polo Track real, Polo+AA_ref, Fiesta ESTRUTURAL, Polo zero-bala km saturado, Polo confidence 0.5) confirmou identidades, mas expôs uma divergência operacional não pega antes.
+- **Bug encontrado:**
+  1. **Ranking divergente CLI vs Planilha.** [`carros-sa top`](carros_sa/cli.py:137) ranqueava por **ROI anualizado desc**; [`SheetsExporter`](carros_sa/tools/sheets.py:142) ranqueava por **folga absoluta `preco_max - lance_atual` desc**. Na prática: lote barato com folga grande mas ROI baixo subia na planilha; lote lucrativo com lance perto do teto descia. Operador via duas ordens conflitantes da mesma fonte. CLI estava certo (segue ROADMAP/CLAUDE: "score_roi calibrado por risco/liquidez é a métrica de ranking"). Planilha agora bate com a CLI: `(laudo_analisado, viavel, -roi_anualizado)`. Audit também alinhado.
+- **Análise da relação entre colunas (resposta direta às perguntas do usuário):**
+  - **`Lance Máximo > FIPE`?** Não em condições normais. `preco_max ≤ preco_giro × (1−margem_min)` por construção. Pra estourar FIPE precisaria f_km no teto 1.15 + custos zero — caso teórico, max observado nos 5 cenários: 95.36% da FIPE. Audit já alerta `> FIPE × 1.05`.
+  - **`preco_giro_fipe > FIPE`?** Pode em até ~12% quando `f_km > 1` (lote km baixa). Faz sentido econômico: carro mais bem cuidado vale mais que mediana. Nome enganoso (é `mediana × f_km`, não `min(FIPE×0.95, p25)`) — anotado em CLAUDE.md, contrato em models.py preserva.
+  - **`score_roi` cresce com fator de risco**: lote pior conhecido (confidence 0.5) sai com ROI MAIOR que lote bem auditado. Design intencional (mais incerteza → exige mais margem). Mascarado na planilha (confidence < 0.6 vira "—") mas aparece em logs/audit.
+- **Cobertura:** +1 teste em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py): `test_exportar_ranking_por_roi_anualizado_entre_viaveis` (lote barato com ROI baixo deve vir DEPOIS de lote lucrativo com ROI alto). Suite total: **373/375 verde** (2 skips esperados).
+- **CLAUDE.md** acrescentado com 2 entradas: "Mesma métrica em dois arquivos = duas métricas diferentes" + "Análise da relação entre colunas". **LESSONS.md** ganhou padrão P5b ("ranking duplicado") com antídoto operacional (importar de módulo neutro + paridade explícita entre views).
+
 ### W — Revisão econômica das colunas da planilha (2026-04-29) ✅
 - **Branch:** `claude/sleepy-wright-kSiCR`
 - **Motivação:** Usuário pediu sanity-check da relação entre as colunas (FIPE × Lance Máximo × Giro FIPE × ROI × Lucro/mês). Simulação com Polo Track real expôs três bugs compostos.

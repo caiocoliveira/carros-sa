@@ -63,6 +63,32 @@ Fix real exigiu **3 camadas**: allowlist no JS + `is_laudo_pdf_url` em Python
 (defesa de fim). **E** um script de limpeza dos 75 decoys já persistidos no DB
 (workstream R.1) — esqueci de perguntar "o estado já salvo está envenenado?".
 
+### P5b. Mesma métrica implementada duas vezes em arquivos diferentes diverge
+
+Sintoma: dois lugares no código rankeiam/calculam "a mesma coisa" e operador
+vê resultados conflitantes. Não é falsa positivo nem falha — é design.
+
+Caso de referência (2026-05-05):
+- **Ranking CLI vs Planilha** — `carros-sa top` ranqueava por **ROI anualizado
+  desc** (`cli.py:137`); o `SheetsExporter` ranqueava por **folga absoluta
+  `preco_max - lance_atual` desc** (`sheets.py:142`). CLI premiava lote
+  lucrativo com lance perto do teto; planilha premiava lote barato com folga
+  grande, mesmo com ROI muito menor. Operador via duas listas diferentes da
+  mesma fonte de dados, sem aviso. Detectado em revisão econômica das colunas
+  via simulação algébrica + leitura cruzada (não por reclamação do operador
+  desta vez — preventivo).
+
+**Antídoto operacional:** quando uma métrica é ranking-defining, definir
+**uma função canônica** num módulo neutro (`carros_sa/agents/calibracao_giro.py`
+já hospeda `roi_anualizado`) e fazer todos os consumidores importarem dela.
+Cuidado especial com helpers ad-hoc embutidos em `cli.py`, `sheets.py`,
+`audit.py` — tendem a reimplementar variantes silenciosas.
+
+**Antídoto estrutural:** se o repo tiver mais de uma "view" sobre o mesmo
+ranking (CLI + planilha + audit), adicionar em `audit.py` ou em teste de
+integração uma checagem de paridade — ex.: top-3 do `cli.top` é um subset do
+top-N da planilha, ordem preservada. Falha vira sinal antes do operador ver.
+
 ### P5. Invariantes adicionadas reativamente, nunca preventivamente
 
 Sintoma: operador aponta "essa coluna tá sem sentido", e só depois vira teste.

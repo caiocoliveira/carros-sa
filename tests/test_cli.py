@@ -322,3 +322,130 @@ def test_ingest_lote_real_persiste(db_tmp):
     result = runner.invoke(app, ["ingest", str(fixture)])
     assert result.exit_code == 0
     assert "10" in result.stdout  # 10 lotes parseados
+
+
+# ---------------------------------------------------------------------------
+# _auditar_apos_triagem — gate final da triagem
+#
+# Garante que QUALQUER lote ativo na planilha tem laudo baixado, revisado
+# (LaudoCache.confidence ≥ 0.6) e linkado (URL clicável). É o invariante
+# pedido em "todos carros têm laudo" — quando algo escapar do retry, retorna
+# > 0 e a CLI pode sair com exit 1, deixando rastro no log do cron.
+# ---------------------------------------------------------------------------
+
+
+def _seed_lote_completo(db_path: Path, lote_id: str, pdf_dir: Path):
+    """Lote com PDF persistido + LaudoCache forte + URL válida."""
+    from datetime import timedelta
+
+    from sqlmodel import Session
+
+    from carros_sa.models import LaudoCache
+
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    (pdf_dir / f"{lote_id}.pdf").write_bytes(b"%PDF-1.4\n" + b"x" * 200_000)
+
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    url_ok = "https://storage.googleapis.com/doc-b2b/laudo-abc.pdf"
+    with Session(engine) as session:
+        session.add(Lote(
+            id=lote_id, leilao="auto_avaliar", url=f"https://x/{lote_id}",
+            marca="Ford", modelo="Fiesta", ano=2017, km=50_000, lance_atual=15_000,
+            fim_em=datetime.now() + timedelta(days=3),
+            origem_cidade="Uberlândia", origem_uf="MG",
+            raw_json={"detalhe": {"laudo_pdf_url": url_ok}},
+        ))
+        session.add(AvaliacaoLote(
+            empresa_id="carros_uberlandia", lote_id=lote_id,
+            preco_alvo=22000, preco_max=25000, score_roi=0.2, fator_risco=0.8,
+            fator_liquidez=1.0, margem_aplicada=0.15, frete_incluso=1500,
+            reforma_estimada=2000, taxas_leilao=2000, preco_giro=30000,
+            preco_giro_fipe=30000, justificativa="ok", criado_em=datetime.utcnow(),
+        ))
+        session.add(LaudoCache(
+            lote_id=lote_id, avarias_json=[], severidade_geral="leve",
+            motor_ok=True, documentacao="ok", categoria_veiculo="hatch",
+            confidence=0.9, modelo_llm="gemini-flash", custo_usd=0.001,
+            extraido_em=datetime.utcnow(),
+        ))
+        session.commit()
+
+
+def _seed_lote_incompleto(db_path: Path, lote_id: str):
+    """Lote sem PDF + LaudoCache fraco + URL ausente — todos os 3 sintomas."""
+    from datetime import timedelta
+
+    from sqlmodel import Session
+
+    from carros_sa.models import LaudoCache
+
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    with Session(engine) as session:
+        session.add(Lote(
+            id=lote_id, leilao="auto_avaliar", url=f"https://x/{lote_id}",
+            marca="Fiat", modelo="Uno", ano=2014, km=80_000, lance_atual=10_000,
+            fim_em=datetime.now() + timedelta(days=3),
+            origem_cidade="Uberlândia", origem_uf="MG",
+            raw_json={"detalhe": {"laudo_pdf_url": None}},
+        ))
+        session.add(AvaliacaoLote(
+            empresa_id="carros_uberlandia", lote_id=lote_id,
+            preco_alvo=15000, preco_max=18000, score_roi=0.2, fator_risco=0.8,
+            fator_liquidez=1.0, margem_aplicada=0.15, frete_incluso=500,
+            reforma_estimada=500, taxas_leilao=999, preco_giro=20000,
+            preco_giro_fipe=20000, justificativa="ok", criado_em=datetime.utcnow(),
+        ))
+        session.add(LaudoCache(
+            lote_id=lote_id, avarias_json=[], severidade_geral="leve",
+            motor_ok=True, documentacao="ok", categoria_veiculo="hatch",
+            confidence=0.5,  # fallback `_laudo_sem_pdf` → não conta como analisado
+            modelo_llm="gemini-flash", custo_usd=0.001,
+            extraido_em=datetime.utcnow(),
+        ))
+        session.commit()
+
+
+def test_auditar_apos_triagem_zero_quando_tudo_completo(db_tmp, tmp_path, monkeypatch):
+    """Quando todos os lotes ativos têm PDF + cache forte + URL válida, retorna 0."""
+    pdf_dir = tmp_path / "pdfs"
+    monkeypatch.setattr("carros_sa.tools.laudo_audit.PDF_DIR_DEFAULT", pdf_dir)
+    _seed_lote_completo(db_tmp, "L_OK", pdf_dir)
+
+    from carros_sa.cli import _auditar_apos_triagem
+
+    n = _auditar_apos_triagem("carros_uberlandia")
+    assert n == 0
+
+
+def test_auditar_apos_triagem_conta_incompletos(db_tmp, tmp_path, monkeypatch, capsys):
+    """Lotes sem laudo completo fazem a função retornar > 0 e printar motivo + remediação."""
+    pdf_dir = tmp_path / "pdfs"
+    monkeypatch.setattr("carros_sa.tools.laudo_audit.PDF_DIR_DEFAULT", pdf_dir)
+    _seed_lote_completo(db_tmp, "L_OK", pdf_dir)
+    _seed_lote_incompleto(db_tmp, "L_FAIL_1")
+    _seed_lote_incompleto(db_tmp, "L_FAIL_2")
+
+    from carros_sa.cli import _auditar_apos_triagem
+
+    n = _auditar_apos_triagem("carros_uberlandia")
+    assert n == 2
+
+    # Captura output do Rich console (escreve em stdout). O ID e a remediação
+    # precisam aparecer pra que o operador saiba o que rodar pra destravar.
+    out = capsys.readouterr().out
+    assert "L_FAIL_1" in out
+    assert "reprocessar_lotes_do_db" in out
+
+
+def test_setup_cron_inclui_audit_estrito():
+    """Cron diário precisa rodar `auditar_laudos --strict` no fim do pipeline.
+
+    Sem esse passo, lotes que escapam do retry ficam silenciosamente como
+    "⚠ LAUDO NÃO CAPTURADO" e o operador só descobre olhando a aba —
+    exatamente o sintoma que o gate se propõe a eliminar.
+    """
+    cron = Path("scripts/setup_cron.sh").read_text()
+    assert "auditar_laudos.py" in cron
+    assert "--strict" in cron
+    # Deve vir depois do retry (último elo da cadeia) — sanity de ordem.
+    assert cron.index("AUDIT_SCRIPT=") > cron.index("RETRY_SCRIPT=")

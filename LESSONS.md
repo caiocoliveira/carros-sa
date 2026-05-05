@@ -224,3 +224,4 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | `02ad964` | RC4 | Short-circuit respeita laudo pendente |
 | `a142bcd` | RC4 | `motor_ok` default True quando ausente |
 | `e57bb3a` | P5 | Auditoria automática de colunas (hook) |
+| (R.3) | P5, RC3 | `auditar_laudos --strict` no cron + CLI triagem fecha o laço "todo lote ativo tem laudo completo" — antes, `make auditar-laudos` existia mas era manual e a planilha ficava com "⚠ LAUDO NÃO CAPTURADO" silencioso. Lição secundária: `pdf_dir: Path = PDF_DIR_DEFAULT` capturado em def-time impedia monkeypatch — sempre resolver default mutável em runtime quando o teste vai patchá-lo. |

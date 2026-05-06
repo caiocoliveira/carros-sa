@@ -470,6 +470,27 @@ Já registrado:
   - `HistoricoStat` é cached por export — múltiplos exports na mesma sessão não veem Arrematados novos sem re-chamar `carregar_historico_stat`. Aceitável (export roda 1x por run).
   - Coluna descritiva — NÃO afeta ranking, NÃO filtra. Lotes com laudo pendente mostram Tese "—" pra evitar sinal enganoso (lance_max está "—" nesses casos).
 
+### V — Garantia anti-link-morto + auditoria no cron ✅
+- **Branch:** `claude/great-turing-Os2pp`
+- **Arquivos:**
+  - [`carros_sa/scraping/parsers.py`](carros_sa/scraping/parsers.py) — NOVO `is_signed_url_expired(url, agora=None)` parseia `X-Goog-Date+Expires` da query string da signed URL do GCS V4 e retorna True quando `Date+Expires < now`. Sem rede, deterministico. URLs sem assinatura retornam False (conservador).
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `_extract_rows()` agora compõe `laudo_url = laudo_url_raw if is_laudo_pdf_url(...) AND not is_signed_url_expired(...)`. URL vencida cai pro estado "PDF salvo (link expirado)" se PDF local existe, senão "—". Glossário atualizado.
+  - [`carros_sa/tools/laudo_audit.py`](carros_sa/tools/laudo_audit.py) — `verificar_laudo_completo` aplica o mesmo gate: `url_persistida_ok = is_laudo_pdf_url(url) AND not is_signed_url_expired(url)`. Audit agora reflete fielmente a experiência da planilha.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — adiciona 4ª etapa no pipeline cron: `auditar_laudos.py --strict` roda LOGO APÓS o retry, antes da janela de 1h da signed URL queimar. Exit code não-zero → cron mail do operador.
+  - [`tests/test_parsers.py`](tests/test_parsers.py) — 8 testes em `TestIsSignedUrlExpired` (gold real signed URL, dentro/fora da validade, limite exato, URL não-assinada, params malformados, vazio/None, naive datetime, case insensitive).
+  - [`tests/test_laudo_audit.py`](tests/test_laudo_audit.py) — 2 testes novos: `test_url_signed_expirada_marca_incompleto` (audit) + `test_url_signed_expirada_com_pdf_local_renderiza_link_expirado` (exporter).
+- **Sintoma original:** Operador clica "Ver laudo" às 10h → 403 Forbidden. URL ainda em `raw_json.detalhe.laudo_pdf_url` (válida no padrão do `is_laudo_pdf_url`) mas a signed URL do GCS expirou ~1h após a triagem das 7h. Workstream U introduziu o estado "PDF salvo (link expirado)" mas SÓ pra URL=None/decoy — quando a URL ainda está lá só vencida, exporter pintava HYPERLINK morto. Adicionalmente, `auditar_laudos.py` existia mas operador rodava manualmente; lotes incompletos vazavam pra planilha sem visibilidade.
+- **Como o ciclo agora se fecha:**
+  1. **Pipeline** baixa PDF → valida → extrai → persiste URL. (já existia)
+  2. **Cron**: triagem → limpar_decoys → retry → **auditar --strict** (NOVO). Exit ≠ 0 surface no log + cron mail.
+  3. **Exporter**: HYPERLINK só quando URL é laudo válido E ainda não expirou; senão "PDF salvo (link expirado)" (PDF local) ou "—".
+  4. **Audit**: as 3 condições espelham 1:1 o que o operador VÊ na planilha (URL clicável significa link funcional, não só padrão de host).
+- **Cobertura:** 10 testes novos. Suite total: **382 passed, 2 skipped**.
+- **Limitações conhecidas:**
+  - Signed URLs continuam expirando em ~1h. O fix muda o sintoma (HYPERLINK morto → texto descritivo + PDF local) mas NÃO elimina a expiração. Pra link permanente que sempre funciona, próximo passo é subir PDFs no Google Drive (service account) + adicionar `drive_file_id` em `LaudoCache` — exige mudança de schema (coordenar via "Pendências de schema").
+  - `is_signed_url_expired` retorna False pra URLs sem `X-Goog-Date/Expires` (ex.: cdn-aav, links estáticos). Se Auto Avaliar migrar pra outro CDN com expiração própria, precisa adicionar nova heurística aqui.
+  - `--strict` no cron faz o JOB inteiro retornar não-zero quando há QUALQUER lote incompleto. Em pico de retry (modal lazy do AA falhando), pode ser ruidoso. Se virar problema, baixar pra `--strict` apenas quando `incompletos > N` (threshold configurável).
+
 ### U — Auditoria de completude de laudo (PDF + cache + URL) ✅
 - **Branch:** `claude/great-turing-Nfdh4`
 - **Arquivos:**

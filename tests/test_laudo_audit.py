@@ -41,6 +41,15 @@ URL_DECOY = (
     "https://repo-site-aav-production.storage.googleapis.com/app/uploads/"
     "Relatorio-de-Transparencia.pdf"
 )
+# Signed URL real do GCS (formato V4) com Date+Expires no passado distante:
+# 2026-04-23T12:00:00Z + 3600s expira em 13:00:00Z.
+URL_EXPIRADA = (
+    "https://storage.googleapis.com/doc-b2b/laudos/12345/laudo.pdf"
+    "?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+    "&X-Goog-Date=20260423T120000Z"
+    "&X-Goog-Expires=3600"
+    "&X-Goog-Signature=abc"
+)
 
 
 def _engine_mem():
@@ -183,6 +192,20 @@ class TestVerificarLaudoCompleto:
         )
         assert "pdf_ausente" in s.motivo
         assert "cache_confianca_baixa" in s.motivo
+        assert "url_invalida_ou_ausente" in s.motivo
+
+    def test_url_signed_expirada_marca_incompleto(self, tmp_path):
+        """Signed URL do GCS passa em `is_laudo_pdf_url` (host bate doc-b2b)
+        mas o operador clica e leva 403 — audit precisa flagar pra refletir
+        a experiência real da planilha."""
+        _criar_pdf_fake(tmp_path, "L001")
+        s = verificar_laudo_completo(
+            _lote("L001", laudo_pdf_url=URL_EXPIRADA),
+            _laudo(),
+            pdf_dir=tmp_path,
+        )
+        assert s.url_persistida_ok is False
+        assert s.completo is False
         assert "url_invalida_ou_ausente" in s.motivo
 
 
@@ -341,6 +364,37 @@ class TestExporterLaudoCelula:
         primeira_linha_dados = captured_rows[0][2]
         celula_laudo = primeira_linha_dados[-1]
         assert celula_laudo == "—"
+
+    def test_url_signed_expirada_com_pdf_local_renderiza_link_expirado(self, tmp_path, monkeypatch):
+        """Sintoma original do gap: signed URL ainda em raw_json mas vencida há
+        horas. Antes do fix, exporter pintava HYPERLINK morto; agora detecta
+        via `is_signed_url_expired` e degrada pra texto descritivo. Espelha o
+        comportamento de `verificar_laudo_completo` (URL expirada == inválida)."""
+        monkeypatch.setattr("carros_sa.tools.sheets.PDF_DIR_DEFAULT", tmp_path)
+        _criar_pdf_fake(tmp_path, "L_URL_VENCIDA")
+
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L_URL_VENCIDA", laudo_pdf_url=URL_EXPIRADA))
+            session.add(_avaliacao("L_URL_VENCIDA"))
+            session.add(_laudo("L_URL_VENCIDA", confidence=0.95))
+            session.commit()
+
+        captured_rows = []
+        mock_ws = MagicMock()
+        mock_ws.update.side_effect = lambda rows, **kw: captured_rows.append(rows)
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = SheetsExporter(spreadsheet_id="x", credentials_path="/x")
+            with Session(engine) as session:
+                exporter.exportar("carros_uberlandia", session)
+
+        celula_laudo = captured_rows[0][2][-1]
+        assert celula_laudo == "PDF salvo (link expirado)"
 
     def test_url_valida_continua_renderizando_hyperlink(self, tmp_path, monkeypatch):
         """Regressão: o caso feliz não pode ter quebrado."""

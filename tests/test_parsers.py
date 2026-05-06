@@ -4,10 +4,13 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from datetime import timezone
+
 from carros_sa.scraping.parsers import (
     _timer_para_fim_em,
     extrair_loja_do_card,
     is_laudo_pdf_url,
+    is_signed_url_expired,
     parse_card_lines,
     parse_detalhe,
 )
@@ -492,6 +495,78 @@ class TestIsLaudoPdfUrl:
     def test_url_vazia_ou_none(self):
         assert is_laudo_pdf_url(None) is False
         assert is_laudo_pdf_url("") is False
+
+
+class TestIsSignedUrlExpired:
+    """Defesa contra HYPERLINK morto na planilha.
+
+    Signed URLs do GCS (`storage.googleapis.com/doc-b2b/...`) carregam
+    `X-Goog-Date` e `X-Goog-Expires` nos query params; depois de
+    `Date + Expires` passar, o storage devolve 403. A URL fica gravada em
+    `raw_json.detalhe.laudo_pdf_url` indefinidamente, então o exporter
+    precisa de uma checagem deterministica (sem rede) pra não pintar
+    HYPERLINK que parece funcionar mas não funciona.
+    """
+
+    # Gold: signed URL real do Auto Avaliar (formato GCS V4) com Date conhecida.
+    # X-Goog-Date=20260423T120000Z (UTC) + X-Goog-Expires=3600 (1h)
+    # → expira às 2026-04-23T13:00:00Z.
+    URL_GOLD = (
+        "https://storage.googleapis.com/doc-b2b/laudos/12345/laudo.pdf"
+        "?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+        "&X-Goog-Credential=sa%40proj.iam.gserviceaccount.com"
+        "&X-Goog-Date=20260423T120000Z"
+        "&X-Goog-Expires=3600"
+        "&X-Goog-SignedHeaders=host"
+        "&X-Goog-Signature=abc"
+    )
+
+    def test_url_dentro_da_validade_nao_e_expirada(self):
+        agora = datetime(2026, 4, 23, 12, 30, 0, tzinfo=timezone.utc)  # 30min depois
+        assert is_signed_url_expired(self.URL_GOLD, agora=agora) is False
+
+    def test_url_passou_da_validade_e_expirada(self):
+        agora = datetime(2026, 4, 23, 13, 30, 0, tzinfo=timezone.utc)  # 30min depois do prazo
+        assert is_signed_url_expired(self.URL_GOLD, agora=agora) is True
+
+    def test_url_no_limite_exato_e_expirada(self):
+        agora = datetime(2026, 4, 23, 13, 0, 1, tzinfo=timezone.utc)  # 1s depois
+        assert is_signed_url_expired(self.URL_GOLD, agora=agora) is True
+
+    def test_url_sem_params_de_assinatura_nao_e_expirada(self):
+        """URL sem X-Goog-Date/Expires (ex.: cdn-aav, link estático) não dá pra
+        afirmar expiração — retorna False (conservador, deixa o link aparecer).
+        """
+        assert is_signed_url_expired("https://cdn-aav.autoavaliar.com.br/laudos/2026/abc.pdf") is False
+
+    def test_url_com_params_malformados_nao_e_expirada(self):
+        """Date inválida → retorna False (conservador). Mesmo comportamento
+        de antes do fix; descoberta acontece quando operador clica."""
+        url = (
+            "https://storage.googleapis.com/doc-b2b/laudos/x.pdf"
+            "?X-Goog-Date=NAOEPDATA&X-Goog-Expires=3600"
+        )
+        agora = datetime(2026, 4, 23, 13, 30, 0, tzinfo=timezone.utc)
+        assert is_signed_url_expired(url, agora=agora) is False
+
+    def test_url_vazia_ou_none(self):
+        assert is_signed_url_expired(None) is False
+        assert is_signed_url_expired("") is False
+
+    def test_agora_naive_e_assumido_utc(self):
+        """`agora` sem tzinfo é tratado como UTC — protege chamadores que usam
+        `datetime.utcnow()` (que retorna naive em UTC) sem conversão explícita."""
+        agora = datetime(2026, 4, 23, 13, 30, 0)  # naive
+        assert is_signed_url_expired(self.URL_GOLD, agora=agora) is True
+
+    def test_params_case_insensitive(self):
+        """Alguns proxies/CDNs lowercaseiam query params — aceitar ambas as caixas."""
+        url = (
+            "https://storage.googleapis.com/doc-b2b/laudos/x.pdf"
+            "?x-goog-date=20260423T120000Z&x-goog-expires=3600"
+        )
+        agora = datetime(2026, 4, 23, 13, 30, 0, tzinfo=timezone.utc)
+        assert is_signed_url_expired(url, agora=agora) is True
 
 
 class TestExtrairLojaDoCard:

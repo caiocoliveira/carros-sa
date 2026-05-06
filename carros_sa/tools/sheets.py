@@ -22,7 +22,7 @@ from typing import List, Optional
 from sqlmodel import Session, select
 
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
-from carros_sa.scraping.parsers import is_laudo_pdf_url
+from carros_sa.scraping.parsers import is_laudo_pdf_url, is_signed_url_expired
 from carros_sa.tenancy import carregar_empresa
 from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
 from carros_sa.tools.tese import (
@@ -228,9 +228,14 @@ class SheetsExporter:
 
             # URL do PDF do laudo — filtra decoys (Transparência, listing) que
             # ainda podem estar em `raw_json` de coletas antigas. Só exibimos
-            # link clicável se a URL passa pelo `is_laudo_pdf_url`.
+            # link clicável se a URL passa pelo `is_laudo_pdf_url` E ainda não
+            # expirou (URLs assinadas do GCS vivem ~1h; depois disso o operador
+            # via HYPERLINK aparente mas clique → 403).
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
-            laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
+            if is_laudo_pdf_url(laudo_url_raw) and not is_signed_url_expired(laudo_url_raw):
+                laudo_url = laudo_url_raw
+            else:
+                laudo_url = None
 
             # PDF persistido em data/laudos_pdfs/ — quando temos o arquivo local
             # mas a URL pré-assinada do storage já expirou (URLs do Auto Avaliar
@@ -624,7 +629,7 @@ class SheetsExporter:
             [
                 "Laudo",
                 "Scraper detalhe + PDF persistido",
-                "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs que não são laudo real (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url`; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL pré-assinada do storage já expirou (validade ~1h); (3) '—' quando não há URL nem PDF local.",
+                "Três estados: (1) =HYPERLINK pro PDF do laudo cautelar, rotulado 'Ver laudo' — URLs decoy (Transparência, listagem) são filtradas pelo `is_laudo_pdf_url` E URLs assinadas vencidas (X-Goog-Date+Expires < now) são filtradas pelo `is_signed_url_expired` pra não exibir HYPERLINK morto; (2) 'PDF salvo (link expirado)' quando o PDF está em data/laudos_pdfs/ mas a URL ou expirou ou é decoy; (3) '—' quando não há URL nem PDF local.",
                 "Evidência material pra confirmar o valor da Reforma e conferir avarias antes do lance. Estado (2) significa que o laudo FOI analisado (severidade/avarias estão certas), só o link clicável morreu — pra abrir, recolete o lote ou consulte data/laudos_pdfs/<lote>.pdf no laptop. Auditoria diária pelo `make auditar-laudos`.",
             ],
         ]

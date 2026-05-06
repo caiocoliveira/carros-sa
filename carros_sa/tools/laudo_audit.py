@@ -11,8 +11,11 @@ Critério "laudo completo" — TODAS as 3 condições simultaneamente:
      fallback `_laudo_sem_pdf` (confidence 0.5/0.55).
 
   3. **URL clicável** — `raw_json.detalhe.laudo_pdf_url` passa em
-     `is_laudo_pdf_url` — i.e. é uma URL de laudo de fato (não decoy nem
-     None). É o que o exporter renderiza como `=HYPERLINK("...", "Ver laudo")`.
+     `is_laudo_pdf_url` (i.e. é laudo, não decoy/None) E ainda não expirou
+     (`is_signed_url_expired` lê `X-Goog-Date+Expires` da signed URL do GCS,
+     que vive ~1h). É o que o exporter renderiza como `=HYPERLINK("...", "Ver laudo")`.
+     URL vencida tecnicamente "passa" no `is_laudo_pdf_url` mas o operador
+     clica e recebe 403 — então o audit a trata como `url_invalida`.
 
 Sem essa fonte única, cada camada do pipeline (`is_laudo_pdf_url` no scraper,
 `_pdf_eh_laudo_valido` no orquestrador, `limpar_decoys` no cron) cuida de UM
@@ -36,7 +39,7 @@ from typing import List, Optional
 from sqlmodel import Session, select
 
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.scraping.parsers import is_laudo_pdf_url
+from carros_sa.scraping.parsers import is_laudo_pdf_url, is_signed_url_expired
 
 # Diretório onde o orquestrador persiste PDFs baixados em produção. Espelha
 # `_PDF_STORAGE_DIR` do orquestrador. Mantido fora de tmp_dir pra permitir
@@ -98,7 +101,7 @@ def verificar_laudo_completo(
 
     detalhe = (lote.raw_json or {}).get("detalhe") if isinstance(lote.raw_json, dict) else None
     url = (detalhe or {}).get("laudo_pdf_url") if isinstance(detalhe, dict) else None
-    url_ok = is_laudo_pdf_url(url)
+    url_ok = is_laudo_pdf_url(url) and not is_signed_url_expired(url)
 
     s = StatusLaudo(
         lote_id=lote.id,

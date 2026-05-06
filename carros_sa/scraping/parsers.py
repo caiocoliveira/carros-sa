@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from carros_sa.models import CategoriaVeiculo, LoteRaw
 
@@ -93,6 +94,49 @@ def is_laudo_pdf_url(url: Optional[str]) -> bool:
     if low.endswith(".pdf") and "laudo" in low:
         return True
     return False
+
+
+def is_signed_url_expired(url: Optional[str], *, agora: Optional[datetime] = None) -> bool:
+    """True quando uma URL pré-assinada Google Cloud Storage V4 já passou da validade.
+
+    Os PDFs de laudo do Auto Avaliar são servidos via signed URL do GCS
+    (`storage.googleapis.com/doc-b2b/...`) com `X-Goog-Date` (instante da
+    assinatura, ISO basic Zulu) + `X-Goog-Expires` (segundos de validade).
+    A janela típica é ~1h. Como a URL fica gravada em `raw_json.detalhe.laudo_pdf_url`
+    indefinidamente, depois desse prazo o operador clica no HYPERLINK da
+    planilha e recebe HTTP 403 — link aparenta funcionar, não funciona.
+
+    Esta função detecta o estado **deterministicamente, sem rede**, parseando
+    os query params. Convenção:
+      - URL não-assinada (sem `X-Goog-Date` ou `X-Goog-Expires`) → `False`
+        (não dá pra afirmar expiração; o `is_laudo_pdf_url` continua sendo o
+        gate de validade do CONTEÚDO).
+      - URL assinada com `X-Goog-Date + X-Goog-Expires < agora` → `True`.
+      - Params malformados → `False` conservador (deixa o exporter mostrar o
+        link e o operador descobre clicando — mesmo comportamento de antes).
+
+    `agora` é injetável pra teste; em produção usa UTC do sistema.
+    """
+    if not url:
+        return False
+    try:
+        qs = parse_qs(urlparse(url).query)
+    except Exception:
+        return False
+    date_raw = qs.get("X-Goog-Date") or qs.get("x-goog-date")
+    expires_raw = qs.get("X-Goog-Expires") or qs.get("x-goog-expires")
+    if not date_raw or not expires_raw:
+        return False
+    try:
+        # Formato GCS V4: ISO basic UTC, ex.: "20260423T120000Z"
+        ts = datetime.strptime(date_raw[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        expira_em = ts + timedelta(seconds=int(expires_raw[0]))
+    except (ValueError, IndexError):
+        return False
+    agora_utc = (agora or datetime.now(timezone.utc))
+    if agora_utc.tzinfo is None:
+        agora_utc = agora_utc.replace(tzinfo=timezone.utc)
+    return expira_em < agora_utc
 
 
 _BADGES_IGNORADOS = {"anúncio destaque", "showroom", "oportunidade", "destaque"}

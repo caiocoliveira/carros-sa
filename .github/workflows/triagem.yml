@@ -1,0 +1,115 @@
+name: triagem-diaria
+
+# Cron migrado do laptop pra cá (2026-05-06): macOS estava dormindo nos
+# horários do cron local e perdendo runs. UTC-3 ano todo (Brasil sem DST):
+# 10:00 UTC = 07:00 BRT, 16:00 UTC = 13:00 BRT.
+#
+# Estado (SQLite + cookies) persiste numa branch órfã `state/db` via
+# git plumbing — sem worktree, sem checkout, só blob+tree+commit-tree+push.
+# PDFs (data/laudos_pdfs/) NÃO são persistidos: pipeline só usa cache pra UX
+# do operador (link "PDF salvo"), não pro fluxo de avaliação.
+#
+# Secrets necessários (Settings → Secrets and variables → Actions):
+#   AUTOAVALIAR_EMAIL          — login do Auto Avaliar
+#   AUTOAVALIAR_PASSWORD       — senha
+#   GEMINI_API_KEY             — vision default
+#   ANTHROPIC_API_KEY          — opcional, fallback
+#   GOOGLE_SHEETS_ID           — ID da planilha de output
+#   GOOGLE_SERVICE_ACCOUNT_JSON — conteúdo COMPLETO do JSON da service account
+
+on:
+  schedule:
+    - cron: '0 10,16 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: triagem-diaria
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PYTHONPATH: .
+      AUTOAVALIAR_COOKIES_PATH: ${{ github.workspace }}/.state/autoavaliar_cookies.json
+      CARROS_SA_DB: ${{ github.workspace }}/carros_sa.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore SQLite + cookies from state/db branch
+        run: |
+          mkdir -p .state
+          git fetch origin state/db:refs/remotes/origin/state/db 2>/dev/null || echo "state/db branch não existe ainda"
+          if git show origin/state/db:carros_sa.db > /tmp/db.new 2>/dev/null; then
+            mv /tmp/db.new carros_sa.db
+            echo "DB restaurado ($(stat -c%s carros_sa.db) bytes)"
+          else
+            rm -f /tmp/db.new
+            echo "Sem DB prévio — pipeline começa do zero"
+          fi
+          if git show origin/state/db:autoavaliar_cookies.json > /tmp/ck.new 2>/dev/null; then
+            mv /tmp/ck.new "$AUTOAVALIAR_COOKIES_PATH"
+            echo "Cookies restaurados"
+          else
+            rm -f /tmp/ck.new
+            echo "Sem cookies — vai logar com email/senha"
+          fi
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+
+      - name: Install deps + Chromium
+        run: |
+          uv venv .venv
+          VIRTUAL_ENV="$PWD/.venv" uv pip install -e ".[dev]"
+          .venv/bin/playwright install --with-deps chromium
+
+      - name: Materializa Google service account JSON
+        run: |
+          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > "$RUNNER_TEMP/gsa.json"
+          echo "GOOGLE_SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/gsa.json" >> "$GITHUB_ENV"
+
+      - name: Triagem + limpa decoys + retry de laudos pendentes
+        env:
+          AUTOAVALIAR_EMAIL: ${{ secrets.AUTOAVALIAR_EMAIL }}
+          AUTOAVALIAR_PASSWORD: ${{ secrets.AUTOAVALIAR_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+        run: |
+          .venv/bin/python scripts/triagem_diaria.py --empresa carros_uberlandia
+          .venv/bin/python scripts/limpar_decoys_laudo.py
+          .venv/bin/python scripts/reprocessar_lotes_do_db.py \
+            --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente
+
+      - name: Persiste DB + cookies em state/db
+        if: always()
+        run: |
+          if [ ! -s carros_sa.db ]; then
+            echo "DB vazio/ausente — nada a persistir"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BLOB_DB=$(git hash-object -w carros_sa.db)
+          TREE_INPUT="$(printf '100644 blob %s\tcarros_sa.db\n' "$BLOB_DB")"
+          if [ -s "$AUTOAVALIAR_COOKIES_PATH" ]; then
+            BLOB_CK=$(git hash-object -w "$AUTOAVALIAR_COOKIES_PATH")
+            TREE_INPUT="$TREE_INPUT$(printf '\n100644 blob %s\tautoavaliar_cookies.json' "$BLOB_CK")"
+          fi
+          TREE=$(printf '%s\n' "$TREE_INPUT" | git mktree)
+
+          PARENT=$(git rev-parse origin/state/db 2>/dev/null || true)
+          MSG="state @ $(date -u +%FT%TZ) (run ${{ github.run_id }})"
+          if [ -n "$PARENT" ]; then
+            COMMIT=$(echo "$MSG" | git commit-tree "$TREE" -p "$PARENT")
+          else
+            COMMIT=$(echo "$MSG" | git commit-tree "$TREE")
+          fi
+          git push origin "$COMMIT:refs/heads/state/db"

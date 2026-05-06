@@ -360,10 +360,22 @@ class SheetsExporter:
                 tese_cell = "—"
             else:
                 preco_max_cell = r["preco_max"]
-                lucro_mes_cell = r["lucro_mes"]
-                roi_anual_cell = r["roi_anualizado"]
+                # Em lotes inviáveis (lance atual já passou do nosso teto),
+                # Lucro/mês e ROI anualizado pressupõem comprar pelo preço-ALVO
+                # — que é menor que o lance atual. Cenário fantasioso. Em lote
+                # estrutural inviável, o score_roi inflado pela margem alta
+                # (~1.0) produz Lucro/mês de R$5k+ e ROI 500%/ano, induzindo o
+                # operador a achar que vale negociar. Mantemos preco_max +
+                # reforma + FIPE pra ele entender por que descartamos.
+                if r["viavel"]:
+                    lucro_mes_cell = r["lucro_mes"]
+                    roi_anual_cell = r["roi_anualizado"]
+                    tese_cell = r["tese"]
+                else:
+                    lucro_mes_cell = "—"
+                    roi_anual_cell = "—"
+                    tese_cell = "—"
                 reforma_cell = r["reforma_estimada"]
-                tese_cell = r["tese"]
 
             # FIPE é referência de mercado, NÃO depende do laudo — sempre mostra
             # quando a avaliação tem o valor (registros pré-workstream K podem
@@ -535,7 +547,7 @@ class SheetsExporter:
                 "Situação",
                 "Derivado",
                 "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO quando o scraper não conseguiu extrair a URL do PDF (modal lazy, 429, etc). Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Os números numéricos ficam '—' até o retry do laudo rodar.",
+                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro/mês, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro/mês, ROI e Tese ficam '—' (números pressupõem comprar pelo preço-alvo, que é menor que o lance atual nesses lotes — fantasia); Lance Máximo, FIPE e Reforma continuam visíveis pra o operador entender por que descartamos.",
             ],
             [
                 "Marca",
@@ -594,14 +606,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
-                "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo). Em lotes '✗ Caro demais' a célula vai pra '—': comprar pelo preço-alvo é cenário fantasioso quando o lance atual já passou do nosso teto.",
+                "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade. Atenção: é o caso esperado se comprarmos pelo preço-ALVO, não pelo Lance Máximo (esse é o teto).",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa).",
+                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote. margem_aplicada (componente do score_roi) é capada em 50% pra evitar que lotes com fatores no teto (laudo estrutural + mercado ilíquido) inflem o ROI artificialmente. Em lotes '✗ Caro demais' a célula vai pra '—'.",
+                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa). Números altos (>200%/ano) tipicamente refletem o floor de 30 dias num lote de giro rápido — interprete como 'best-case anualizado se comprarmos no alvo', não como retorno garantido.",
             ],
             [
                 "Reforma (R$)",

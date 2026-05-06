@@ -137,9 +137,20 @@ def precificar(
     fator_risco = calcular_fator_risco(laudo, empresa.fator_risco_bounds)
     fator_liquidez = calcular_fator_liquidez(mercado, empresa.fator_liquidez_bounds)
 
-    # 3. Margem — respeita o piso absoluto da empresa
+    # 3. Margem — respeita o piso absoluto da empresa e um teto duro.
+    #    Cap em 0.50: quando fator_risco × fator_liquidez saturam (laudo estrutural
+    #    + mercado ilíquido), `base × 2.0 × 1.8 = 0.90` em Uberlândia. Margem
+    #    teórica acima de 50% é sintoma de fatores no teto, não de "oportunidade
+    #    real" — o lote será descartado de qualquer forma (lance > preco_max), mas
+    #    deixar a margem subir desproporcionalmente infla `score_roi` e faz lotes
+    #    péssimos aparecerem com Lucro/mês alto na planilha. Cap mata o ruído sem
+    #    afetar lotes calibrados (margem típica fica em 25-45%).
+    _MARGEM_TETO = 0.50
     margem_calculada = empresa.margem.base * fator_risco * fator_liquidez
-    margem_aplicada = max(margem_calculada, empresa.margem.minima_absoluta)
+    margem_aplicada = max(
+        min(margem_calculada, _MARGEM_TETO),
+        empresa.margem.minima_absoluta,
+    )
 
     # 4. Custos fixos (exceto taxas, calculadas abaixo sobre o lance vencedor)
     frete_incluso = frete.frete_estimado

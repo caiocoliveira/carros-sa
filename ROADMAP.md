@@ -4,7 +4,34 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 328/328 testes passando
+✅ **Fundação + EstimadorReforma** — 377/377 testes passando
+
+### X — Cap em margem + supressão de colunas em lotes inviáveis (2026-05-06) ✅
+- **Branch:** `claude/sleepy-wright-HPas7`
+- **Motivação:** Pedido autônomo de "revise e corrija". Simulação com 7 lotes representativos (Polo Track 2024, Compass 2019, Saveiro 2011, Range Rover 2015, Fiesta estrutural, Compass com AA-ref, Polo km baixo) — registrada em `/tmp/sim_revisao.py` — expôs que lotes péssimos exibiam Lucro/mês R$5k+ e ROI 500%/ano mesmo na situação "✗ Caro demais", confundindo a triagem. Identidade matemática correta, comunicação errada (LESSONS P6).
+- **Bugs corrigidos:**
+  1. **Score_roi explosivo em lotes péssimos:** `margem_aplicada = base × fator_risco × fator_liquidez` chegava a 90% em Uberlândia (laudo estrutural + mercado ilíquido satura `2.0 × 1.8`). Score_roi cresce com a margem (capital_alvo encolhe), então Fiesta inviável tinha `score_roi=1.09` (Lucro/mês ~R$5k). [`carros_sa/precificador.py`](carros_sa/precificador.py): `_MARGEM_TETO=0.50` cap dura. Fiesta agora tem `margem=0.50`, `score_roi≈1.0` — ainda alto, mas **não polui mais a planilha** (ver fix #2).
+  2. **Lotes "✗ Caro demais" mostravam Lucro/mês + ROI + Tese baseados em comprar pelo preço-alvo** — que é menor que o lance atual nesses lotes, então cenário fantasioso. [`carros_sa/tools/sheets.py:_write_sheet`](carros_sa/tools/sheets.py): estende o gate de "—" para `not r["viavel"]`. Mantém Lance Máximo + FIPE + Reforma visíveis (operador ainda quer entender o descarte).
+  3. **Audit não detectava margem efetiva no teto** — sintoma forte de fatores explodidos. [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py): novo registry `_DERIVED_CHECKS` com `_check_margem_no_teto` (margem ≥ 49% vira red flag agregado).
+- **Glossário** atualizado: explica em que regime Lucro/mês e ROI fazem sentido + por que ficam "—" em "✗ Caro demais".
+- **CLAUDE.md** ganha 2 padrões aprendidos: cap em margem + supressão por viabilidade.
+- **LESSONS.md** ganha P6 (identidade matemática consistente mas semanticamente errada) — primeiro caso registrado de bug não-algébrico.
+- **Cobertura:** 5 testes novos
+  - `test_precificador.py::test_margem_aplicada_capada_em_50pct` — Fiesta péssimo bate exatamente em 0.50
+  - `test_precificador.py::test_margem_aplicada_brando_nao_atinge_cap` — calibrado fica abaixo
+  - `test_exportar_sheets.py::test_exportar_inviavel_oculta_lucro_roi_tese` — gate viavel
+  - `test_audit_columns.py::TestAuditDerivado::test_margem_no_teto_reportada`
+  - `test_audit_columns.py::TestAuditDerivado::test_margem_normal_nao_reportada`
+- **Adaptação de teste existente:** `test_multi_empresa_mesmo_lote_rankings_divergem` precisava ser ajustado (lote suavizado pra que SP não saturasse no cap — sem isso, ambas empresas igualariam em 0.50 e o teste só compararia configs no teto). Suíte total: **377 verde**.
+- **Validação real (simulação 7 lotes):**
+  - Polo Track 2024 saudável: viável, ROI=584%/ano (alto pelo floor 30d, mas aceitável como "best-case anualizado" — agora documentado)
+  - Compass 2019 saudável: viável, ROI=346%, Lucro/mês R$17k
+  - Saveiro 2011 inviável: lance R$27.5k > p_max R$25.5k. **Antes:** Lucro/mês R$5.4k visível. **Depois:** "—".
+  - Fiesta estrutural inviável: **Antes:** margem 67.8%, score_roi=1.09. **Depois:** margem 50% (cap), score_roi≈1.0. E a linha vai pra "—" no Lucro/mês mesmo assim.
+  - Polo km baixo: viável, mas Giro FIPE > FIPE × 1.10 (audit antigo flaga — esperado por f_km=1.15).
+- **Limitações conhecidas:**
+  - Cap de 50% é heurística — calibrado pra evitar score_roi > 1.05 com `min(custo_op, reforma) ≈ 0`. Se um lote viável extremo (laudo perfeito + mercado raso + frete zero + reforma alta) chegar à fronteira, vai pegar o cap. Como o regime de cap é raro em viáveis, o trade-off é favorável; revisar se observar caso real.
+  - ROI anualizado de 500%+ em lotes saudáveis ainda confunde — é o floor de 30 dias × score_roi calibrado de ~0.4-0.6. Mitigação atual é educacional (Glossário). Trocar pra `_dias_giro_minimo_anualizacao` configurável é trabalho futuro.
 
 ### W — Revisão econômica das colunas da planilha (2026-04-29) ✅
 - **Branch:** `claude/sleepy-wright-kSiCR`

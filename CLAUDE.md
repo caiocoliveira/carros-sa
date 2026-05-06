@@ -140,3 +140,11 @@ Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_colum
 
 ### Workflow de revisão autônoma
 Quando o usuário pedir "revise e corrija" sem direcionar, o caminho que funcionou foi: (1) ler ROADMAP + precificador + sheets + tests existentes, (2) ESCREVER UM SCRIPT DE SIMULAÇÃO (`/tmp/sim.py`) com lote real conhecido (Polo Track 2024 do YAML) e validar identidades algébricas comparando docstring vs implementação, (3) só depois confirmar bugs e refatorar. Pular a simulação leva a "fixes" baseados em leitura — frequentemente errados.
+
+**Refinamento (2026-05-06):** o script de simulação deve cobrir AMBOS os regimes — (a) lote saudável calibrado, (b) lote péssimo com fatores no teto. Bugs semânticos (não algébricos) só aparecem no regime extremo. Exemplo: a identidade `lucro = preco_giro × score_roi/(1+score_roi)` está sempre correta, mas em lote estrutural inviável o `score_roi` salta pra ~1.0 (margem aplicada satura nos bounds), exibindo Lucro/mês de R$5k+ na linha "✗ Caro demais". Mínimo de 5 lotes representativos com red flags impressos por linha — ver `/tmp/sim_revisao.py`.
+
+### Cap em margem_aplicada (precificador.py:`_MARGEM_TETO=0.50`)
+Margem efetiva é `min(base × fator_risco × fator_liquidez, 0.50)`, limitada também pelo piso `minima_absoluta`. O cap de 50% existe pra evitar P6 (LESSONS): quando os fatores saturam no teto (laudo estrutural + mercado ilíquido), a margem teórica vai pra 90%+ e infla `score_roi`, fazendo lote péssimo aparecer com Lucro/mês comparável ao de lote saudável. **Não tirar o cap sem revisar o exporter** — hoje a planilha já suprime Lucro/mês e ROI em lotes inviáveis, mas o cap é a defesa em camadas que mantém o ranking dos viáveis sensato.
+
+### Supressão de colunas em lotes "✗ Caro demais"
+`SheetsExporter._write_sheet` exibe `"—"` em Lucro/mês, ROI anualizado e Tese sempre que `not r["viavel"]` (lance atual > preco_max). Esses números pressupõem comprar pelo preço-ALVO, que é menor que o lance atual em lote inviável → cenário fantasioso. **Mantém visível**: Lance Máximo, FIPE, Reforma — pra o operador entender por que descartamos. Quando adicionar nova coluna especulativa derivada de score_roi, **estender o gate `if r["viavel"]:` no exporter** ou herdará o mesmo bug.

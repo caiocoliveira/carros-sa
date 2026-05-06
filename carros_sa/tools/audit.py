@@ -227,6 +227,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro": av.preco_giro,
             "viavel": viavel,
             "encerrado": encerrado,
+            "margem_aplicada": av.margem_aplicada,
         })
 
     # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
@@ -240,6 +241,33 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         r["rank"] = idx
         r["situacao"] = _situacao(r)
     return rows
+
+
+# Invariantes "derivadas" que cruzam mais de uma coluna interna ou inspecionam
+# campos que não aparecem direto no HEADER (ex: margem_aplicada). Separadas das
+# CHECKS por coluna porque não casam no esquema "1 valor → 1 motivo".
+DerivedCheck = Callable[[Dict[str, Any]], Optional[Tuple[str, str]]]
+
+
+def _check_margem_no_teto(row: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Margem efetiva ≥ 49% sinaliza fatores risco × liquidez perto do teto.
+
+    Margem aplicada é capada em 50% no precificador (`_MARGEM_TETO`) — quando
+    bate no cap, normalmente é laudo estrutural + mercado ilíquido. O lote
+    acaba sendo descartado por viabilidade, mas vale flagar pra o operador
+    conferir se a calibração de fatores faz sentido pra essa amostra.
+    """
+    margem = row.get("margem_aplicada")
+    if margem is None or margem < 0.49:
+        return None
+    return (
+        "Precificador / margem",
+        f"margem aplicada {margem:.1%} no teto (cap=50%) — fatores no limite, "
+        "lote provavelmente péssimo. Conferir laudo + mercado.",
+    )
+
+
+_DERIVED_CHECKS: List[DerivedCheck] = [_check_margem_no_teto]
 
 
 def audit(engine, sample_size: int = 20) -> List[str]:
@@ -274,6 +302,21 @@ def audit(engine, sample_size: int = 20) -> List[str]:
                     "count": 1,
                     "exemplo_lote": row["lote_id"],
                     "exemplo_valor": valor,
+                }
+            else:
+                agregador[chave]["count"] += 1
+        # Invariantes derivadas — usam o row inteiro, não uma única coluna.
+        for derived in _DERIVED_CHECKS:
+            res = derived(row)
+            if res is None:
+                continue
+            coluna, motivo = res
+            chave = (coluna, motivo)
+            if chave not in agregador:
+                agregador[chave] = {
+                    "count": 1,
+                    "exemplo_lote": row["lote_id"],
+                    "exemplo_valor": row.get("margem_aplicada"),
                 }
             else:
                 agregador[chave]["count"] += 1

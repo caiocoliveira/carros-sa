@@ -226,7 +226,26 @@ def test_multi_empresa_mesmo_lote_rankings_divergem(
     - Pátio em SP está mais longe de Goiânia que Uberlândia (frete maior)
     - taxa_leilao_pct 8% (vs 0% de Uberlândia, que usa fixa de 999)
     - bounds de risco/liquidez mais largos (operação mais exigente)
+
+    Usa laudo/mercado SUAVIZADOS (severidade leve, mercado normal) pra que
+    nenhuma das empresas atinja o cap de margem (`_MARGEM_TETO=0.50`). Sem isso,
+    SP saturaria em 50% pelos bounds mais largos (2.2 × 2.0) e o teste só
+    estaria comparando configs idênticas no teto.
     """
+    # Laudo "ótimo" + mercado raso pra que SP (bounds altos) não sature em 50%.
+    # Base SP = 0.30 → fator_risco × fator_liquidez precisam ficar < 1.67.
+    laudo_brando = gol_2015_laudo.model_copy(update={
+        "severidade_geral": SeveridadeAvaria.NENHUMA,
+        "avarias": [],
+        "documentacao": StatusDocumentacao.OK,
+        "motor_ok": True,
+        "confidence": 1.0,
+    })
+    mercado_brando = gol_2015_mercado.model_copy(update={
+        "n_anuncios_competidores": 5,
+        "dias_giro_estimado": 30,
+    })
+
     empresa_uber = carregar_empresa("carros_uberlandia")
     empresa_sp = carregar_empresa("empresa_fake_sp")
 
@@ -234,8 +253,12 @@ def test_multi_empresa_mesmo_lote_rankings_divergem(
     frete_uber = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
     frete_sp = _frete("Goiânia", "GO", "São Paulo", "SP", 900, 2_100)
 
-    av_uber = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete_uber, empresa_uber)
-    av_sp = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete_sp, empresa_sp)
+    av_uber = precificar(gol_2015_lote, laudo_brando, mercado_brando, gol_2015_reforma, frete_uber, empresa_uber)
+    av_sp = precificar(gol_2015_lote, laudo_brando, mercado_brando, gol_2015_reforma, frete_sp, empresa_sp)
+
+    # Sanidade: nenhuma das duas atingiu o cap (senão a comparação vira ruído)
+    assert av_uber.margem_aplicada < 0.50
+    assert av_sp.margem_aplicada < 0.50
 
     # SP deve oferecer MENOS pelo mesmo lote
     assert av_sp.preco_alvo < av_uber.preco_alvo
@@ -597,3 +620,49 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
     # preço-alvo sobe com f_km > 1
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
     assert "f_km=1.15" in av_com_ajuste.justificativa
+
+
+# =============================================================================
+# Cap em margem_aplicada (≤ 0.50) — evita score_roi inflado em lotes péssimos
+# =============================================================================
+
+def test_margem_aplicada_capada_em_50pct(gol_2015_lote, gol_2015_reforma):
+    """Lote estrutural + mercado ilíquido satura `fator_risco × fator_liquidez`
+    nos bounds (2.0 × 1.8 = 3.6 em Uberlândia, base=0.25 → margem teórica 0.90).
+    O cap em 50% impede que `score_roi` (= margem/(1-margem) com custos zerados)
+    explore artificialmente, fazendo lote péssimo aparecer com Lucro/mês alto.
+    Antes do cap: margem ~68%, score_roi ~1.09. Depois: margem 50%, score_roi ≤ 1.
+    """
+    laudo_pessimo = LaudoEstruturado(
+        avarias=[Avaria(parte="coluna_b", severidade=SeveridadeAvaria.ESTRUTURAL)],
+        severidade_geral=SeveridadeAvaria.ESTRUTURAL,
+        motor_ok=False,
+        documentacao=StatusDocumentacao.PENDENCIA_GRAVE,
+        categoria_veiculo=CategoriaVeiculo.HATCH,
+        confidence=0.5,
+    )
+    mercado_pessimo = SinalMercado(
+        fipe=28_000, webmotors_mediana=25_000, webmotors_p25=22_000,
+        n_anuncios_competidores=200, dias_giro_estimado=180,
+    )
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
+
+    av = precificar(gol_2015_lote, laudo_pessimo, mercado_pessimo, gol_2015_reforma, frete, empresa)
+
+    # Cap dura é exatamente 50% — fatores saturados deveriam dar margem teórica
+    # 0.25 × 2.0 × 1.8 = 0.90, mas o cap segura em 0.50.
+    assert av.margem_aplicada == pytest.approx(0.50, abs=1e-6)
+    # Score_roi não passa de ~1.0 (fórmula de identidade: capital_alvo encolhe
+    # com a margem, então tem teto natural quando margem→0.5).
+    assert av.score_roi <= 1.05
+
+
+def test_margem_aplicada_brando_nao_atinge_cap(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma):
+    """Lote calibrado normal NÃO deve bater no cap — só lotes com fatores saturados.
+    Este é o regime típico (margem 25-45%); o cap é o "freio de emergência".
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+    assert av.margem_aplicada < 0.50  # bem abaixo do teto

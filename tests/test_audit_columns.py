@@ -230,3 +230,37 @@ class TestAuditAgregacao:
         assert "KM" in texto
         assert "Reforma" in texto
         assert "Ano" in texto
+
+
+# ---------------------------------------------------------------------------
+# Invariantes derivadas — cruzam mais de um campo. Testam o pipeline
+# `_DERIVED_CHECKS` introduzido junto com o cap de margem.
+# ---------------------------------------------------------------------------
+
+class TestAuditDerivado:
+    def _av_com_margem(self, lote_id: str, margem: float) -> AvaliacaoLote:
+        # Avaliacao normal SO que com margem_aplicada explícita.
+        av = _avaliacao(lote_id)
+        av.margem_aplicada = margem
+        return av
+
+    def test_margem_no_teto_reportada(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(self._av_com_margem("L001", margem=0.50))  # bate no cap
+            session.commit()
+        violacoes = audit(engine)
+        derivada = [v for v in violacoes if "margem" in v]
+        assert len(derivada) == 1, f"Esperava 1 violação de margem: {derivada}"
+        assert "50.0%" in derivada[0] or "50%" in derivada[0]
+
+    def test_margem_normal_nao_reportada(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(self._av_com_margem("L001", margem=0.30))  # típico
+            session.commit()
+        violacoes = audit(engine)
+        derivada = [v for v in violacoes if "margem" in v]
+        assert derivada == []

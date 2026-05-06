@@ -483,6 +483,43 @@ class TestSheetsExporterQuery:
         # rows[0]=banner, rows[1]=header, rows[2]=primeiro lote
         assert "Viável" in rows[2][idx_situacao]
 
+    def test_exportar_inviavel_oculta_lucro_roi_tese(self):
+        """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro/mês,
+        ROI anualizado nem Tese — esses números pressupõem comprar pelo preço-alvo
+        (que é menor que o lance atual nesse caso, cenário fantasioso). Mantemos
+        Lance Máximo + FIPE + Reforma pra o operador entender o descarte.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # lance_atual=35k > preco_max=30k → "✗ Caro demais"
+            session.add(_lote("L001", lance_atual=35_000))
+            session.add(_avaliacao("L001", preco_max=30_000, score_roi=0.8))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        row = rows[2]
+        assert row[HEADER.index("Situação")] == "✗ Caro demais"
+        # Numéricos especulativos suprimidos
+        assert row[HEADER.index("Lucro/mês (R$)")] == "—"
+        assert row[HEADER.index("ROI anualizado (%)")] == "—"
+        assert row[HEADER.index("Tese")] == "—"
+        # Mas contexto pra triagem manual continua visível
+        assert row[HEADER.index("Lance Máximo (R$)")] == 30_000
+        assert row[HEADER.index("Reforma (R$)")] == 3_000
+        assert row[HEADER.index("FIPE (R$)")] == "—"  # _avaliacao default não passa fipe
+
     def test_exportar_url_como_hyperlink_clicavel(self):
         """A coluna Anúncio deve virar =HYPERLINK(url, "Abrir anúncio") pra célula ficar curta e clicável."""
         engine = _engine_mem()

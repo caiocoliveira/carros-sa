@@ -72,6 +72,37 @@ de várias rodadas de "operador vê, operador reclama, eu conserto". Muitos dos
 fixes acima teriam sido pegos em `make test` se o `audit.py` existisse em
 2026-04-10 (ex.: `fim_em=None` na planilha, ROI > 500%, severidade fora do enum).
 
+### P6. Identidade matemática "consistente" mas semanticamente errada
+
+Sintoma: a fórmula está certa, os testes batem, mas o número exibido transmite
+algo que NÃO é verdade.
+
+Caso de referência (2026-05-06): score_roi explodia em lotes péssimos.
+`score_roi = lucro / capital_alvo`, onde `capital_alvo` encolhe quando
+`margem_aplicada` cresce. Lote estrutural + mercado ilíquido → `fator_risco × fator_liquidez`
+saturam → margem teórica de 90% (Uberlândia) ou 92% (SP) → score_roi ≈ 1.0+ →
+ROI 500%/ano + Lucro/mês R$5k+ exibidos numa linha "✗ Caro demais". O operador
+olhava 3 colunas conflitantes ("não viável" mas "rende R$5k/mês") e tinha que
+decidir o que ignorar. **A coluna existia pra responder uma pergunta — "vale
+investir?" — mas no regime de fatores no teto ela respondia "vale negociar uma
+fantasia".**
+
+Causa raiz: ranking pela fórmula presume que SEMPRE compraremos pelo preço-alvo.
+Em lote inviável (lance > preço-alvo) o cenário não acontece, então o número é
+contrafactual. **Identidade algébrica correta ≠ comunicação correta.**
+
+Antídoto: ao expor uma métrica derivada de uma fórmula, listar explicitamente
+em que regime ela faz sentido — e suprimir nos demais. Aqui virou:
+1. `_MARGEM_TETO=0.50` no precificador (cap dura, evita score_roi explorar)
+2. Em lotes inviáveis, Lucro/mês + ROI + Tese = "—" no exporter
+3. Audit derivado: margem ≥ 49% vira red flag (sinal de fatores no teto)
+4. Glossário deixa explícito que ROI é "best-case anualizado se comprar no alvo"
+
+Lição: quando uma identidade matemática existe (lucro = preco_giro × score_roi/(1+score_roi)),
+o reflexo é "o número está certo, exibe". Mas se o regime onde a identidade é
+significativa for restrito, o exibir vira ruído. **Sempre mapear "em que linhas
+da planilha esse número faz sentido?" ANTES de exibir.**
+
 ---
 
 ## Parte 2 — Causa raiz: o que está por baixo dos padrões
@@ -217,6 +248,7 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | `4e3ad0e` | P1 | Remover fallback silencioso de reforma |
 | `ed94d11` | P2 | FIPE v2 + desambiguação Chery duplicado |
 | `a02db4b` | P2 | EstimadorReformaLLM (tabela fixa era grosseira) |
+| (próximo) | P5, P6 | Cap em margem (0.50) + supressão Lucro/ROI em lotes inviáveis + audit derivado |
 | `1805c85` | P3, P4 | Defesa em profundidade download PDF |
 | `b681bd6` | P3 | `load_dotenv(override=True)` |
 | `68b742e` | P3 | `domcontentloaded` em vez de `networkidle` |

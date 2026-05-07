@@ -177,6 +177,43 @@ CARD_COMPASS_SEM_BADGE = [
 ]
 
 
+def test_parse_card_default_agora_e_local_naive_nao_utc(monkeypatch):
+    """`parse_card_lines(..., agora=None)` deve usar `datetime.now()` (LOCAL),
+    não `datetime.utcnow()`. Toda a stack downstream (sheets/audit/laudo_audit)
+    compara `lote.fim_em` contra `datetime.now()` — UTC default vazava lotes
+    encerrados há até |offset| horas como ativos no Brasil (UTC-3 = 3h de gap).
+
+    Estratégia do teste: patcheia `now` e `utcnow` na classe `datetime` que o
+    parser usa, com valores deslocados por 3h. Se o parser chamou `now`, fim_em
+    cai relativo ao "agora local"; se chamou `utcnow`, cai 3h adiantado.
+    """
+    from carros_sa.scraping import parsers as parsers_mod
+
+    fake_local = datetime(2026, 5, 2, 14, 0, 0)   # "agora local" (BRT)
+    fake_utc = datetime(2026, 5, 2, 17, 0, 0)     # "agora UTC" (= local + 3h)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_local
+        @classmethod
+        def utcnow(cls):
+            return fake_utc
+
+    monkeypatch.setattr(parsers_mod, "datetime", _FakeDatetime)
+
+    lote = parse_card_lines(
+        CARD_HAVAL_SHOWROOM, "21867780",
+        "https://b2b.autoavaliar.com.br/avaliacoes/autojapan/21867780/gwm-haval-h6",
+    )
+    # Timer "20:15:13:92" → +20h15m13s
+    esperado_local = fake_local + timedelta(hours=20, minutes=15, seconds=13)
+    assert lote.fim_em == esperado_local, (
+        f"fim_em={lote.fim_em} esperava {esperado_local} (relativo a now() local). "
+        "Se veio com 3h a mais, parser regrediu pra utcnow()."
+    )
+
+
 def test_parse_card_haval_com_badge_showroom():
     lote = parse_card_lines(CARD_HAVAL_SHOWROOM, "21867780",
                             "https://b2b.autoavaliar.com.br/avaliacoes/autojapan/21867780/gwm-haval-h6")

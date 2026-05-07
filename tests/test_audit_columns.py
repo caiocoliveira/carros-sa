@@ -197,6 +197,75 @@ class TestAuditDeteccao:
 
 
 # ---------------------------------------------------------------------------
+# Coerência cross-field por linha (sintomas detectados em revisão 2026-05-02)
+# ---------------------------------------------------------------------------
+
+class TestAuditCoerenciaRow:
+    def test_severidade_grave_com_reforma_zero_reportado(self):
+        """Reforma R$ 0 num lote estrutural é contradição: indica que LLM não
+        leu o laudo direito ou caiu em fallback errado. Operador veria
+        '✓ Viável + reforma R$ 0' num carro batido.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", reforma_estimada=0))
+            session.add(_laudo("L001", severidade="estrutural"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Reforma R$ 0" in v and "estrutural" in v for v in violacoes), (
+            f"Esperava violação 'Reforma R$ 0 com severidade estrutural', obtive: {violacoes}"
+        )
+
+    def test_severidade_leve_com_reforma_zero_e_aceito(self):
+        """Reforma 0 com severidade leve/nenhuma é normal — não dispara warning."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", reforma_estimada=0))
+            session.add(_laudo("L001", severidade="leve"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Reforma R$ 0" in v for v in violacoes), (
+            f"Não deveria flagar reforma 0 em severidade leve: {violacoes}"
+        )
+
+    def test_preco_giro_fipe_muito_acima_da_fipe_reportado(self):
+        """Anchor de revenda 30%+ acima da FIPE retail sinaliza:
+           - similares poluídos (regex pegando R$ de outras seções)
+           - cache FIPE stale ou marca/modelo errado
+           - f_km saturado no teto sem motivo
+        Por construção f_km contribui no máx ±15%, gap >25% pede investigação.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            # FIPE 32k mas preco_giro_fipe 50k = +56% acima — bug em algum lugar.
+            session.add(_avaliacao(
+                "L001", fipe=32_000, preco_giro_fipe=50_000, preco_giro=50_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("preco_giro_fipe" in v and "divergente" in v for v in violacoes), (
+            f"Esperava violação de divergência preco_giro_fipe vs FIPE: {violacoes}"
+        )
+
+    def test_preco_giro_fipe_dentro_da_faixa_aceito(self):
+        """preco_giro_fipe = FIPE × 0.97 (fallback sem similares) deve passar."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao(
+                "L001", fipe=32_000, preco_giro_fipe=31_040, preco_giro=31_040,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("preco_giro_fipe" in v for v in violacoes), (
+            f"Não deveria flagar 0.97×FIPE: {violacoes}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Agregação por coluna (várias linhas → uma única violação com contagem)
 # ---------------------------------------------------------------------------
 

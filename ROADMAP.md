@@ -543,6 +543,38 @@ Já registrado:
 - **Limitações conhecidas:**
   - URLs pré-assinadas do Google Storage expiram em ~1h. O estado "PDF salvo (link expirado)" é o melhor que dá pra fazer sem hospedar o PDF em outro lugar. Pra ter link permanente, o próximo passo é subir os PDFs no Google Drive (via service account já configurada) e armazenar `drive_file_id` no `LaudoCache` — mudança maior, fora deste workstream.
 
+### Workstream R.4 — Motivo de laudo incompleto na planilha (2026-05-07) ✅
+
+- **Branch:** `claude/great-turing-eKFE0`
+- **Problema:** desde R.1/R.3, lotes incompletos viravam "⚠ LAUDO NÃO CAPTURADO"
+  genérico — operador via 100+ avisos iguais, abrir o cron log pra descobrir se
+  faltou PDF, extração ou URL é fricção que mata a auditoria visual. RC3 do
+  `LESSONS.md` em ação ("aviso vira ruído quando todos parecem iguais").
+- **Mudança cirúrgica:**
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `_query` chama
+    `verificar_laudo_completo` (passando `PDF_DIR_DEFAULT` da indireção do
+    módulo pra preservar monkeypatch) e enriquece a row com `laudo_completo` +
+    `laudo_motivo`. `_write_sheet` sufixa o motivo legível na Situação:
+    `⚠ LAUDO NÃO CAPTURADO: PDF ausente`, `... extração fraca`, `... URL inválida`,
+    ou combinação `... PDF ausente + URL inválida`. Quando cache está forte mas
+    sinais laterais falham (PDF some / URL stale), aparece como
+    `✓ Viável (laudo: <motivo>)` — numéricos seguem válidos, operador é avisado
+    sem bloquear o ranking.
+  - [`tests/test_laudo_audit.py`](tests/test_laudo_audit.py) — nova classe
+    `TestSituacaoCarregaMotivoLaudo` com 6 testes cobrindo cada motivo isolado,
+    combinações de 2/3 motivos e o caso completo (Situação "✓ Viável" puro).
+- **Cobertura:** 22 testes em `tests/test_laudo_audit.py` (16 originais + 6
+  novos). Suite total: **417 passed, 2 skipped**.
+- **Loop fechado com R.3:** `--strict` ainda alerta o cron quando há gaps; o
+  novo sufixo na Situação alerta o **operador humano** que abre a planilha. Se
+  qualquer um dos 3 sinais falhar, está agora visível em DOIS canais (cron log
+  + célula da planilha) e o motivo é o MESMO código (`verificar_laudo_completo`
+  é fonte única).
+- **Limitações conhecidas:**
+  - O sufixo cresce até ~3 motivos concatenados. Se a auditoria expandir para
+    4ª condição (ex: PDF assinado por chave revogada), revisar o `_LAUDO_MOTIVO_LEGIVEL`
+    em `sheets.py` pra manter o texto curto.
+
 ### Workstream R.3 — Audit estrito como gate final (2026-05-05)
 
 - **Problema:** o auditor `make auditar-laudos` existia desde R.1 mas operador

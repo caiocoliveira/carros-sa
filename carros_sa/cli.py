@@ -571,7 +571,12 @@ async def _run_triagem(
         console.print(f"[green]✓ {n} lotes exportados → aba \"{empresa_id}\"[/green]")
         console.print(f"  Sheet: {exporter.sheet_url}")
     except Exception as exc:
+        # Falha no Sheets é falha do produto principal — operador vai abrir
+        # planilha desatualizada sem saber. Saímos com exit 1 (mesmo padrão
+        # do `triagem_diaria.py` pós-PR #57). Audit final NÃO roda nesse
+        # caminho — sem export, não faz sentido auditar consistência sheet↔DB.
         console.print(f"[red]Erro ao exportar: {exc}[/red]")
+        raise typer.Exit(1)
 
     # Audit final — fecha o laço "todo lote ativo na planilha tem laudo
     # baixado + revisado + linkado". Sem isso, lotes que escapam do retry

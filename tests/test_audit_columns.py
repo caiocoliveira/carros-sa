@@ -155,6 +155,9 @@ class TestAuditDeteccao:
         Threshold apertado de 1000% → 500% pra pegar saturação realista (operação
         Reinaldo: 60-75% ano; sistema chega a 500% só quando dias_giro<60d
         otimista colide com fatores próximos do teto).
+
+        Lote precisa ser VIÁVEL (preco_max > lance_atual) — em inviáveis o
+        ROI vai pra "—" no display e o audit espelha (suprime check).
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -162,7 +165,7 @@ class TestAuditDeteccao:
             # score_roi=2.0 × 365/60 (floor) = 1217% > 500
             session.add(_avaliacao(
                 "L001",
-                preco_max=1000,
+                preco_max=2000,  # > lance_atual → viável (sem isso o ROI vira '—')
                 preco_giro=100_000,
                 reforma_estimada=0,
                 frete_incluso=0,
@@ -542,3 +545,63 @@ class TestAuditDerivado:
         violacoes = audit(engine)
         derivada = [v for v in violacoes if "margem" in v]
         assert derivada == []
+
+
+# ---------------------------------------------------------------------------
+# Display ↔ Audit (paridade de supressão pra colunas que viram "—" em
+# lotes inviáveis).  Sem essa paridade, audit reportava "ROI/Lucro/Tese"
+# pra lotes onde o operador NÃO vê o número — alarme falso operacional.
+# ---------------------------------------------------------------------------
+
+class TestAuditEspelhaDisplay:
+    """Lotes inviáveis (lance_atual > preco_max) viram '—' em ROI/Lucro/Tese
+    no `SheetsExporter._write_sheet`. Audit deve espelhar — caso contrário
+    aparece dispararado "ROI anualizado negativo" em lotes que o operador
+    NÃO consegue confirmar abrindo a planilha. Padrão geral em LESSONS.md/P5b:
+    audit é uma view sobre o display; toda supressão de display vale aqui também.
+    """
+
+    def test_lote_inviavel_com_score_efetivo_negativo_nao_dispara_roi(self):
+        """Cenário Fiesta ESTRUTURAL real: lance_atual=22.9k > preco_max=13k
+        → score_efetivo recalculado fica negativo (capital_ef > preco_giro)
+        → ROI anualizado fica -53.9%. Display: '—'. Audit: NÃO deve disparar.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L_INV", lance_atual=22_900))
+            # preco_max < lance_atual → inviável; score_roi alto pra forçar
+            # cálculo de score_efetivo negativo no _build_rows.
+            session.add(_avaliacao(
+                "L_INV",
+                preco_max=13_000,    # < 22_900 → inviável
+                score_roi=1.0,
+                preco_giro=27_300,
+                fipe=30_900,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        roi_negativos = [v for v in violacoes if "ROI" in v and "negativ" in v]
+        assert roi_negativos == [], (
+            f"Audit não deve flag ROI negativo em lote inviável (display mostra '—'): {violacoes}"
+        )
+
+    def test_lote_viavel_com_roi_negativo_continua_disparando(self):
+        """Sanidade: lote VIÁVEL com score_roi forçadamente negativo
+        (cenário sintético, não deveria acontecer) ainda flag.
+        Inviabilidade é a única exclusão.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L_VIA", lance_atual=10_000))
+            # Lote viável (preco_max > lance) mas score_roi < 0 (bug sintético)
+            session.add(_avaliacao(
+                "L_VIA",
+                preco_max=30_000,
+                score_roi=-0.5,
+                preco_giro=35_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("ROI" in v and "negativ" in v for v in violacoes), (
+            f"Lote viável com ROI negativo deve continuar disparando: {violacoes}"
+        )

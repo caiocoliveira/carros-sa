@@ -120,10 +120,14 @@ def _score_roi_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> float:
     """
     if av.score_roi is None or av.preco_giro is None or av.preco_giro <= 0:
         return 0.0
-    if lance_atual is None or lance_atual <= (av.preco_alvo or 0):
+    # `preco_alvo` é non-nullable no schema atual, mas registros pré-workstream
+    # ou imports históricos podem trazer NULL. Sem essa coalescência, a linha
+    # `lance_atual - av.preco_alvo` levantava TypeError e quebrava a planilha.
+    alvo = av.preco_alvo or 0
+    if lance_atual is None or lance_atual <= alvo:
         return av.score_roi  # entrada pelo alvo é factível
     capital_alvo = av.preco_giro / (1.0 + av.score_roi)
-    capital_ef = capital_alvo + (lance_atual - av.preco_alvo)
+    capital_ef = capital_alvo + (lance_atual - alvo)
     if capital_ef <= 0:
         return 0.0
     return (av.preco_giro - capital_ef) / capital_ef

@@ -124,6 +124,16 @@ def precificar(
     #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
     preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
+    # Cap defensivo: cap mediana similares (1.20×FIPE quando n<5) + f_km no
+    # teto (1.15) podiam multiplicar pra 1.38×FIPE — lance proposto saía
+    # acima da FIPE em casos com Webmotors live (futuro) ou amostras n≥5
+    # totalmente erradas. 1.20×FIPE preserva o caso legítimo de modelo que
+    # vende premium (Civic/Corolla ~110% FIPE em alta) mas evita combinação
+    # patológica de duas otimizações em série. Audit em 1.10 continua avisando
+    # como sinal cedo; cap em 1.20 limita o estrago no preço-alvo.
+    _PRECO_GIRO_FIPE_TETO_PCT_FIPE = 1.20
+    teto_fipe = int(mercado.fipe * _PRECO_GIRO_FIPE_TETO_PCT_FIPE)
+    preco_giro_fipe = min(preco_giro_fipe, teto_fipe)
     preco_giro_aa: Optional[int] = None
     if mercado.auto_avaliar_ref is not None:
         preco_giro_aa = int(round(

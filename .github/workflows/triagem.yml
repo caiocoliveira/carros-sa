@@ -120,7 +120,10 @@ jobs:
           fi
           TREE=$(printf '%s\n' "$TREE_INPUT" | git mktree)
 
-          PARENT=$(git rev-parse origin/state/db 2>/dev/null || true)
+          PARENT=""
+          if git rev-parse --verify --quiet refs/remotes/origin/state/db >/dev/null 2>&1; then
+            PARENT=$(git rev-parse refs/remotes/origin/state/db)
+          fi
           MSG="state @ $(date -u +%FT%TZ) (run ${{ github.run_id }})"
           if [ -n "$PARENT" ]; then
             COMMIT=$(echo "$MSG" | git commit-tree "$TREE" -p "$PARENT")

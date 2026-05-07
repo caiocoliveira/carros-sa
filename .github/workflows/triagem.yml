@@ -89,7 +89,7 @@ jobs:
           printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > "$RUNNER_TEMP/gsa.json"
           echo "GOOGLE_SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/gsa.json" >> "$GITHUB_ENV"
 
-      - name: Triagem + limpa decoys + retry de laudos pendentes
+      - name: Triagem + limpa decoys + retry de laudos pendentes + audit gate
         env:
           AUTOAVALIAR_EMAIL: ${{ secrets.AUTOAVALIAR_EMAIL }}
           AUTOAVALIAR_PASSWORD: ${{ secrets.AUTOAVALIAR_PASSWORD }}
@@ -101,6 +101,13 @@ jobs:
           .venv/bin/python scripts/limpar_decoys_laudo.py
           .venv/bin/python scripts/reprocessar_lotes_do_db.py \
             --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente
+          # Audit gate final — fecha o laço "todo lote ativo na planilha
+          # tem PDF baixado + cache forte + URL clicável". Igual ao
+          # `auditar_laudos --strict` do `setup_cron.sh` local. Sem isso,
+          # lotes com "⚠ LAUDO NÃO CAPTURADO" vazam silenciosamente pra
+          # planilha e o operador só descobre olhando.
+          .venv/bin/python scripts/auditar_laudos.py \
+            --empresa carros_uberlandia --strict
 
       - name: Persiste DB + cookies em state/db
         if: always()

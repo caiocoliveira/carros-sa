@@ -161,7 +161,12 @@ async def _run(empresa_id: str, horizonte_dias: int, headless: bool, sem_sheets:
         console.print(f"[green]✓ {n} lotes exportados[/green]")
         console.print(f"  Sheet: {exporter.sheet_url}")
     except Exception as exc:
+        # Falha no Sheets é falha do produto principal — operador vai abrir
+        # planilha desatualizada sem saber. Saímos com exit 1 pra que o cron
+        # (ou GitHub Actions) marque o run como falho. Quem quiser rodar sem
+        # depender do Sheets passa `--sem-sheets`.
         console.print(f"[red]Erro ao exportar para Sheets: {exc}[/red]")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

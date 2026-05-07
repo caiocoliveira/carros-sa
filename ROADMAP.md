@@ -4,7 +4,23 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 328/328 testes passando
+✅ **Fundação + EstimadorReforma** — 377/377 testes passando
+
+### X — Revisão de coerência entre linhas + fix TZ (2026-05-02) ✅
+- **Branch:** `claude/sleepy-wright-J7Brw`
+- **Motivação:** Usuário pediu revisão autônoma "da lógica entre os valores das colunas" + dúvidas se Lance Máximo > FIPE ou Giro FIPE muito diferente da FIPE faziam sentido.
+- **Bugs encontrados e corrigidos:**
+  1. **Mistura naive UTC ↔ naive LOCAL em `Lote.fim_em`.** [`carros_sa/scraping/parsers.py:150`](carros_sa/scraping/parsers.py) computava `fim_em = datetime.utcnow() + delta_timer` (default), mas [`sheets.py`](carros_sa/tools/sheets.py), [`audit.py`](carros_sa/tools/audit.py), [`laudo_audit.py`](carros_sa/tools/laudo_audit.py), [`scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) e o filtro SQL `Lote.fim_em > now()` comparavam contra `datetime.now()` (LOCAL). Em Brasil (UTC-3) sobravam 3h de grace silenciosa onde lotes encerrados apareciam ativos na planilha + `strftime` exibia horário 3h adiantado. Conecta diretamente ao sintoma do workstream N ("usuário clicou no top 1 e o lote já tinha sido arrematado") que só foi resolvido parcialmente via badge ARREMATADO. Fix: parser default → `datetime.now()` pra colar com o resto da stack. Guard test em `tests/test_parsers.py::test_parse_card_default_agora_e_local_naive_nao_utc` patcheia `now`/`utcnow` com 3h de offset pra travar regressão em runner UTC.
+  2. **Auditoria de colunas era cega a contradições cross-field.** [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) validava cada célula em isolamento — "✓ Viável + reforma R$ 0" num lote ESTRUTURAL passava (cada campo individual válido). Adicionada coerência:
+     - **Reforma R$ 0 com severidade ∈ {média, grave, estrutural}** vira violação. Captura LLM mal-interpretando laudo ou fallback errado.
+     - **`preco_giro_fipe` divergente >25% de FIPE** vira violação. Por construção `f_km` contribui no máx ±15%; gap >25% sinaliza `_extrai_precos_similares` poluído (regex pegando R$ de outras seções), cache FIPE stale, ou marca/modelo errado na consulta.
+- **Análise da pergunta original (Lance Máximo > FIPE? Giro FIPE ≠ FIPE?):**
+  - Por construção `preco_max ≤ preco_giro × (1 − margem_min)` e `preco_giro = webmotors_mediana × f_km` com `f_km ∈ [0.75, 1.15]`. Ceiling teórico de `preco_max` ≈ FIPE × 1.05 (cenário extremo: f_km saturado + similares no topo). Audit já flagava `Lance Máximo > FIPE × 1.05`; agora cobre o vetor de entrada via `preco_giro_fipe vs FIPE`.
+  - "Giro FIPE muito diferente da FIPE" é o sintoma de dados ruins entrando — não é esperado em condições normais. A nova invariante captura.
+- **Cobertura:** 5 testes novos (1 em parsers, 4 em audit `TestAuditCoerenciaRow`). Suite total: **377 verde** (era 372).
+- **Limitações conhecidas:**
+  - O fix de TZ só corrige novos `fim_em` — entradas pré-fix com 3h de offset continuam até o lote sair do horizonte (timer expira). Sem migração porque o churn natural (~7d) resolve sozinho e migração retroativa em UTC naive sem TZ-info confiável é frágil.
+  - Threshold de divergência `preco_giro_fipe vs FIPE` está em ±25%. Pode disparar falso positivo em cenários legítimos onde `auto_avaliar_ref` vem MUITO mais baixo (atacado real abaixo da FIPE retail) — mas nesse caso `preco_giro` consolidado usa o mínimo, então `preco_giro_fipe` em si fica perto da FIPE (não é o `preco_giro`). Se aparecer falso positivo em produção, calibrar threshold ou trocar pra `preco_giro_aa`.
 
 ### X — Revisão econômica + alinhamento de ranking CLI ↔ Planilha (2026-05-05) ✅
 - **Branch:** `claude/sleepy-wright-C2HzV`

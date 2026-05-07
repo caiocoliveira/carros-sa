@@ -52,6 +52,15 @@ Casos:
 - **`load_dotenv()` vence o shell** — não vence sem `override=True` (`b681bd6`).
 - **`networkidle` dispara em SPA** — não dispara em long-polling (`68b742e`).
 - **`grep -v` é idempotente em crontab vazio** — falha com exit 1 (`7a85f02`).
+- **`datetime.utcnow()` em uma ponta + `datetime.now()` na outra "se anulam"** —
+  não se anulam, descasam pelo offset do timezone. `parse_card_lines` salvava
+  `Lote.fim_em` como naive UTC; `sheets`/`audit`/`laudo_audit` comparavam com
+  `datetime.now()` naive local. Em Brasil (UTC-3) sobrava 3h de grace silenciosa
+  onde lotes encerrados apareciam ativos + horário do leilão exibido 3h
+  adiantado. Padrão genérico: **misturar `now()` e `utcnow()` em datetimes
+  naive é sempre bug**, independentemente da intuição de "compensam". Fix
+  em 2026-05-02: parser default → `datetime.now()` pra colar com a stack
+  downstream que já é toda `now()`.
 
 ### P4. Single point of failure sem defesa em profundidade
 
@@ -97,6 +106,22 @@ O workstream Q (`carros_sa/tools/audit.py` + hook SessionEnd) foi criado depois
 de várias rodadas de "operador vê, operador reclama, eu conserto". Muitos dos
 fixes acima teriam sido pegos em `make test` se o `audit.py` existisse em
 2026-04-10 (ex.: `fim_em=None` na planilha, ROI > 500%, severidade fora do enum).
+
+### P6. Audit por coluna isolada não pega contradição cross-field
+
+Sintoma: cada célula passa no validador individual, mas a combinação é
+inconsistente. "✓ Viável + reforma R$ 0" num lote estrutural valida cada
+campo isoladamente (situação ok, reforma 0 é ≥ 0, severidade está no enum)
+mas é contradição evidente quando vista em linha. Mesmo padrão para
+`preco_giro_fipe` 50% acima da FIPE — cada um é positivo, nenhum estoura
+o cap individual, mas a relação entre eles indica `_extrai_precos_similares`
+poluído ou cache FIPE stale.
+
+Fix em 2026-05-02 (`carros_sa/tools/audit.py`): CHECKS recebem `row` dict com
+campos vizinhos; checks de "Reforma" e "FIPE" agora cruzam severidade e
+`preco_giro_fipe` respectivamente. Padrão genérico: **invariante não é só
+"valor está no domínio", é "esse valor é coerente com seus pares na mesma
+linha"**.
 
 ---
 

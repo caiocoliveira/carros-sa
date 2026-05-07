@@ -192,6 +192,15 @@ CHECKS: Dict[str, Validator] = {
 
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
+#
+# IMPORTANTE: ROI anualizado e Lucro/mês são suprimidos ("—") em lotes
+# inviáveis pra ESPELHAR o que `SheetsExporter._write_sheet` exibe (linhas
+# 422-429): comprar pelo preço-alvo é cenário fantasioso quando lance_atual
+# já passou do nosso teto. Sem essa paridade, o audit reportava "ROI
+# anualizado negativo" pra lotes inviáveis (capital_ef > preco_giro →
+# score_efetivo < 0) que o operador NUNCA vê na planilha — alarme falso
+# que confundia debug. Padrão geral: audit deve espelhar TODAS as
+# supressões de display, não só `fim_em is None`.
 COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
@@ -204,10 +213,10 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
-    "ROI anualizado (%)": lambda r: r["roi_anualizado"],
-    "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—"),
+    "ROI anualizado (%)": lambda r: r["roi_anualizado"] if r["viavel"] else "—",
+    "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—") if r["viavel"] else "—",
     "Reforma (R$)": lambda r: r["reforma_estimada"],
-    "Tese": lambda r: r.get("tese", "—"),
+    "Tese": lambda r: r.get("tese", "—") if r["viavel"] else "—",
     "Anúncio": lambda r: r["url"],
     "Laudo": lambda r: r.get("laudo_url") or "—",
 }

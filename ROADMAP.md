@@ -4,7 +4,26 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 411/411 testes passando
+✅ **Fundação + EstimadorReforma** — 416/416 testes passando
+
+### Y — Revisão preventiva pós-cluster: paridade audit↔display + cap defensivo (2026-05-07) ✅
+- **Branch:** `claude/sleepy-wright-1UNO3`
+- **Motivação:** Pedido de revisão geral pra encontrar bugs/oportunidades. Simulação algébrica em 10 cenários (gold real Polo Track, Fiesta ESTRUTURAL, zona apertada, mediana inflada, lote inviável, etc.) expôs 3 falhas residuais que sobreviveram à consolidação do cluster.
+- **Bugs encontrados e corrigidos:**
+  1. **Audit reportava "ROI anualizado negativo" em lotes INVIÁVEIS** — `SheetsExporter._write_sheet:422-429` substitui ROI/Lucro/Tese por `"—"` quando `viavel=False` (caso "comprar pelo alvo é fantasioso se lance > preco_max"). Audit `COLUMN_EXTRACTORS` retornava o valor numérico cru, então `_score_roi_efetivo` com `capital_ef > preco_giro` (Fiesta ESTRUTURAL real: ROI -53.9%) disparava o validator "ROI negativo" em lotes que o operador NUNCA viu. Falso alarme operacional. Fix: extractors de "ROI anualizado (%)", "Lucro/mês (R$)" e "Tese" no audit retornam `"—"` quando `r["viavel"] is False` — espelhando o display.
+  2. **Cap defensivo no precificador `preco_giro_fipe ≤ FIPE × 1.20`** — Cap mediana similares (`FIPE × 1.20` quando n<5) + `f_km` saturado (1.15) podiam multiplicar pra `1.38 × FIPE` no `preco_giro_fipe`. Cenário simulado (mediana 168% FIPE, f_km neutro): preco_max ia a 111.4% FIPE — audit alertava `Lance Máximo > FIPE × 1.05`, mas só após o estrago já estar persistido. Fix: cap final em 1.20×FIPE no precificador (`_PRECO_GIRO_FIPE_TETO_PCT_FIPE`). Preserva caso legítimo Civic/Corolla ~110% em alta sem permitir combinação patológica em série. Audit threshold 1.10 continua avisando "dado fraco" como sinal cedo.
+  3. **`_score_roi_efetivo` quebrava com `preco_alvo=None`** — `AvaliacaoLote.preco_alvo` é non-nullable hoje, mas migrações antigas podem ter deixado NULL. `lance_atual - None` levantava `TypeError` silencioso que quebrava a planilha inteira (helper é chamado por linha). Fix: `alvo = av.preco_alvo or 0` antes de subtrair.
+- **Análise das colunas (resposta direta às perguntas do usuário):**
+  - **Lance Máximo > FIPE?** Não em condições normais. Antes do cap defensivo, podia chegar a 111% FIPE em adversarial; agora limitado a ~97% mesmo nos piores casos simulados. Audit já avisa em 1.05.
+  - **Giro FIPE muito diferente da FIPE?** Pode em até 1.20 (cap defensivo); audit avisa entre 1.10-1.20 como dado fraco. Acima de 1.20 é matematicamente impossível agora.
+  - **Linha-a-linha (10 cenários):** identidades algébricas confirmadas (`preco_alvo ≤ preco_max ≤ preco_giro × (1−margem_min)`). Lote estrutural com confidence 0.55 mascarado pela supressão `laudo_analisado=False` (vira "⚠ LAUDO NÃO CAPTURADO"). Lote inviável agora produz `—` em ROI/Lucro/Tese tanto na planilha QUANTO na auditoria — paridade garantida.
+- **Cobertura:** 4 testes novos: `test_inviavel_nao_dispara_roi_negativo`, `test_viavel_com_roi_negativo_continua_disparando`, `test_preco_alvo_none_nao_quebra`, `test_preco_giro_fipe_capado_em_120pct_fipe` + `test_preco_giro_fipe_caso_normal_nao_e_afetado_pelo_cap`. **Total: 416/416 verde** (eram 411).
+- **Limitações conhecidas:**
+  - Cap defensivo do precificador é dura (1.20×FIPE) e não tem override por modelo. Se um modelo de fato vender 130% FIPE (raríssimo), seria capado. Em produção real, calibrar via `auto_avaliar_ref` se aparecer.
+  - Audit pode ainda ter outras "substituições silenciosas" do display sem paridade — vale auditar `_write_sheet` de tempos em tempos. Esta sessão cobriu as 3 do `viavel=False`.
+- **Updates persistentes:**
+  - `CLAUDE.md` ganhou 3 entradas em "Padrões aprendidos": (a) audit espelha SUBSTITUIÇÃO, não só filtro; (b) cap defensivo `preco_giro_fipe ≤ FIPE × 1.20`; (c) `_score_roi_efetivo` defensivo contra `preco_alvo=None`.
+  - `LESSONS.md` ganhou padrão **P5c** ("Paridade audit ↔ display: filtragem **e** substituição") + 3 entradas no apêndice de fixes.
 
 ### X — Consolidação do cluster precificador (2026-05-07) ✅
 - **Branch:** `claude/consolidate-precificador-cluster`

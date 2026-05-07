@@ -677,3 +677,56 @@ def test_margem_aplicada_brando_nao_atinge_cap(gol_2015_lote, gol_2015_laudo, go
     frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
     assert av.margem_aplicada < 0.50  # bem abaixo do teto
+
+
+# =============================================================================
+# Cap defensivo `preco_giro_fipe ≤ FIPE × 1.20`
+# =============================================================================
+# Cap mediana similares Auto Avaliar é 1.20×FIPE quando n<5 (avaliador_mercado.py).
+# Sem cap final em `preco_giro_fipe`, multiplicação pelo f_km saturado (1.15)
+# levava a até 1.38×FIPE no precificador — lance acima da FIPE em casos
+# adversariais (similares premium dominando + lote km baixa). Cap defensivo
+# em 1.20 mantém o caso legítimo Civic/Corolla ~110% FIPE em alta + bloqueia
+# combinação patológica. Audit em 1.10 continua sinalizando como dado fraco.
+
+def test_preco_giro_fipe_capado_em_120pct_fipe(gol_2015_lote, gol_2015_laudo, gol_2015_reforma):
+    """Mediana inflada (similares premium) não deve produzir preco_giro_fipe
+    acima de 120% da FIPE — independente de f_km saturado.
+    """
+    # Cenário adversarial: mediana 168% FIPE (similares de outro modelo entrando),
+    # f_km=1.15 (km do lote MUITO abaixo da mediana).
+    mercado_inflado = SinalMercado(
+        fipe=50_000,
+        webmotors_mediana=84_000,  # 168% FIPE — só passa se cap mediana falhar
+        webmotors_p25=70_000,
+        n_anuncios_competidores=10,
+        dias_giro_estimado=60,
+        webmotors_km_mediana=100_000,  # vs km_lote=95k → f_km≈1.015 (suave)
+    )
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
+
+    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_inflado, gol_2015_reforma, frete, empresa)
+
+    # Cap defensivo: preco_giro_fipe ≤ FIPE × 1.20 = 60_000.
+    # Sem o cap, valor seria ~84k × 1.015 ≈ 85_300 (170% FIPE → bug operacional).
+    assert av.preco_giro_fipe <= int(50_000 * 1.20), (
+        f"preco_giro_fipe {av.preco_giro_fipe} excede cap 1.20×FIPE (60_000)"
+    )
+    # Sanidade: preco_max consequente fica abaixo da FIPE (não dispara
+    # `Lance Máximo > FIPE × 1.05` no audit).
+    assert av.preco_max < int(50_000 * 1.05)
+
+
+def test_preco_giro_fipe_caso_normal_nao_e_afetado_pelo_cap(
+    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
+):
+    """Sanidade: cap defensivo não afeta lote calibrado típico (mediana ≤ FIPE).
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
+    # FIPE=28k, mediana=25k → preco_giro_fipe = 25k × f_km, longe do cap 33.6k
+    av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+    assert av.preco_giro_fipe < int(28_000 * 1.20)
+    # E é o valor "natural" (mediana × f_km), não a borda do cap
+    assert av.preco_giro_fipe == av.webmotors_mediana  # f_km==1.0 quando km_mediana=None

@@ -107,6 +107,25 @@ de várias rodadas de "operador vê, operador reclama, eu conserto". Muitos dos
 fixes acima teriam sido pegos em `make test` se o `audit.py` existisse em
 2026-04-10 (ex.: `fim_em=None` na planilha, ROI > 500%, severidade fora do enum).
 
+### P5c. Paridade audit ↔ display: filtragem **e** substituição
+
+Sintoma: audit reporta violação que o operador NÃO consegue confirmar abrindo
+a planilha — porque o display substitui o valor problemático por placeholder
+(`—`), mas o audit valida o valor cru.
+
+Caso de referência (2026-05-07, revisão preventiva):
+- **ROI anualizado negativo em lote inviável** — `SheetsExporter._write_sheet:422-429`
+  substitui ROI/Lucro/Tese por `"—"` quando `viavel=False` (cenário "comprar
+  pelo alvo é fantasia se lance > preco_max"). `audit.COLUMN_EXTRACTORS`
+  retornava o número cru, então `_score_roi_efetivo` com `capital_ef > preco_giro`
+  (Fiesta ESTRUTURAL real: -53.9%) disparava "ROI anualizado negativo —
+  score_roi negativo". Operador olhava a planilha e via "—". Falso alarme.
+
+**Antídoto operacional:** paridade audit ↔ display vai além de "filtrar mesmas
+linhas" (P5 original). Toda **substituição** de display (campo X vira `"—"`
+em condição Y) precisa do mesmo no `COLUMN_EXTRACTORS` do audit. Audit é uma
+view sobre o display, não sobre o DB cru.
+
 ### P6. Audit por coluna isolada não pega contradição cross-field
 
 Sintoma: cada célula passa no validador individual, mas a combinação é
@@ -282,3 +301,6 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | (consolidação cluster precificador 2026-05-07) | P3, P4 | DRY de `_categoria_de_modelo` no frete (orquestrador). Toro era PICAPE no calibrador mas OUTRO no frete antigo — drift entre listas semi-paralelas. Resolução: `_calcular_frete` aceita categoria pré-resolvida do pipeline; fallback usa a tabela canônica de `calibracao_giro`. |
 | (consolidação cluster precificador 2026-05-07) | P5 | Audit espelha o exporter (filtra `fim_em is None`) + cross-checks (`preco_giro_fipe > FIPE × 1.10`, `preco_alvo > preco_max`) + derived check (margem ≥ 49% no teto) + threshold ROI 1000→500% calibrado contra benchmark operacional. |
 | (consolidação cluster precificador 2026-05-07) | P6 | Floor `dias_giro` 30d → 60d em `lucro_reais_por_mes` e `roi_anualizado`. Defaults categóricos chegavam a 25d (HATCH NOVO) e fazia `Lucro/mês = Lucro absoluto` (lucro_abs × 30/30 = lucro_abs). Floor maior = magnitude honesta sem destruir o sinal. |
+| (revisão preventiva 2026-05-07, post-cluster) | P5b/P6 | Audit espelha TODAS as supressões do display (não só filtros de linha). Lotes inviáveis substituem ROI/Lucro/Tese por `—` em `_write_sheet:422-429`; antes o `COLUMN_EXTRACTORS` retornava o número cru e `_score_roi_efetivo` com `capital_ef > preco_giro` (Fiesta ESTRUTURAL real, -53.9%) disparava "ROI anualizado negativo" em lotes que o operador NUNCA via. Falso alarme operacional. Padrão genérico: paridade de SUBSTITUIÇÃO, não só de filtragem. |
+| (revisão preventiva 2026-05-07, post-cluster) | P4/RC2 | Cap defensivo `preco_giro_fipe ≤ FIPE × 1.20` no precificador. Cap mediana (entrada, em avaliador_mercado, n<5) + f_km saturado (1.15) podiam multiplicar pra 1.38×FIPE — combinação patológica de duas otimizações. Defesa em camadas: 3 caps com propósitos distintos (entrada, saída, alarme). Não compartilham constante por design — propósitos diferentes pedem ajuste independente. |
+| (revisão preventiva 2026-05-07, post-cluster) | RC3 | `_score_roi_efetivo` coalesce `av.preco_alvo or 0`. Schema diz non-nullable hoje, mas migrações antigas podem ter deixado NULL; sem coalescência o `lance - None` levantava TypeError silencioso que quebrava a planilha inteira. Helper que recebe SQLModel "non-nullable" deve coalescer — schema atual ≠ histórico do DB. |

@@ -189,6 +189,21 @@ class TestScoreRoiEfetivo:
         av.score_roi = None
         assert _score_roi_efetivo(av, 30000) == 0.0
 
+    def test_preco_alvo_none_nao_quebra(self):
+        """Defesa contra registros antigos com NULL: `preco_alvo` é
+        non-nullable no schema atual, mas migrações antigas podem ter
+        deixado lixo. `lance_atual - None` levantava TypeError silencioso
+        que quebrava a planilha inteira (score_efetivo é chamado por linha).
+        Garantia: não levanta. O valor numérico devolvido pode ser negativo
+        (display em sheets/audit suprime via filtro de viabilidade), mas
+        importante é não derrubar a planilha.
+        """
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        av.preco_alvo = None  # type: ignore[assignment]
+        score_ef = _score_roi_efetivo(av, 30000)
+        # Antes do fix: TypeError. Depois: float (não importa o sinal).
+        assert isinstance(score_ef, float)
+
 
 class TestLucroAbsolutoEfetivo:
     """Espelha _lucro_absoluto_no_alvo mas usando o capital efetivo (lance > alvo)."""

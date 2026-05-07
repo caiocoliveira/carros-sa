@@ -4,7 +4,25 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 416/416 testes passando
+✅ **Fundação + EstimadorReforma** — 423/423 testes passando
+
+### Z — Hardening operacional + refactor audit (2026-05-07) ✅
+- **PRs:** #55, #56, #57, #58, #59, #60 (sequência consolidada num único dia)
+- **Motivação:** revisão preventiva do workflow CI + caça a silent failures (RC3 do LESSONS) após primeiro run real chegar a 3h+ e quebrar no `Persiste DB`.
+- **Mudanças:**
+  1. **`#55 — CI artifacts on failure`** ([`.github/workflows/triagem.yml`](.github/workflows/triagem.yml)): upload do `carros_sa.db` parcial como artifact (7 dias) quando o pipeline quebra. Cookies e PDFs ficam de fora deliberadamente.
+  2. **`#56 — refactor audit`** ([`carros_sa/tools/audit.py`](carros_sa/tools/audit.py)): unifica `CHECKS`/`CROSS_CHECKS`/`_DERIVED_CHECKS` num único contrato `(row) -> List[CheckResult]`. `audit()` colapsa 3 loops em 1. Endereça FU#3 da revisão arquitetural do PR #52.
+  3. **`#57, #59 — fail-loud em Sheets export`** ([`scripts/triagem_diaria.py`](scripts/triagem_diaria.py), [`carros_sa/cli.py`](carros_sa/cli.py)): `except Exception: print(); pass` engolia falha do export — operador abria planilha desatualizada sem saber. Agora `raise typer.Exit(1)` em ambos os caminhos.
+  4. **`#58 — audit gate no workflow`** ([`.github/workflows/triagem.yml`](.github/workflows/triagem.yml)): paridade com o `setup_cron.sh` local — adiciona `auditar_laudos --strict` como 4ª chamada no pipeline.
+  5. **`#60 — log cards descartados no orquestrador`** ([`carros_sa/orquestrador.py`](carros_sa/orquestrador.py)): loop de upsert de cards do scraping tinha `except Exception: pass`. Agora imprime stderr por card descartado + sumário.
+- **Cobertura:** **423 passed, 2 skipped** (eram 416 antes do batch).
+- **Follow-ups (não bloqueantes, deixados pra próximo ciclo):**
+  - `_PRECO_GIRO_FIPE_TETO_PCT_FIPE` em `precificador.py` declarada dentro da função em vez do topo (review do #54 considera intencional, não vale).
+  - Adicionar `n_cards_dropped` em `ResultadoOrquestracao` pra ficar visível na CLI table do `triagem_diaria.py` (review do #60).
+  - Migrar prints stderr do orquestrador pra `logging` estruturado quando o projeto tiver pipeline de logs (review do #60).
+  - Mover `import sys` pro topo de `orquestrador.py` (review do #60, estilístico).
+  - Extrair bloco "Sheets export + fail-loud" num helper compartilhado entre `triagem_diaria.py` e `cli.py::triagem` pra eliminar drift (review do #59).
+  - Considerar audit cross-check "delta entre `_score_roi_efetivo` e ROI exato com taxas" pra cobrir leilão judicial (irrelevante hoje em AA com taxa fixa).
 
 ### Y — Revisão preventiva pós-cluster: paridade audit↔display + cap defensivo (2026-05-07) ✅
 - **Branch:** `claude/sleepy-wright-1UNO3`

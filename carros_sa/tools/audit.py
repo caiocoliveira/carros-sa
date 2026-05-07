@@ -337,14 +337,47 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
     return rows
 
 
-# Invariantes que CRUZAM colunas — não cabem em CHECKS porque não pertencem
-# a uma coluna individual. Rodam independente de COLUMN_EXTRACTORS / HEADER,
-# então não quebram a paridade test. Validator devolve `(label, motivo, valor_exemplo)`
-# ou None quando ok. Label não precisa estar em HEADER (vira chave de agregação).
-CrossValidator = Callable[[Dict[str, Any]], Optional[Tuple[str, str, Any]]]
+# --------------------------------------------------------------------------
+# Modelo unificado de checks
+# --------------------------------------------------------------------------
+#
+# Toda check é uma função `(row) -> List[(label, motivo, valor_exemplo)]`. 0+
+# violações por linha — a maioria devolve `[]` no caminho feliz e `[(...)]` em
+# violação. `_check_columns` é a exceção que pode devolver várias (uma por
+# coluna do HEADER que falhou).
+#
+# Antes desta unificação coexistiam 3 modelos: `CHECKS` (Dict, por coluna),
+# `CROSS_CHECKS` (List[Optional[Tuple]], cruza colunas), `_DERIVED_CHECKS`
+# (List[Optional[Tuple]], inspeciona campos fora do HEADER). Cada um com
+# loop próprio em `audit()`. Convergência em um único contrato simplifica
+# leitura sem perder a ergonomia de `CHECKS` (mantida intacta como Dict por
+# coluna — é só a EXECUÇÃO que ficou unificada).
+
+CheckResult = Tuple[str, str, Any]  # (label, motivo, valor_exemplo)
+CheckFn = Callable[[Dict[str, Any]], List[CheckResult]]
 
 
-def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+def _check_columns(row: Dict[str, Any]) -> List[CheckResult]:
+    """Roda os validators do `CHECKS` (por coluna) sobre um row.
+
+    Mantém o pareamento histórico com `COLUMN_EXTRACTORS` + `HEADER` (paridade
+    obrigatória do workstream Q). Cada coluna pode acionar 0 ou 1 motivo —
+    múltiplas colunas podem falhar na mesma linha, então a saída é uma lista.
+    """
+    out: List[CheckResult] = []
+    for coluna in HEADER:
+        extractor = COLUMN_EXTRACTORS.get(coluna)
+        validator = CHECKS.get(coluna)
+        if extractor is None or validator is None:
+            continue
+        valor = extractor(row)
+        motivo = validator(valor, row)
+        if motivo is not None:
+            out.append((coluna, motivo, valor))
+    return out
+
+
+def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> List[CheckResult]:
     """preco_giro > FIPE × 1.10 sinaliza f_km saturando ou mediana inflada.
 
     Por construção, preco_giro = webmotors_mediana × f_km. webmotors_mediana
@@ -358,15 +391,15 @@ def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> Optional[Tuple[str, str
     fipe = row.get("fipe")
     if pg and fipe and pg > fipe * 1.10:
         ratio_pct = round((pg / fipe) * 100, 1)
-        return (
+        return [(
             "Preço-Giro vs FIPE",
             f"preco_giro {ratio_pct}% da FIPE — f_km saturando ou mediana inflada (esperado <110%)",
             pg,
-        )
-    return None
+        )]
+    return []
 
 
-def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> List[CheckResult]:
     """preco_alvo > preco_max viola a invariante do precificador.
 
     Por construção, margem_aplicada >= margem_minima_absoluta, então o
@@ -377,27 +410,15 @@ def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> Optional[Tuple[str, s
     av_alvo = row.get("preco_alvo")
     av_max = row.get("preco_max")
     if av_alvo is not None and av_max is not None and av_alvo > av_max:
-        return (
+        return [(
             "Preço-Alvo vs Máximo",
             "preco_alvo > preco_max — bug no precificador (margem mínima maior que margem aplicada?)",
             av_alvo,
-        )
-    return None
+        )]
+    return []
 
 
-CROSS_CHECKS: List[CrossValidator] = [
-    _check_preco_giro_acima_fipe,
-    _check_preco_alvo_gt_preco_max,
-]
-
-
-# Invariantes "derivadas" que inspecionam campos que não aparecem direto no
-# HEADER (ex: margem_aplicada). Separadas das CHECKS por coluna porque não
-# casam no esquema "1 valor → 1 motivo".
-DerivedCheck = Callable[[Dict[str, Any]], Optional[Tuple[str, str]]]
-
-
-def _check_margem_no_teto(row: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+def _check_margem_no_teto(row: Dict[str, Any]) -> List[CheckResult]:
     """Margem efetiva ≥ 49% sinaliza fatores risco × liquidez perto do teto.
 
     Margem aplicada é capada em 50% no precificador (`_MARGEM_TETO`) — quando
@@ -407,15 +428,24 @@ def _check_margem_no_teto(row: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     """
     margem = row.get("margem_aplicada")
     if margem is None or margem < 0.49:
-        return None
-    return (
+        return []
+    return [(
         "Precificador / margem",
         f"margem aplicada {margem:.1%} no teto (cap=50%) — fatores no limite, "
         "lote provavelmente péssimo. Conferir laudo + mercado.",
-    )
+        margem,
+    )]
 
 
-_DERIVED_CHECKS: List[DerivedCheck] = [_check_margem_no_teto]
+# Registry único — `audit()` itera por todas as checks com a mesma assinatura.
+# Ordem importa só pra ergonomia da leitura do output (mas a agregação é por
+# (label, motivo), então duplicatas naturalmente colapsam).
+ALL_CHECKS: List[CheckFn] = [
+    _check_columns,
+    _check_preco_giro_acima_fipe,
+    _check_preco_alvo_gt_preco_max,
+    _check_margem_no_teto,
+]
 
 
 def audit(engine, sample_size: int = 20) -> List[str]:
@@ -423,6 +453,11 @@ def audit(engine, sample_size: int = 20) -> List[str]:
 
     Cada violação é uma string pronta pra impressão no formato:
         "⚠ <Coluna>: N linha(s) — <motivo> (ex: lote <id> valor=<v>)"
+
+    Toda check em `ALL_CHECKS` segue a mesma assinatura `(row) -> List[(label,
+    motivo, valor)]` — o aggregator é um único loop. (label, motivo) é a chave
+    de agregação: 2 motivos distintos na mesma coluna viram 2 entradas
+    separadas (menos compacto, mais acionável).
     """
     with Session(engine) as session:
         rows = _build_rows(session, sample_size)
@@ -430,60 +465,19 @@ def audit(engine, sample_size: int = 20) -> List[str]:
     if not rows:
         return []
 
-    # Agrega por (coluna, motivo): N linhas + primeiro exemplo.
-    # Dois motivos diferentes na mesma coluna viram DUAS entradas agrupadas
-    # separadamente — menos compacto mas mais acionável.
     agregador: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for row in rows:
-        for coluna in HEADER:
-            extractor = COLUMN_EXTRACTORS.get(coluna)
-            validator = CHECKS.get(coluna)
-            if extractor is None or validator is None:
-                continue
-            valor = extractor(row)
-            motivo = validator(valor, row)
-            if motivo is None:
-                continue
-            chave = (coluna, motivo)
-            if chave not in agregador:
-                agregador[chave] = {
-                    "count": 1,
-                    "exemplo_lote": row["lote_id"],
-                    "exemplo_valor": valor,
-                }
-            else:
-                agregador[chave]["count"] += 1
-        # Invariantes derivadas — usam o row inteiro, não uma única coluna.
-        for derived in _DERIVED_CHECKS:
-            res = derived(row)
-            if res is None:
-                continue
-            coluna, motivo = res
-            chave = (coluna, motivo)
-            if chave not in agregador:
-                agregador[chave] = {
-                    "count": 1,
-                    "exemplo_lote": row["lote_id"],
-                    "exemplo_valor": row.get("margem_aplicada"),
-                }
-            else:
-                agregador[chave]["count"] += 1
-
-        # Invariantes que cruzam colunas — não respeitam o loop por HEADER.
-        for cross in CROSS_CHECKS:
-            resultado = cross(row)
-            if resultado is None:
-                continue
-            label, motivo, valor = resultado
-            chave = (label, motivo)
-            if chave not in agregador:
-                agregador[chave] = {
-                    "count": 1,
-                    "exemplo_lote": row["lote_id"],
-                    "exemplo_valor": valor,
-                }
-            else:
-                agregador[chave]["count"] += 1
+        for check_fn in ALL_CHECKS:
+            for label, motivo, valor in check_fn(row):
+                chave = (label, motivo)
+                if chave not in agregador:
+                    agregador[chave] = {
+                        "count": 1,
+                        "exemplo_lote": row["lote_id"],
+                        "exemplo_valor": valor,
+                    }
+                else:
+                    agregador[chave]["count"] += 1
 
     saida: List[str] = []
     for (coluna, motivo), info in agregador.items():

@@ -419,10 +419,13 @@ class SheetsExporter:
                 # (link expirado)" ou "—". Sinaliza explicitamente em vez de
                 # esconder: operador clica no anúncio e re-baixa se quiser.
                 motivo_legivel = _laudo_motivo_legivel(r.get("laudo_motivo"))
-                if r["viavel"]:
-                    situacao = f"✓ Viável (laudo: {motivo_legivel})"
-                else:
-                    situacao = "✗ Caro demais"
+                # Sufixo aplica nos DOIS lados (viável e caro demais) por
+                # simetria — operador que filtra por "✗" também precisa
+                # saber se o laudo está parcial (PDF some, URL stale).
+                # Antes deste ramo `✗ Caro demais` saía sem sufixo e o
+                # glossário ficava inconsistente.
+                base = "✓ Viável" if r["viavel"] else "✗ Caro demais"
+                situacao = f"{base} (laudo: {motivo_legivel})"
             elif r["viavel"]:
                 situacao = "✓ Viável"
             else:
@@ -652,7 +655,7 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). '✓ Viável (laudo: <motivo>)' aparece quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou — operador é avisado mas não bloqueia. Lotes encerrados são filtrados antes do export.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export.",
                 "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro/mês, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro/mês, ROI e Tese ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito.",
             ],
             [

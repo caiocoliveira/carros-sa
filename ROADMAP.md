@@ -574,6 +574,11 @@ Já registrado:
   - O sufixo cresce até ~3 motivos concatenados. Se a auditoria expandir para
     4ª condição (ex: PDF assinado por chave revogada), revisar o `_LAUDO_MOTIVO_LEGIVEL`
     em `sheets.py` pra manter o texto curto.
+- **Follow-ups (não-bloqueantes, da revisão arquitetural):**
+  - `_LAUDO_MOTIVO_LEGIVEL.get(p, p)` em `sheets.py` deixa código desconhecido
+    vazar pro operador se `laudo_audit` adicionar motivo novo sem espelhar.
+    Pequeno risco; opção: trocar pra `"motivo desconhecido"` ou logar warning.
+    Não vale fix preventivo — ajusta junto quando a 4ª condição aparecer.
 
 ### Workstream R.3 — Audit estrito como gate final (2026-05-05)
 

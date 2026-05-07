@@ -501,3 +501,26 @@ class TestSituacaoCarregaMotivoLaudo:
         # conferir nada lateral".
         assert "laudo:" not in situacao
         assert "LAUDO NÃO CAPTURADO" not in situacao
+
+    def test_caro_demais_com_laudo_parcial_tambem_lista_motivo(self, tmp_path, monkeypatch):
+        """Simetria: lote inviável (lance > preco_max) com cache forte mas
+        sinal lateral falho recebe `✗ Caro demais (laudo: <motivo>)`. Sem
+        isso, operador filtrando por '✗' não vê que o laudo está parcial e
+        pode fazer overrides cegos. Glossário também reflete simetria."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # `_lote` default lance_atual=15_000. Pra inviabilizar, subo o
+            # lance acima do preco_max (default 25_000) via raw_json — no
+            # exporter, viavel = preco_max > lance_atual (=> False aqui).
+            lote = _lote("L7", laudo_pdf_url=None)
+            lote.lance_atual = 30_000  # > preco_max=25_000
+            session.add(lote)
+            session.add(_avaliacao("L7"))
+            session.add(_laudo("L7", confidence=0.95))  # cache forte
+            session.commit()
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        # Cache forte → laudo "analisado". URL ausente + PDF ausente.
+        assert "✗ Caro demais" in situacao
+        assert "PDF ausente" in situacao
+        assert "URL inválida" in situacao
+        assert "LAUDO NÃO CAPTURADO" not in situacao  # cache forte separa

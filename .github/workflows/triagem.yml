@@ -131,3 +131,15 @@ jobs:
             COMMIT=$(echo "$MSG" | git commit-tree "$TREE")
           fi
           git push origin "$COMMIT:refs/heads/state/db"
+
+      # Quando o pipeline falha, o estado parcial vai pra artifact retido por
+      # 7 dias pra debug post-mortem. NÃO inclui cookies (credencial Auto Avaliar)
+      # nem PDFs de laudo (ruído binário, recriáveis a partir do DB).
+      - name: Upload DB parcial em caso de falha
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: carros-sa-db-${{ github.run_id }}
+          path: carros_sa.db
+          retention-days: 7
+          if-no-files-found: ignore

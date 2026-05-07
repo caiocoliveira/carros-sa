@@ -140,3 +140,9 @@ Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_colum
 
 ### Workflow de revisão autônoma
 Quando o usuário pedir "revise e corrija" sem direcionar, o caminho que funcionou foi: (1) ler ROADMAP + precificador + sheets + tests existentes, (2) ESCREVER UM SCRIPT DE SIMULAÇÃO (`/tmp/sim.py`) com lote real conhecido (Polo Track 2024 do YAML) e validar identidades algébricas comparando docstring vs implementação, (3) só depois confirmar bugs e refatorar. Pular a simulação leva a "fixes" baseados em leitura — frequentemente errados.
+
+### `Lote.fim_em` é naive LOCAL — nunca UTC
+Toda comparação contra `lote.fim_em` em `sheets.py`, `audit.py`, `laudo_audit.py`, `scraper_autoavaliar.py` e o filtro SQL `Lote.fim_em > now()` usa `datetime.now()` (naive local). Por isso `parse_card_lines` default agora é `datetime.now()` (não `utcnow()`) — em fusos != UTC, mistura gerava grace silenciosa de |offset|h onde lotes encerrados apareciam ativos e o horário exibido ficava |offset|h adiantado. Se for adicionar nova fonte de `fim_em` (re-scraper, importador, fixture), **NÃO use `utcnow()`** — ressuscita o bug. Os outros campos default-utcnow (`scraped_at`, `criado_em`, `extraido_em`) são timestamps internos sem comparação cross-tz, ficam como estão. Teste guard: `tests/test_parsers.py::test_parse_card_default_agora_e_local_naive_nao_utc`.
+
+### Invariante de auditoria é coerência **da linha inteira**, não só da célula
+`carros_sa/tools/audit.py::CHECKS` agora valida cada coluna por sanidade individual MAIS relação cross-field (Reforma R$ 0 com severidade ≥ média = contradição; `preco_giro_fipe` divergente >25% de FIPE = mediana de similares poluída ou cache FIPE stale). Antes de adicionar uma check nova, perguntar: "esse valor faz sentido sozinho, OU em relação aos outros campos da mesma linha?". Quase sempre é a 2ª — uma reforma de R$ 0 é válida em absoluto mas absurda num lote ESTRUTURAL. Padrão refletido em LESSONS.md/P6.

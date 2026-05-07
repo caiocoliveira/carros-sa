@@ -65,6 +65,18 @@ Usuário trabalha laptop + celular e delegou autonomia. Após qualquer commit ou
 
 Continuam exigindo aprovação explícita: `git push --force`, `reset --hard`, `--no-verify` em hooks, mudanças em `carros_sa/models.py` (contratos imutáveis), operações em outros remotes.
 
+## Workflow autônomo — auto-review + auto-merge de PRs
+
+Usuário NÃO revisa PRs manualmente. Toda PR aberta por mim deve seguir o ciclo:
+
+1. **Criar PR** (draft ou ready, qualquer um).
+2. **Disparar agente especializado em arquitetura de software** pra revisar — usar `Agent` com `subagent_type=Plan` (ou `general-purpose` com prompt de revisão arquitetural). Briefing inclui: link/diff do PR, contexto do que mudou, pergunta direta "vale mergear como está?".
+3. **Se review aprova:** marcar como ready (sair do draft) + `merge_method=squash` + push em `main`. Não esperar humano.
+4. **Se review aponta issues:** corrigir os blockers, reaplicar review, mergear. Issues "nice-to-have" registrar como follow-up no `ROADMAP.md` mas não bloquear merge.
+5. **Se review aponta risco arquitetural sério (quebra contratos imutáveis em `models.py`, regressão de teste, mudança de fluxo crítico):** parar e perguntar antes de mergear.
+
+Continua valendo: nunca mergear sem `make test` verde, nunca pular hooks, nunca alterar `models.py` sem coordenação.
+
 ## ROADMAP.md é fonte de verdade entre sessões paralelas
 
 Sessões em worktrees separados **não enxergam** umas às outras até mergearem em `main`. O `ROADMAP.md` é a única fonte compartilhada de "o que está acontecendo agora" — sem ele, sessões duplicam trabalho ou pisam em premissas erradas.

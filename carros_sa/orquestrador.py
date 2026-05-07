@@ -718,6 +718,7 @@ async def orquestrar(
     # 2. Ingesta: parse + upsert Lote
     agora = datetime.now()
     lotes_ids_novos: List[str] = []
+    n_cards_dropped = 0
     for card in cards:
         try:
             lote_raw = parse_card_lines(card["lines"], card["loteId"], card["href"])
@@ -726,10 +727,27 @@ async def orquestrar(
             _upsert_lote(lote_raw, session, loja=loja)
             if not existente:
                 lotes_ids_novos.append(lote_raw.lote_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Antes engolíamos silenciosamente — se 5 de 50 cards falhavam parse
+            # (ex.: AA mudou layout), `n_coletados=50` mas `n_novos=45` sem
+            # nenhum sinal pro operador. Imprime stderr (vai pro log do workflow
+            # e pro artifact) com loteId + tipo do erro pra rastreabilidade.
+            n_cards_dropped += 1
+            import sys
+            print(
+                f"[orquestrador] card parse failed loteId={card.get('loteId')!r} "
+                f"href={card.get('href')!r}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
     session.commit()
     result.n_novos = len(lotes_ids_novos)
+    if n_cards_dropped > 0:
+        import sys
+        print(
+            f"[orquestrador] {n_cards_dropped}/{len(cards)} cards descartados por parse error "
+            "(ver linhas anteriores)",
+            file=sys.stderr,
+        )
 
     # 3. Pipeline: todos os lotes no banco sem AvaliacaoLote para esta empresa
     #    (inclui scrape de hoje + lotes já persistidos de dias anteriores)

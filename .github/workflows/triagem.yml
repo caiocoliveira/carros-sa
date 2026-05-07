@@ -72,8 +72,6 @@ jobs:
           python-version: "3.12"
 
       - uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
 
       - name: Install deps + Chromium
         run: |

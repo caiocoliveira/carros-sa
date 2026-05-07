@@ -139,7 +139,13 @@ class SheetsExporter:
                                                     # não-analisados só no final pra
                                                     # o operador conferir depois
                 0 if r["viavel"] else 1,            # viáveis antes dos inviáveis
-                -(r["preco_max"] - r["lance_atual"]),  # maior folga primeiro
+                # Ranking principal = ROI anualizado desc, MESMA métrica que o
+                # `carros-sa top` (cli.py:137). Antes era folga absoluta
+                # (`preco_max - lance_atual`), o que favorecia lotes baratos
+                # de ROI baixo sobre lotes lucrativos com lance perto do teto.
+                # Operador via duas ordens conflitantes da mesma fonte; agora
+                # uma só métrica governa o rank.
+                -(r["roi_anualizado"] or 0),
             ),
         )
         self._write_sheet(empresa_id, rows_sorted)
@@ -528,8 +534,8 @@ class SheetsExporter:
             [
                 "Rank",
                 "Derivado",
-                "Posição após ordenar viáveis primeiro, maior folga (max − atual) primeiro",
-                "Lotes que cabem no nosso teto e com mais espaço de negociação sobem",
+                "Ordem: (1) lotes com laudo analisado, (2) viáveis (lance atual ≤ Lance Máximo), (3) maior ROI anualizado primeiro. Mesma métrica do CLI `carros-sa top`.",
+                "ROI anualizado normaliza retorno pelo tempo de giro — carro rápido com retorno menor pode ranquear acima de carro lento com retorno maior. Antes o desempate era 'folga absoluta', que premiava lotes baratos de ROI ruim.",
             ],
             [
                 "Situação",

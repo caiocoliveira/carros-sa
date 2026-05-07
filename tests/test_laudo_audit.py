@@ -369,3 +369,158 @@ class TestExporterLaudoCelula:
         celula_laudo = captured_rows[0][2][-1]
         assert celula_laudo.startswith("=HYPERLINK(")
         assert "Ver laudo" in celula_laudo
+
+
+# ---------------------------------------------------------------------------
+# Situação carrega o motivo específico do `verificar_laudo_completo`
+# ---------------------------------------------------------------------------
+
+def _exportar_e_pegar_situacao(engine, monkeypatch, pdf_dir):
+    """Helper: roda o export e devolve o valor da célula Situação da 1ª linha."""
+    from carros_sa.tools.sheets import HEADER
+
+    monkeypatch.setattr("carros_sa.tools.sheets.PDF_DIR_DEFAULT", pdf_dir)
+    captured_rows = []
+    mock_ws = MagicMock()
+    mock_ws.update.side_effect = lambda rows, **kw: captured_rows.append(rows)
+    mock_sh = MagicMock()
+    mock_sh.worksheet.return_value = mock_ws
+    mock_gc = MagicMock()
+    mock_gc.open_by_key.return_value = mock_sh
+
+    with patch("gspread.service_account", return_value=mock_gc):
+        exporter = SheetsExporter(spreadsheet_id="x", credentials_path="/x")
+        with Session(engine) as session:
+            exporter.exportar("carros_uberlandia", session)
+
+    return captured_rows[0][2][HEADER.index("Situação")]
+
+
+class TestSituacaoCarregaMotivoLaudo:
+    """A coluna Situação tem que dizer EXATAMENTE por que o laudo está incompleto.
+
+    Antes (workstream U/V): operador via "⚠ LAUDO NÃO CAPTURADO" genérico em todos
+    os lotes incompletos e tinha que abrir o cron log pra descobrir se foi PDF
+    ausente, extração fraca ou URL inválida. Com 100+ lotes ativos por dia, isso
+    matava a auditoria visual: gente parava de prestar atenção no símbolo ⚠.
+
+    Agora cada um dos 3 motivos do `verificar_laudo_completo` aparece sufixado
+    em texto curto. Combinações (ex: PDF ausente + URL inválida) preservam a
+    ordem do dict pra estabilidade visual entre runs.
+    """
+
+    def test_apenas_pdf_ausente_lista_motivo_pdf(self, tmp_path, monkeypatch):
+        """Cache forte + URL válida + PDF some do disco: 'PDF ausente' isolado."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L1", laudo_pdf_url=URL_OK))
+            session.add(_avaliacao("L1"))
+            session.add(_laudo("L1", confidence=0.95))  # cache forte
+            session.commit()
+        # Sem _criar_pdf_fake → PDF não existe em pdf_dir.
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        # Cache forte → laudo "analisado", numéricos válidos. Mas PDF faltando
+        # ⇒ aviso lateral via "✓ Viável (laudo: PDF ausente)".
+        assert "PDF ausente" in situacao
+        assert "✓ Viável" in situacao
+
+    def test_apenas_url_invalida_lista_motivo_url(self, tmp_path, monkeypatch):
+        """Cache forte + PDF local + URL decoy: 'URL inválida' isolado."""
+        _criar_pdf_fake(tmp_path, "L2")
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L2", laudo_pdf_url=URL_DECOY))
+            session.add(_avaliacao("L2"))
+            session.add(_laudo("L2", confidence=0.95))
+            session.commit()
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        assert "URL inválida" in situacao
+        assert "✓ Viável" in situacao
+
+    def test_extracao_fraca_isolada_lista_motivo_extracao(self, tmp_path, monkeypatch):
+        """Cache fraca (confidence=0.5, fallback `_laudo_sem_pdf`) + PDF + URL OK
+        ⇒ 'extração fraca' isolada. É o cenário operacional 'baixou mas Gemini
+        503 zerou avarias' — operador precisa saber que foi a IA que falhou,
+        não o scraper."""
+        _criar_pdf_fake(tmp_path, "L3")
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L3", laudo_pdf_url=URL_OK))
+            session.add(_avaliacao("L3"))
+            session.add(_laudo("L3", confidence=0.5))  # fallback `_laudo_sem_pdf`
+            session.commit()
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        assert "LAUDO NÃO CAPTURADO" in situacao
+        assert "extração fraca" in situacao
+        assert "PDF ausente" not in situacao
+        assert "URL inválida" not in situacao
+
+    def test_pdf_e_url_ausentes_juntam_motivos_em_ordem(self, tmp_path, monkeypatch):
+        """Cache forte + sem PDF + URL ausente ⇒ 'PDF ausente + URL inválida'.
+        Ordem fixa do dict do `verificar_laudo_completo` mantida no exporter
+        pra estabilidade visual (testes não dependem da posição de combinação)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L4", laudo_pdf_url=None))
+            session.add(_avaliacao("L4"))
+            session.add(_laudo("L4", confidence=0.95))
+            session.commit()
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        assert "PDF ausente" in situacao
+        assert "URL inválida" in situacao
+        # Cache forte → numéricos válidos, situação tipo "✓ Viável (laudo: ...)".
+        assert "✓ Viável" in situacao
+
+    def test_todos_os_3_motivos_juntos_listam_todos(self, tmp_path, monkeypatch):
+        """Sem PDF + cache fraco + URL decoy: lista os 3 motivos e abre com
+        '⚠ LAUDO NÃO CAPTURADO' (cache fraco governa o tom do badge)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L5", laudo_pdf_url=URL_DECOY))
+            session.add(_avaliacao("L5"))
+            session.add(_laudo("L5", confidence=0.5))
+            session.commit()
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        assert "LAUDO NÃO CAPTURADO" in situacao
+        assert "PDF ausente" in situacao
+        assert "extração fraca" in situacao
+        assert "URL inválida" in situacao
+
+    def test_lote_completo_tem_situacao_simples(self, tmp_path, monkeypatch):
+        """Os 3 sinais OK ⇒ Situação "✓ Viável" puro, sem sufixo."""
+        _criar_pdf_fake(tmp_path, "L6")
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L6", laudo_pdf_url=URL_OK))
+            session.add(_avaliacao("L6"))
+            session.add(_laudo("L6", confidence=0.95))
+            session.commit()
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        assert situacao == "✓ Viável"
+        # Sem nenhum motivo penduarado — caso "operador pode dar lance sem
+        # conferir nada lateral".
+        assert "laudo:" not in situacao
+        assert "LAUDO NÃO CAPTURADO" not in situacao
+
+    def test_caro_demais_com_laudo_parcial_tambem_lista_motivo(self, tmp_path, monkeypatch):
+        """Simetria: lote inviável (lance > preco_max) com cache forte mas
+        sinal lateral falho recebe `✗ Caro demais (laudo: <motivo>)`. Sem
+        isso, operador filtrando por '✗' não vê que o laudo está parcial e
+        pode fazer overrides cegos. Glossário também reflete simetria."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # `_lote` default lance_atual=15_000. Pra inviabilizar, subo o
+            # lance acima do preco_max (default 25_000) via raw_json — no
+            # exporter, viavel = preco_max > lance_atual (=> False aqui).
+            lote = _lote("L7", laudo_pdf_url=None)
+            lote.lance_atual = 30_000  # > preco_max=25_000
+            session.add(lote)
+            session.add(_avaliacao("L7"))
+            session.add(_laudo("L7", confidence=0.95))  # cache forte
+            session.commit()
+        situacao = _exportar_e_pegar_situacao(engine, monkeypatch, tmp_path)
+        # Cache forte → laudo "analisado". URL ausente + PDF ausente.
+        assert "✗ Caro demais" in situacao
+        assert "PDF ausente" in situacao
+        assert "URL inválida" in situacao
+        assert "LAUDO NÃO CAPTURADO" not in situacao  # cache forte separa

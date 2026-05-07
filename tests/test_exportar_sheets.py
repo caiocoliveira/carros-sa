@@ -633,7 +633,12 @@ class TestSheetsExporterQuery:
 
         rows = mock_ws.update.call_args_list[0][0][0]
         row = rows[2]
-        assert row[HEADER.index("Situação")] == "✗ Caro demais"
+        # Substring match: como o lote default não tem PDF/URL persistidos,
+        # o exporter sufixa `(laudo: PDF ausente + URL inválida)` por simetria
+        # com `✓ Viável (laudo: ...)` (R.4 — motivo específico em ambos os
+        # ramos). O foco do teste é a supressão de numéricos especulativos.
+        situacao = row[HEADER.index("Situação")]
+        assert "✗ Caro demais" in situacao
         # Numéricos especulativos suprimidos
         assert row[HEADER.index("Lucro/mês (R$)")] == "—"
         assert row[HEADER.index("ROI anualizado (%)")] == "—"

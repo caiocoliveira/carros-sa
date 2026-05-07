@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
-from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
+from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT, verificar_laudo_completo
 from carros_sa.tools.tese import (
     calcular_tese,
     carregar_config_tese,
@@ -127,6 +127,30 @@ def _score_roi_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> float:
     if capital_ef <= 0:
         return 0.0
     return (av.preco_giro - capital_ef) / capital_ef
+
+
+# Mapa de códigos do `verificar_laudo_completo` (laudo_audit.py) pra texto curto
+# legível na célula "Situação". Mantido aqui (não em laudo_audit) porque é
+# convenção de UI da planilha — o módulo de auditoria deve ficar puro/textual.
+# Multi-falha: junta com " + " na ordem fixa do dict pra estabilidade visual.
+_LAUDO_MOTIVO_LEGIVEL = {
+    "pdf_ausente": "PDF ausente",
+    "cache_confianca_baixa": "extração fraca",
+    "url_invalida_ou_ausente": "URL inválida",
+}
+
+
+def _laudo_motivo_legivel(motivo: Optional[str]) -> str:
+    """Converte motivo serializado do `verificar_laudo_completo` em texto curto.
+
+    `motivo` é uma string como "pdf_ausente, cache_confianca_baixa" (ordem fixa
+    do `_motivo` em laudo_audit.py). Sem motivo (laudo completo): "—".
+    """
+    if not motivo:
+        return "—"
+    partes = [p.strip() for p in motivo.split(",") if p.strip()]
+    legiveis = [_LAUDO_MOTIVO_LEGIVEL.get(p, p) for p in partes]
+    return " + ".join(legiveis) if legiveis else motivo
 
 
 def _lucro_absoluto_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> int:
@@ -284,12 +308,19 @@ class SheetsExporter:
             laudo_url_raw = detalhe_raw.get("laudo_pdf_url")
             laudo_url = laudo_url_raw if is_laudo_pdf_url(laudo_url_raw) else None
 
-            # PDF persistido em data/laudos_pdfs/ — quando temos o arquivo local
-            # mas a URL pré-assinada do storage já expirou (URLs do Auto Avaliar
-            # vivem ~1h), sinaliza ao operador que o laudo FOI analisado e está
-            # salvo, mas o link clicável não vai funcionar. Antes mostrava só
-            # "—" no mesmo caso de URL ausente sem PDF, ofuscando essa diferença.
-            pdf_local_existe = (PDF_DIR_DEFAULT / f"{av.lote_id}.pdf").exists()
+            # Auditoria de completude — fonte única do "todo lote tem laudo
+            # baixado + revisado + linkado" descrito no workstream U/V. Os 3
+            # booleanos (pdf_local, laudo_cache_ok, url_persistida_ok) viram o
+            # motivo agregado que a planilha expõe na Situação — operador vê
+            # o porquê SEM precisar abrir log/cron, fechando o laço da
+            # auditoria estrita ao olho humano que de fato lê a planilha.
+            # Passa `pdf_dir=PDF_DIR_DEFAULT` (referência local do módulo sheets)
+            # explicitamente — testes patcham `carros_sa.tools.sheets.PDF_DIR_DEFAULT`
+            # via monkeypatch e contam com essa indireção. Sem o argumento, o
+            # default da função usa `laudo_audit.PDF_DIR_DEFAULT` direto e o
+            # patch fica inerte.
+            laudo_status = verificar_laudo_completo(lote, laudo, pdf_dir=PDF_DIR_DEFAULT)
+            pdf_local_existe = laudo_status.pdf_local
 
             # Laudo só conta como "analisado" se veio de um PDF real — fallback
             # `_laudo_sem_pdf` (sem avarias, "não identificou nada") grava
@@ -297,7 +328,7 @@ class SheetsExporter:
             # R$ 1.000 (piso) em 63/68 lotes e ia achando que o carro "tava ok"
             # quando na verdade ninguém leu o laudo. Regra do usuário: não dar
             # fallback de valor, avisar explicitamente que não foi analisado.
-            laudo_analisado = bool(laudo and (laudo.confidence or 0) >= 0.6)
+            laudo_analisado = laudo_status.laudo_cache_ok
 
             # Tese — sinalização informativa baseada em Arrematado histórico.
             # NÃO afeta rank nem filtra. Quando hist_stat/tese_cfg não carregam
@@ -335,6 +366,8 @@ class SheetsExporter:
                 "viavel": viavel,
                 "encerrado": encerrado,
                 "laudo_analisado": laudo_analisado,
+                "laudo_completo": laudo_status.completo,
+                "laudo_motivo": laudo_status.motivo,
             })
         return rows
 
@@ -368,7 +401,31 @@ class SheetsExporter:
                 # Antes era "NÃO ANALISADO", o que sugeria que o laudo não
                 # existia — passou a impressão errada e levava operador a
                 # ignorar lotes recuperáveis.
-                situacao = "⚠ LAUDO NÃO CAPTURADO"
+                #
+                # Sufixo com motivo agregado (do `verificar_laudo_completo`)
+                # responde "por que esse aqui?" sem operador precisar abrir
+                # cron log. PDF ausente = scraper não baixou (URL faltou ou
+                # HTTP 429 esgotou retries); extração fraca = baixou mas
+                # vision/textual não acharam avarias (Gemini 503, PDF de <2
+                # páginas); URL inválida = persistida sem passar em
+                # is_laudo_pdf_url (decoy ou já expurgada por limpar_decoys).
+                motivo_legivel = _laudo_motivo_legivel(r.get("laudo_motivo"))
+                situacao = f"⚠ LAUDO NÃO CAPTURADO: {motivo_legivel}"
+            elif not r["laudo_completo"]:
+                # Laudo foi extraído (cache forte) MAS algum dos outros sinais
+                # falhou — PDF some do disco entre runs OU URL no raw_json
+                # ficou stale. O laudo é confiável (numéricos seguem válidos),
+                # mas a célula "Laudo" da planilha pode renderizar "PDF salvo
+                # (link expirado)" ou "—". Sinaliza explicitamente em vez de
+                # esconder: operador clica no anúncio e re-baixa se quiser.
+                motivo_legivel = _laudo_motivo_legivel(r.get("laudo_motivo"))
+                # Sufixo aplica nos DOIS lados (viável e caro demais) por
+                # simetria — operador que filtra por "✗" também precisa
+                # saber se o laudo está parcial (PDF some, URL stale).
+                # Antes deste ramo `✗ Caro demais` saía sem sufixo e o
+                # glossário ficava inconsistente.
+                base = "✓ Viável" if r["viavel"] else "✗ Caro demais"
+                situacao = f"{base} (laudo: {motivo_legivel})"
             elif r["viavel"]:
                 situacao = "✓ Viável"
             else:
@@ -598,8 +655,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO quando o scraper não conseguiu extrair a URL do PDF (modal lazy, 429, etc). Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro/mês, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro/mês, ROI e Tese ficam '—' (números pressupõem comprar pelo preço-alvo, que é menor que o lance atual nesses lotes — fantasia); Lance Máximo, FIPE e Reforma continuam visíveis pra o operador entender por que descartamos.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export.",
+                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro/mês, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro/mês, ROI e Tese ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito.",
             ],
             [
                 "Marca",

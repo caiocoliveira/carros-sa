@@ -27,6 +27,10 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
   - Cap mediana ativa só `n<5`. Se AA enviar 5+ similares todos de outro modelo (extremo), cap não atua. Mitigação futura: filtrar por similaridade de string com modelo do lote.
   - `_score_roi_efetivo` ignora `taxa_leilao_pct × delta_lance` no capital incremental (≈zero em AA com taxa fixa; até 8% em judicial).
   - Threshold ROI 500% ainda é frouxo pro benchmark real (60-75%/ano). Solução de raiz: elevar priors `dias_giro` após calibração com Arrematado.
+- **Follow-ups da revisão arquitetural (não bloqueiam merge):**
+  - Convergir CHECKS (Dict) / CROSS_CHECKS (List) / `_DERIVED_CHECKS` (List) num único modelo de registry pra reduzir custo cognitivo no `audit.py`.
+  - Audit cross-check "delta entre `_score_roi_efetivo` e ROI exato com taxas" pra cobrir leilão judicial (taxa pct até 8%) — irrelevante hoje (AA tem taxa fixa), reabrir quando o sistema rodar fora do AA.
+  - Atualizar tag `(consolidação cluster precificador 2026-05-07)` no `LESSONS.md` apêndice pro hash final pós-merge (depois do squash).
 
 ### X — Revisão de coerência entre linhas + fix TZ (2026-05-02) ✅
 - **Branch:** `claude/sleepy-wright-J7Brw`

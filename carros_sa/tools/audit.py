@@ -293,7 +293,6 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "lance_atual": lote.lance_atual or 0,
             "preco_alvo": av.preco_alvo,
             "preco_max": av.preco_max,
-            "preco_alvo": av.preco_alvo,
             "fipe": av.fipe,
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,

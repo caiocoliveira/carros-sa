@@ -88,9 +88,16 @@ def _motivo(s: StatusLaudo) -> Optional[str]:
 def verificar_laudo_completo(
     lote: Lote,
     laudo: Optional[LaudoCache],
-    pdf_dir: Path = PDF_DIR_DEFAULT,
+    pdf_dir: Optional[Path] = None,
 ) -> StatusLaudo:
-    """Status individual: 3 condições + motivo agregado quando incompleto."""
+    """Status individual: 3 condições + motivo agregado quando incompleto.
+
+    `pdf_dir` é resolvido em runtime — passar como default da função fixa
+    `PDF_DIR_DEFAULT` no `def` time e impede monkeypatch via
+    `setattr("...laudo_audit.PDF_DIR_DEFAULT", ...)` em testes.
+    """
+    if pdf_dir is None:
+        pdf_dir = PDF_DIR_DEFAULT
     pdf_path = pdf_dir / f"{lote.id}.pdf"
     pdf_ok = pdf_path.exists() and pdf_path.stat().st_size > _PDF_MIN_BYTES
 
@@ -115,7 +122,7 @@ def auditar(
     session: Session,
     empresa_id: str,
     *,
-    pdf_dir: Path = PDF_DIR_DEFAULT,
+    pdf_dir: Optional[Path] = None,
     apenas_ativos: bool = True,
 ) -> RelatorioLaudos:
     """Audita lotes que apareceriam na planilha de uma empresa.
@@ -124,6 +131,8 @@ def auditar(
     avaliados, com `fim_em` no futuro, sem badge `encerrado`. Lote que já saiu
     da tela não precisa de laudo "perfeito" — ninguém vai dar lance.
     """
+    if pdf_dir is None:
+        pdf_dir = PDF_DIR_DEFAULT
     avaliacoes = session.exec(
         select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
     ).all()

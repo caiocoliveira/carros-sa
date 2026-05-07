@@ -516,7 +516,20 @@ Já registrado:
 - **Cobertura:** 16 testes em `tests/test_laudo_audit.py`. Suite total: **342 passed, 2 skipped** (skip do guard de DB e do orquestrador-async sem playwright).
 - **Limitações conhecidas:**
   - URLs pré-assinadas do Google Storage expiram em ~1h. O estado "PDF salvo (link expirado)" é o melhor que dá pra fazer sem hospedar o PDF em outro lugar. Pra ter link permanente, o próximo passo é subir os PDFs no Google Drive (via service account já configurada) e armazenar `drive_file_id` no `LaudoCache` — mudança maior, fora deste workstream.
-  - `auditar_laudos.py` não integra com o cron ainda — operador precisa rodar manualmente. Adicionar ao `setup_cron.sh` quando o estado típico for ≥99% completo (hoje, com URLs expiradas frequentes, ia spammar log).
+
+### Workstream R.3 — Audit estrito como gate final (2026-05-05)
+
+- **Problema:** o auditor `make auditar-laudos` existia desde R.1 mas operador
+  precisava lembrar de rodar. Sem alarme automático, lotes que escapavam do
+  retry diário ficavam silenciosamente como "⚠ LAUDO NÃO CAPTURADO" na
+  planilha — exatamente o sintoma de RC3 ("silêncio como default") do
+  `LESSONS.md`.
+- **Mudança cirúrgica:**
+  - [`carros_sa/cli.py`](carros_sa/cli.py) — `_auditar_apos_triagem(empresa_id)` roda no fim de `triagem` (manual e via `make triagem`). Imprime relatório curto com motivo + remediação. Se há incompletos, `typer.Exit(1)`.
+  - [`scripts/setup_cron.sh`](scripts/setup_cron.sh) — pipeline diário ganhou 4ª etapa: `auditar_laudos.py --strict` depois do retry. Exit 1 deixa rastro no `/tmp/carros_sa_triagem.log` quando algo persistiu.
+  - [`carros_sa/tools/laudo_audit.py`](carros_sa/tools/laudo_audit.py) — `pdf_dir` resolve `PDF_DIR_DEFAULT` em runtime em vez de capturar em def-time, blindando contra a armadilha clássica de monkeypatch que ofuscou a regressão até este workstream.
+  - [`tests/test_cli.py`](tests/test_cli.py) — 3 testes novos: `_auditar_apos_triagem` retorna 0 quando completo, conta incompletos + imprime remediação, e o `setup_cron.sh` referencia `auditar_laudos.py --strict` na ordem certa.
+- **Loop fechado:** triagem (manual ou cron) só termina ✅ quando todo lote ativo na planilha tem PDF baixado + LaudoCache forte + URL clicável. Senão, exit ≠ 0 + log explícito + ponteiro pra ação corretiva.
 
 ---
 

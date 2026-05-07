@@ -13,10 +13,11 @@ PYTHON="$REPO_DIR/.venv/bin/python3"
 SCRIPT="$REPO_DIR/scripts/triagem_diaria.py"
 RETRY_SCRIPT="$REPO_DIR/scripts/reprocessar_lotes_do_db.py"
 DECOY_SCRIPT="$REPO_DIR/scripts/limpar_decoys_laudo.py"
+AUDIT_SCRIPT="$REPO_DIR/scripts/auditar_laudos.py"
 LOG="/tmp/carros_sa_triagem.log"
 CRON_MARK="carros-sa-triagem"
 # Pipeline diário: (1) triagem completa → (2) limpeza de decoys de laudo →
-# (3) retry automático de laudos pendentes.
+# (3) retry automático de laudos pendentes → (4) audit estrito final.
 #
 # (2) limpar_decoys: até abril/2026, um seletor JS frouxo do scraper pegava o
 # link do "Relatório de Transparência Salarial" (rodapé institucional) como se
@@ -31,7 +32,13 @@ CRON_MARK="carros-sa-triagem"
 # `_laudo_sem_pdf` com confidence=0.5. Sem esse passe, o lote ia pra planilha
 # como "LAUDO NÃO CAPTURADO" até a próxima coleta. Cheap — pula listagem e
 # só visita a URL dos lotes pendentes (inclui os que o limpar_decoys marcou).
-CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1 # $CRON_MARK"
+#
+# (4) audit `--strict`: fecha o laço. Se algum lote ativo ainda está sem PDF
+# baixado / cache forte / URL clicável depois das 3 etapas anteriores, o
+# script sai com exit 1 e o cron loga "exit code != 0". Esse é o sinal pro
+# operador olhar o log — sem ele, a planilha continuaria mostrando
+# "⚠ LAUDO NÃO CAPTURADO" silenciosamente até alguém reparar manualmente.
+CRON_LINE="0 7,13 * * * cd \"$REPO_DIR\" && PYTHONPATH=. \"$PYTHON\" \"$SCRIPT\" --empresa carros_uberlandia >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$DECOY_SCRIPT\" >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$RETRY_SCRIPT\" --empresa carros_uberlandia --somente-ativos --somente-laudo-pendente >> \"$LOG\" 2>&1; PYTHONPATH=. \"$PYTHON\" \"$AUDIT_SCRIPT\" --empresa carros_uberlandia --strict >> \"$LOG\" 2>&1 # $CRON_MARK"
 
 if [[ "${1:-}" == "--remove" ]]; then
     echo "Removendo entrada do cron..."
@@ -58,7 +65,7 @@ fi
 
 echo "✓ Cron configurado:"
 echo "  Horário: todo dia às 07:00 e 13:00"
-echo "  Comando: triagem_diaria.py + limpar_decoys_laudo.py + retry de laudos pendentes"
+echo "  Comando: triagem + limpar_decoys + retry de laudos pendentes + audit --strict"
 echo "  Log:     $LOG"
 echo ""
 echo "Para verificar: crontab -l | grep carros-sa"

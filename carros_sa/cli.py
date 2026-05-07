@@ -534,6 +534,11 @@ async def _run_triagem(
 
     if sem_sheets:
         console.print("\n[dim]--sem-sheets: exportação pulada[/dim]")
+        # Audit roda mesmo sem export — usuário ainda quer saber se algum
+        # lote ficou pendente após o pipeline.
+        n_pendentes = _auditar_apos_triagem(empresa_id)
+        if n_pendentes > 0:
+            raise typer.Exit(1)
         return
 
     sheet_id = os.environ.get("GOOGLE_SHEETS_ID")
@@ -543,6 +548,9 @@ async def _run_triagem(
             "\n[yellow]GOOGLE_SHEETS_ID / GOOGLE_SERVICE_ACCOUNT_PATH não setados — "
             "exportação pulada.[/yellow]"
         )
+        n_pendentes = _auditar_apos_triagem(empresa_id)
+        if n_pendentes > 0:
+            raise typer.Exit(1)
         return
 
     from carros_sa.tools.sheets import SheetsExporter
@@ -560,6 +568,53 @@ async def _run_triagem(
         console.print(f"  Sheet: {exporter.sheet_url}")
     except Exception as exc:
         console.print(f"[red]Erro ao exportar: {exc}[/red]")
+
+    # Audit final — fecha o laço "todo lote ativo na planilha tem laudo
+    # baixado + revisado + linkado". Sem isso, lotes que escapam do retry
+    # ficam silenciosamente como "⚠ LAUDO NÃO CAPTURADO" e o operador só
+    # descobre olhando a aba. Falha (exit 1) é o sinal explícito pro cron/log.
+    n_pendentes = _auditar_apos_triagem(empresa_id)
+    if n_pendentes > 0:
+        raise typer.Exit(1)
+
+
+def _auditar_apos_triagem(empresa_id: str) -> int:
+    """Audita laudos ativos depois do pipeline + export. Retorna nº de incompletos.
+
+    Imprime relatório curto + ponteiro pra ações de correção quando há
+    pendências. Não decide exit code aqui — quem chama decide se trava
+    (CLI manual: travar; testes: ignorar).
+    """
+    from carros_sa.db import get_session
+    from carros_sa.tools.laudo_audit import auditar
+
+    with get_session() as session:
+        rel = auditar(session, empresa_id)
+
+    pct = (rel.completos / rel.total * 100) if rel.total else 100.0
+    console.print(
+        f"\n[bold]Auditoria de laudos ({empresa_id}):[/bold] "
+        f"{rel.completos}/{rel.total} completos ({pct:.1f}%)"
+    )
+    if not rel.incompletos:
+        console.print("  [green]✓ Todos os lotes ativos têm laudo baixado, revisado e linkado.[/green]")
+        return 0
+
+    console.print(
+        f"  [yellow]⚠ {len(rel.incompletos)} incompleto(s)[/yellow] — "
+        f"sem PDF: {rel.sem_pdf}, conf<0.6: {rel.cache_baixa_conf}, URL inválida: {rel.url_invalida}"
+    )
+    for s in rel.incompletos[:10]:
+        console.print(f"    [dim]{s.lote_id}[/dim] {s.modelo[:32]} → {s.motivo}")
+    if len(rel.incompletos) > 10:
+        console.print(f"    [dim]… +{len(rel.incompletos) - 10} truncados[/dim]")
+    console.print(
+        "  [cyan]Pra destravar:[/cyan] "
+        "[code]make limpar-decoys && PYTHONPATH=. .venv/bin/python "
+        f"scripts/reprocessar_lotes_do_db.py --empresa {empresa_id} "
+        "--somente-ativos --somente-laudo-pendente[/code]"
+    )
+    return len(rel.incompletos)
 
 
 if __name__ == "__main__":

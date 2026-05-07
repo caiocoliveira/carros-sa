@@ -32,7 +32,11 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 240min: primeira rodada (sem cookies/DB) precisa logar do zero, varrer
+    # listagem completa, baixar PDF de cada lote e rodar Gemini Flash em cada
+    # laudo. Rodadas subsequentes (cookies + DB cacheados via state/db) são
+    # incrementais e ficam bem abaixo de 90min.
+    timeout-minutes: 240
     env:
       PYTHONPATH: .
       AUTOAVALIAR_COOKIES_PATH: ${{ github.workspace }}/.state/autoavaliar_cookies.json
@@ -59,9 +63,17 @@ jobs:
             echo "Sem cookies — vai logar com email/senha"
           fi
 
-      - uses: astral-sh/setup-uv@v3
+      # actions/setup-python pin do Python 3.12 (projeto exige). astral-sh/setup-uv@v3
+      # NÃO aceita `python-version` como input (válidos: version, checksum,
+      # github-token, enable-cache, cache-dependency-glob) — passar lá silencia
+      # o pin e o runner cai no Python default do ubuntu-latest.
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
 
       - name: Install deps + Chromium
         run: |

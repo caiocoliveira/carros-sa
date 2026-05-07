@@ -126,6 +126,24 @@ def avaliar(
         mediana = int(round(statistics.median(sim)))
         p25 = _percentil_25(sim)
         n = len(sim)
+        # Cap mediana inflada quando amostra é pequena. Auto Avaliar pode incluir
+        # "similares" de outro modelo/versão (ex.: Tiggo 7 listado entre Tiggo 2),
+        # e a mediana de n<5 com 1 outlier puxa o preço-âncora pra cima — vimos
+        # casos de mediana 153% da FIPE com n=2. FIPE × 1.20 é teto generoso
+        # (Civic e Corolla legitimamente vendem ~110% da FIPE em alta de mercado).
+        # Sem este cap, um lance máximo > FIPE × 1.05 podia sair (audit pega o
+        # sintoma, mas só após o estrago já estar persistido).
+        if n < 5:
+            cap_mediana = int(fipe_valor * 1.20)
+            if mediana > cap_mediana:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "mediana_similares_inflada cap_aplicado mediana=%s cap=%s n=%s fipe=%s marca=%s modelo=%s",
+                    mediana, cap_mediana, n, fipe_valor, marca, modelo,
+                )
+                mediana = cap_mediana
+                if p25 > mediana:
+                    p25 = mediana
     else:
         # sem dados de competidores: usa FIPE como referência de revenda.
         # O usuário confirmou que vende próximo da FIPE — então mediana≈97%

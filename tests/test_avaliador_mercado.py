@@ -191,3 +191,50 @@ def test_fallback_sem_similares(fipe_responses, in_memory_session):
     # Fiesta 2013 → hatch VELHO → prior 100d.
     # n=0 não dispara ajuste de liquidez (range é 1..2 ou >=6) → prior puro.
     assert sinal.dias_giro_estimado == 100
+
+
+def test_cap_mediana_inflada_amostra_pequena(fipe_responses, in_memory_session):
+    """Mediana de similares com 1 outlier severo + n<5 é cappada em FIPE × 1.20.
+
+    Regressão pro caso real onde Auto Avaliar mostra 2 similares e um deles é de
+    outro modelo/versão (ex: Tiggo 7 entre Tiggos 2). Sem cap, mediana puxa o
+    preço-âncora pra >150% da FIPE e o lance máximo subia ACIMA da FIPE — operador
+    podia comprar carro a 130% do valor de tabela. Cap em FIPE × 1.20 é teto
+    generoso (Civic e Corolla legitimamente vendem ~110% FIPE em alta).
+    """
+    fake = FakeFipeClient(fipe_responses)
+    # FIPE Fiesta 2013 = R$ 30.876. Mediana esperada SEM cap = (30k + 100k) / 2 = 65k.
+    # Com cap, mediana = 30.876 × 1.20 = 37.051.
+    sinal = avaliar(
+        marca="Ford", modelo="Fiesta 1.6 SE Hatch", ano=2013,
+        similares_precos=[30000, 100000],  # n=2 com outlier
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake, session=in_memory_session,
+    )
+    cap_esperado = int(30876 * 1.20)
+    assert sinal.webmotors_mediana == cap_esperado, (
+        f"Mediana inflada deveria ser cappada em FIPE × 1.20 = {cap_esperado}, "
+        f"veio {sinal.webmotors_mediana}"
+    )
+    # p25 não pode exceder mediana cappada (preserva ordenação)
+    assert sinal.webmotors_p25 <= sinal.webmotors_mediana
+
+
+def test_cap_mediana_nao_acionado_quando_amostra_grande(fipe_responses, in_memory_session):
+    """Com n>=5, mediana não é cappada — confiamos na robustez estatística.
+
+    Ranking de Civic/Corolla em alta de mercado depende de detectar mediana
+    legitimamente >FIPE; n>=5 dilui efeito de outlier individual.
+    """
+    fake = FakeFipeClient(fipe_responses)
+    # 5 similares com 1 outlier — mediana = 32k, mas se cap fosse aplicado seria 37k.
+    sinal = avaliar(
+        marca="Ford", modelo="Fiesta 1.6 SE Hatch", ano=2013,
+        similares_precos=[28000, 30000, 32000, 34000, 100000],
+        categoria=CategoriaVeiculo.HATCH,
+        fipe_client=fake, session=in_memory_session,
+    )
+    # Mediana de 5 elementos = elemento 3 (índice 2, 0-based) = 32000
+    assert sinal.webmotors_mediana == 32000
+    # FIPE = 30876 → 32000 > 30876 mas n>=5, sem cap.
+    assert sinal.webmotors_mediana > sinal.fipe

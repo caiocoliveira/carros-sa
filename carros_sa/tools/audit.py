@@ -30,6 +30,14 @@ SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 # Severidades >= MEDIA exigem reforma > 0. NENHUMA/LEVE/desconhecido podem ter R$ 0.
 _SEVERIDADES_QUE_EXIGEM_REFORMA = {"media", "grave", "estrutural"}
 
+# Limite acima do qual `preco_giro_fipe` (= webmotors_mediana × f_km) começa a
+# ficar suspeito. Por construção pode chegar a ~1.115×FIPE no fallback
+# `webmotors_mediana = FIPE × 0.97` somado a `f_km = 1.15` (km do lote MUITO
+# abaixo da mediana). Acima de 1.10 = combinação otimista das duas premissas
+# rodando ao mesmo tempo — sinal pra checar a entrada de Webmotors live ou km
+# do mercado. Não é bug matemático, é dado fraco.
+_PRECO_GIRO_FIPE_RATIO_MAX = 1.10
+
 
 # Validator retorna None se ok; string com motivo se suspeito.
 Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
@@ -72,14 +80,35 @@ CHECKS: Dict[str, Validator] = {
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
         else (
-            # Sanidade de cabeça: por construção `preco_max ≤ preco_giro × (1−margem_min)`
-            # < FIPE, tirando casos extremos (km do lote MUITO abaixo da mediana de
-            # mercado → f_km próximo do teto 1.15). Lance Máximo > FIPE × 1.05 é
-            # red flag — indica dado desalinhado (FIPE errada, mediana inflada,
-            # f_km saturado num caso onde não devia).
-            f"Lance Máximo R$ {v} > FIPE × 1.05 (FIPE={r.get('fipe')}) — checar âncora de revenda"
-            if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
-            else None
+            # Cross-check: preco_alvo > preco_max é violação por construção.
+            # `margem_aplicada >= margem.minima_absoluta` ⇒ `preco_alvo ≤ preco_max`
+            # sempre. Se inverteu, há bug ou dado corrompido (round-off não causa
+            # isso porque ambos usam o mesmo `int(round(...))` truncation).
+            f"preco_alvo R$ {r.get('preco_alvo')} > Lance Máximo R$ {v} — viola identidade do precificador"
+            if v is not None and r.get("preco_alvo") is not None and r["preco_alvo"] > v
+            else (
+                # Zona apertada: lance_atual já passou do alvo (entrada acima da
+                # margem calibrada) mas ainda cabe no teto. ROI/Lucro/mês exibidos
+                # devem usar `_score_roi_efetivo` — caso contrário, número otimista.
+                # Sinaliza pro operador que a folga é só pra margem mínima.
+                f"Zona apertada: lance_atual R$ {r.get('lance_atual')} > preco_alvo R$ {r.get('preco_alvo')} (Lance Máximo R$ {v}) — ROI realista < ROI alvo"
+                if (
+                    v is not None and r.get("preco_alvo") is not None
+                    and r.get("lance_atual") is not None
+                    and r["lance_atual"] > r["preco_alvo"]
+                    and r["lance_atual"] <= v
+                )
+                else (
+                    # Sanidade de cabeça: por construção `preco_max ≤ preco_giro × (1−margem_min)`
+                    # < FIPE, tirando casos extremos (km do lote MUITO abaixo da mediana de
+                    # mercado → f_km próximo do teto 1.15). Lance Máximo > FIPE × 1.05 é
+                    # red flag — indica dado desalinhado (FIPE errada, mediana inflada,
+                    # f_km saturado num caso onde não devia).
+                    f"Lance Máximo R$ {v} > FIPE × 1.05 (FIPE={r.get('fipe')}) — checar âncora de revenda"
+                    if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
+                    else None
+                )
+            )
         )
     ),
     # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
@@ -100,19 +129,29 @@ CHECKS: Dict[str, Validator] = {
         "FIPE não-positivo — provável falha do client FIPE ou cache stale"
         if isinstance(v, (int, float)) and v <= 0
         else (
-            f"preco_giro_fipe R$ {r.get('preco_giro_fipe')} divergente da FIPE R$ {v} "
-            f"(>25%) — checar mediana similares ou cache FIPE"
+            # Sinaliza quando preco_giro_fipe (âncora de revenda usada no
+            # precificador) está muito acima da FIPE pura. Combinação típica
+            # que dispara: webmotors_mediana=FIPE×0.97 (fallback sem live data)
+            # + f_km saturado a 1.15 (km do lote << km mediana). Não é bug
+            # matemático, é dado fraco — duas premissas otimistas combinadas.
+            f"preco_giro_fipe R$ {r.get('preco_giro_fipe')} > FIPE × {_PRECO_GIRO_FIPE_RATIO_MAX:.2f} (FIPE={v}) — checar Webmotors live e km mediana"
             if (
                 isinstance(v, (int, float)) and v > 0
                 and r.get("preco_giro_fipe") is not None
-                and abs(r["preco_giro_fipe"] - v) / v > 0.25
+                and r["preco_giro_fipe"] > int(v * _PRECO_GIRO_FIPE_RATIO_MAX)
             )
             else None
         )
     ),
+    # Threshold de 500% calibrado contra benchmark real do operador (Reinaldo:
+    # 21 carros, ~60-75% anual; Polo Track: 21% em 7m). ROI > 500% num negócio
+    # de leilão de carros é matematicamente possível mas operacionalmente irreal
+    # — quando aparece, geralmente significa `dias_giro_estimado` otimista
+    # (default 25d HATCH NOVO sem calibração via Arrematado), score_roi
+    # inflado por margem×fator alto, ou floor não aplicado. Sinaliza como suspeito.
     "ROI anualizado (%)": lambda v, r: (
-        "ROI anualizado >1000% sugere dias_giro=1 (floor deveria ser 30d) ou score_roi inflado"
-        if isinstance(v, (int, float)) and v > 1000
+        "ROI anualizado >500% — provável dias_giro otimista ou margem×fator inflado (benchmark operacional ~60-75%/ano)"
+        if isinstance(v, (int, float)) and v > 500
         else (
             "ROI anualizado negativo — score_roi negativo (custos > preco_giro) deveria ter sido descartado"
             if isinstance(v, (int, float)) and v < 0
@@ -177,9 +216,11 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
 def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
     """Últimas N avaliações com JOIN Lote + LEFT JOIN LaudoCache, ordenadas e ranqueadas.
 
-    Espelha `SheetsExporter._query` — encerrados são filtrados, ativos viáveis
+    Espelha `SheetsExporter._query` — lotes sem `fim_em` (sumiram do leilão) e
+    encerrados (timer vencido / badge ARREMATADO) são filtrados; ativos viáveis
     vêm primeiro, desempate por folga de lance. Rank auditado coincide com o
-    que o operador vê na planilha.
+    que o operador vê na planilha. Sem essa paridade, audit reportava violações
+    em lotes invisíveis na UI — alarme falso que confunde o operador.
     """
     avaliacoes = session.exec(
         select(AvaliacaoLote).order_by(AvaliacaoLote.criado_em.desc()).limit(sample_size)
@@ -191,6 +232,10 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         lote = session.get(Lote, av.lote_id)
         if lote is None:
             continue
+        # Paridade com SheetsExporter._query: lote sem fim_em é sumido do leilão
+        # ativo do AA — não entra na planilha, então auditá-lo só gera ruído.
+        if lote.fim_em is None:
+            continue
         laudo: Optional[LaudoCache] = session.get(LaudoCache, av.lote_id)
 
         viavel = av.preco_max > (lote.lance_atual or 0)
@@ -200,10 +245,14 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        # ROI anualizado = score_roi (caso médio no preço-alvo) anualizado.
-        # Igual ao SheetsExporter: ROI no máximo era quase-constante por empresa
-        # (≈margem_min/(1-margem_min)), virava tautologia inútil pra ranking.
-        roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
+        # ROI anualizado HONESTO: usa `score_roi_efetivo` que considera entrada
+        # por max(lance_atual, preco_alvo). Bate com o que o SheetsExporter
+        # exibe na planilha — auditoria não deve "ver" um ROI diferente do
+        # operador. Quando lance_atual ≤ preco_alvo, equivale a `score_roi`
+        # original (entrada pelo alvo é factível).
+        from carros_sa.tools.sheets import _score_roi_efetivo
+        score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
+        roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -242,6 +291,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "fim_em": fim_em_str,
             "km": lote.km,
             "lance_atual": lote.lance_atual or 0,
+            "preco_alvo": av.preco_alvo,
             "preco_max": av.preco_max,
             "fipe": av.fipe,
             "preco_giro_fipe": av.preco_giro_fipe,
@@ -262,6 +312,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro": av.preco_giro,
             "viavel": viavel,
             "encerrado": encerrado,
+            "margem_aplicada": av.margem_aplicada,
         })
 
     # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
@@ -275,6 +326,87 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         r["rank"] = idx
         r["situacao"] = _situacao(r)
     return rows
+
+
+# Invariantes que CRUZAM colunas — não cabem em CHECKS porque não pertencem
+# a uma coluna individual. Rodam independente de COLUMN_EXTRACTORS / HEADER,
+# então não quebram a paridade test. Validator devolve `(label, motivo, valor_exemplo)`
+# ou None quando ok. Label não precisa estar em HEADER (vira chave de agregação).
+CrossValidator = Callable[[Dict[str, Any]], Optional[Tuple[str, str, Any]]]
+
+
+def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+    """preco_giro > FIPE × 1.10 sinaliza f_km saturando ou mediana inflada.
+
+    Por construção, preco_giro = webmotors_mediana × f_km. webmotors_mediana
+    pode ser FIPE × 0.97 (fallback) ou similares Auto Avaliar. f_km tem cap
+    1.15 (lote com km muito baixa). No pior caso teórico: 0.97 × 1.15 =
+    1.1155 — chega na borda mas não passa muito. Quando passa, geralmente
+    a mediana já vem inflada (similares premium dominando) ou f_km está
+    saturado num caso onde o lote real não é tão raro.
+    """
+    pg = row.get("preco_giro")
+    fipe = row.get("fipe")
+    if pg and fipe and pg > fipe * 1.10:
+        ratio_pct = round((pg / fipe) * 100, 1)
+        return (
+            "Preço-Giro vs FIPE",
+            f"preco_giro {ratio_pct}% da FIPE — f_km saturando ou mediana inflada (esperado <110%)",
+            pg,
+        )
+    return None
+
+
+def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+    """preco_alvo > preco_max viola a invariante do precificador.
+
+    Por construção, margem_aplicada >= margem_minima_absoluta, então o
+    desconto sobre preco_giro pra calcular preco_alvo é ≥ que pra preco_max.
+    preco_alvo > preco_max indicaria bug no precificador (ex.: regressão
+    em margem.minima_absoluta) ou registro corrompido.
+    """
+    av_alvo = row.get("preco_alvo")
+    av_max = row.get("preco_max")
+    if av_alvo is not None and av_max is not None and av_alvo > av_max:
+        return (
+            "Preço-Alvo vs Máximo",
+            "preco_alvo > preco_max — bug no precificador (margem mínima maior que margem aplicada?)",
+            av_alvo,
+        )
+    return None
+
+
+CROSS_CHECKS: List[CrossValidator] = [
+    _check_preco_giro_acima_fipe,
+    _check_preco_alvo_gt_preco_max,
+]
+
+
+# Invariantes "derivadas" que inspecionam campos que não aparecem direto no
+# HEADER (ex: margem_aplicada). Separadas das CHECKS por coluna porque não
+# casam no esquema "1 valor → 1 motivo".
+DerivedCheck = Callable[[Dict[str, Any]], Optional[Tuple[str, str]]]
+
+
+def _check_margem_no_teto(row: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Margem efetiva ≥ 49% sinaliza fatores risco × liquidez perto do teto.
+
+    Margem aplicada é capada em 50% no precificador (`_MARGEM_TETO`) — quando
+    bate no cap, normalmente é laudo estrutural + mercado ilíquido. O lote
+    acaba sendo descartado por viabilidade, mas vale flagar pra o operador
+    conferir se a calibração de fatores faz sentido pra essa amostra.
+    """
+    margem = row.get("margem_aplicada")
+    if margem is None or margem < 0.49:
+        return None
+    return (
+        "Precificador / margem",
+        f"margem aplicada {margem:.1%} no teto (cap=50%) — fatores no limite, "
+        "lote provavelmente péssimo. Conferir laudo + mercado.",
+    )
+
+
+_DERIVED_CHECKS: List[DerivedCheck] = [_check_margem_no_teto]
 
 
 def audit(engine, sample_size: int = 20) -> List[str]:
@@ -304,6 +436,37 @@ def audit(engine, sample_size: int = 20) -> List[str]:
             if motivo is None:
                 continue
             chave = (coluna, motivo)
+            if chave not in agregador:
+                agregador[chave] = {
+                    "count": 1,
+                    "exemplo_lote": row["lote_id"],
+                    "exemplo_valor": valor,
+                }
+            else:
+                agregador[chave]["count"] += 1
+        # Invariantes derivadas — usam o row inteiro, não uma única coluna.
+        for derived in _DERIVED_CHECKS:
+            res = derived(row)
+            if res is None:
+                continue
+            coluna, motivo = res
+            chave = (coluna, motivo)
+            if chave not in agregador:
+                agregador[chave] = {
+                    "count": 1,
+                    "exemplo_lote": row["lote_id"],
+                    "exemplo_valor": row.get("margem_aplicada"),
+                }
+            else:
+                agregador[chave]["count"] += 1
+
+        # Invariantes que cruzam colunas — não respeitam o loop por HEADER.
+        for cross in CROSS_CHECKS:
+            resultado = cross(row)
+            if resultado is None:
+                continue
+            label, motivo, valor = resultado
+            chave = (label, motivo)
             if chave not in agregador:
                 agregador[chave] = {
                     "count": 1,

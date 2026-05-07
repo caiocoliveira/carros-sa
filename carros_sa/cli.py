@@ -126,9 +126,17 @@ def top(
 
     n_inviaveis = total_avaliados - len(todas)
 
-    # Anota cada linha com ROI anualizado e ordena
+    # Anota cada linha com ROI anualizado HONESTO (entrada por max(lance, alvo)).
+    # `score_roi_efetivo` cai pra `score_roi` quando `lance_atual ≤ preco_alvo`,
+    # mas reduz o ROI exibido quando o leilão já passou do alvo. Ranking fica
+    # alinhado com o cenário real de compra.
+    from carros_sa.tools.sheets import _score_roi_efetivo
     enriquecidas = [
-        (av, lote, roi_anualizado(av.score_roi, av.dias_giro_estimado))
+        (
+            av,
+            lote,
+            roi_anualizado(_score_roi_efetivo(av, lote.lance_atual), av.dias_giro_estimado),
+        )
         for av, lote in todas
     ]
     if por_absoluto:
@@ -157,18 +165,14 @@ def top(
     tbl.add_column("R$/mês", justify="right")
     tbl.add_column("Pop.", justify="left")
     tbl.add_column("Risco", justify="right")
+    from carros_sa.tools.sheets import _lucro_absoluto_efetivo
     for av, lote, roi_anual in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
-        # Lucro absoluto exato no preço-alvo:
-        #   score_roi = lucro / capital_alvo  ⇒  capital_alvo = preco_giro / (1 + score_roi)
-        #   lucro = preco_giro - capital_alvo = preco_giro × score_roi / (1 + score_roi)
-        # Substitui aproximação anterior `score_roi × preco_alvo` que subestimava
-        # ~10% (capital_alvo > preco_alvo por reforma/frete/taxas/custo_op).
-        lucro_esperado = (
-            int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
-            if av.score_roi > 0 and av.preco_giro > 0 else 0
-        )
+        # Lucro absoluto efetivo: usa entrada por `max(lance_atual, preco_alvo)`
+        # pra refletir o capital empatado real (no alvo se leilão ainda permite,
+        # acima do alvo se já passou). Bate com `R$/mês` exibido na planilha.
+        lucro_esperado = _lucro_absoluto_efetivo(av, lote.lance_atual)
         r_mes = lucro_reais_por_mes(lucro_esperado, av.dias_giro_estimado)
         tbl.add_row(
             lote.id,

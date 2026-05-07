@@ -4,7 +4,33 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 377/377 testes passando
+✅ **Fundação + EstimadorReforma** — 411/411 testes passando
+
+### X — Consolidação do cluster precificador (2026-05-07) ✅
+- **Branch:** `claude/consolidate-precificador-cluster`
+- **Motivação:** 4 PRs paralelos (#38, #43, #46, #49) tocando precificador/sheets/audit com sobreposição forte. Em vez de mergear sequencialmente (cada um conflitando com o anterior), foi feita uma consolidação cirúrgica: cherry-pick em ordem cronológica + resolução manual de conflitos pra extrair o melhor de cada.
+- **11 fixes integrados:**
+  1. **Cap `_MARGEM_TETO=0.50` no precificador** — evita score_roi explorar em lotes péssimos (margem teórica 90%+ em Uberlândia).
+  2. **Cap mediana similares Auto Avaliar (`FIPE × 1.20` quando n<5)** em `agents/avaliador_mercado.py` — outlier categórico (Tiggo 7 entre Tiggo 2) podia gerar lance ACIMA da FIPE.
+  3. **DRY `_categoria_de_modelo` no frete** — `_calcular_frete(lote, empresa, categoria=None)` aceita categoria pré-resolvida; fallback usa a tabela canônica do calibrador. Toro virava OUTRO no frete mas PICAPE no giro.
+  4. **Floor `dias_giro` 30d → 60d** em `lucro_reais_por_mes` e `roi_anualizado` (`_FLOOR_DIAS_GIRO_DISPLAY=60`) — defaults categóricos otimistas (HATCH NOVO=25d) faziam `Lucro/mês = Lucro absoluto`.
+  5. **Threshold ROI 1000% → 500%** em `audit.CHECKS` — calibrado contra benchmark operacional (Reinaldo 21 carros = 60-75% ano).
+  6. **Audit espelha exporter (filtra `fim_em is None`)** — sem isso reportava violações em lotes invisíveis na UI.
+  7. **CROSS_CHECKS** em audit: `preco_giro > FIPE × 1.10` (f_km saturando) + `preco_alvo > preco_max` (sanity).
+  8. **`_score_roi_efetivo` + `_lucro_absoluto_efetivo`** em `sheets.py` — ROI honesto quando `lance_atual > preco_alvo` (zona apertada). Caso real Polo: 273% → 122%.
+  9. **Supressão de Lucro/mês + ROI + Tese em lotes "✗ Caro demais"** em `_write_sheet` — comprar pelo preço-alvo é cenário fantasioso quando lance_atual > preco_max.
+  10. **`_DERIVED_CHECKS` (margem no teto)** — flag agregado quando margem ≥ 49% (sintoma forte de fatores explodidos).
+  11. **Defesa contra None** em `_lucro_absoluto_no_alvo` (registros antigos com NULL).
+- **Cobertura:** **411 passed, 2 skipped** (eram 380 antes da consolidação; +31 testes novos do cluster).
+- **PRs originais fechados:** #38, #43, #46, #49 (link pra este consolidado).
+- **Limitações conhecidas:**
+  - Cap mediana ativa só `n<5`. Se AA enviar 5+ similares todos de outro modelo (extremo), cap não atua. Mitigação futura: filtrar por similaridade de string com modelo do lote.
+  - `_score_roi_efetivo` ignora `taxa_leilao_pct × delta_lance` no capital incremental (≈zero em AA com taxa fixa; até 8% em judicial).
+  - Threshold ROI 500% ainda é frouxo pro benchmark real (60-75%/ano). Solução de raiz: elevar priors `dias_giro` após calibração com Arrematado.
+- **Follow-ups da revisão arquitetural (não bloqueiam merge):**
+  - Convergir CHECKS (Dict) / CROSS_CHECKS (List) / `_DERIVED_CHECKS` (List) num único modelo de registry pra reduzir custo cognitivo no `audit.py`.
+  - Audit cross-check "delta entre `_score_roi_efetivo` e ROI exato com taxas" pra cobrir leilão judicial (taxa pct até 8%) — irrelevante hoje (AA tem taxa fixa), reabrir quando o sistema rodar fora do AA.
+  - Atualizar tag `(consolidação cluster precificador 2026-05-07)` no `LESSONS.md` apêndice pro hash final pós-merge (depois do squash).
 
 ### X — Revisão de coerência entre linhas + fix TZ (2026-05-02) ✅
 - **Branch:** `claude/sleepy-wright-J7Brw`

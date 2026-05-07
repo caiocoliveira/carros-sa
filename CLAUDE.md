@@ -65,6 +65,18 @@ Usuário trabalha laptop + celular e delegou autonomia. Após qualquer commit ou
 
 Continuam exigindo aprovação explícita: `git push --force`, `reset --hard`, `--no-verify` em hooks, mudanças em `carros_sa/models.py` (contratos imutáveis), operações em outros remotes.
 
+## Workflow autônomo — auto-review + auto-merge de PRs
+
+Usuário NÃO revisa PRs manualmente. Toda PR aberta por mim deve seguir o ciclo:
+
+1. **Criar PR** (draft ou ready, qualquer um).
+2. **Disparar agente especializado em arquitetura de software** pra revisar — usar `Agent` com `subagent_type=Plan` (ou `general-purpose` com prompt de revisão arquitetural). Briefing inclui: link/diff do PR, contexto do que mudou, pergunta direta "vale mergear como está?".
+3. **Se review aprova:** marcar como ready (sair do draft) + `merge_method=squash` + push em `main`. Não esperar humano.
+4. **Se review aponta issues:** corrigir os blockers, reaplicar review, mergear. Issues "nice-to-have" registrar como follow-up no `ROADMAP.md` mas não bloquear merge.
+5. **Se review aponta risco arquitetural sério (quebra contratos imutáveis em `models.py`, regressão de teste, mudança de fluxo crítico):** parar e perguntar antes de mergear.
+
+Continua valendo: nunca mergear sem `make test` verde, nunca pular hooks, nunca alterar `models.py` sem coordenação.
+
 ## ROADMAP.md é fonte de verdade entre sessões paralelas
 
 Sessões em worktrees separados **não enxergam** umas às outras até mergearem em `main`. O `ROADMAP.md` é a única fonte compartilhada de "o que está acontecendo agora" — sem ele, sessões duplicam trabalho ou pisam em premissas erradas.
@@ -157,3 +169,24 @@ Toda comparação contra `lote.fim_em` em `sheets.py`, `audit.py`, `laudo_audit.
 
 ### Invariante de auditoria é coerência **da linha inteira**, não só da célula
 `carros_sa/tools/audit.py::CHECKS` agora valida cada coluna por sanidade individual MAIS relação cross-field (Reforma R$ 0 com severidade ≥ média = contradição; `preco_giro_fipe` divergente >25% de FIPE = mediana de similares poluída ou cache FIPE stale). Antes de adicionar uma check nova, perguntar: "esse valor faz sentido sozinho, OU em relação aos outros campos da mesma linha?". Quase sempre é a 2ª — uma reforma de R$ 0 é válida em absoluto mas absurda num lote ESTRUTURAL. Padrão refletido em LESSONS.md/P6.
+
+### Cap em margem_aplicada (`_MARGEM_TETO=0.50` no precificador)
+`margem_aplicada = max(min(base × fator_risco × fator_liquidez, 0.50), minima_absoluta)`. Sem o cap, fatores saturados (laudo estrutural + mercado ilíquido) podiam levar margem a 90% (Uberlândia: 0.25 × 2.0 × 1.8) — `score_roi` explorava acima de 1.0 e lotes péssimos exibiam Lucro/mês alto na planilha. Cap é freio de emergência: lotes calibrados (margem 25-45%) intocados, extremos honestos. Não tirar sem revisar `sheets._write_sheet` (suprime Lucro/mês e ROI em inviáveis) — defesa em camadas.
+
+### Cap mediana similares Auto Avaliar (`FIPE × 1.20` quando n<5)
+AA pode trazer "similares" de outro modelo/versão (Tiggo 7 entre Tiggo 2, Cherokee entre Compass). Se a amostra é pequena (n<5), 1 outlier puxa `statistics.median` e o sistema recomendava lance ACIMA da FIPE. Cap em `FIPE × 1.20` em `agents/avaliador_mercado.avaliar()` quando `n<5` — Civic e Corolla legitimamente vendem ~110% FIPE em alta, 120% é teto generoso. Mediana isolada NÃO defende contra outlier categórico — precisa cap declarado.
+
+### `_score_roi_efetivo` em sheets.py — ROI honesto em zona apertada
+Quando `lance_atual > preco_alvo` mas `≤ preco_max`, o operador real entra acima do alvo: capital empatado cresce e ROI cai. `_score_roi_efetivo(av, lance_atual)` recalcula com `capital_ef = capital_alvo + (lance_atual - preco_alvo)` e devolve `(preco_giro - capital_ef) / capital_ef`. Quando `lance_atual ≤ preco_alvo`, devolve o `score_roi` original (intrinsic). **Sempre que for exibir ROI/Lucro mensal pro operador, passar `lance_atual` — nunca usar `score_roi` puro do DB pra display.** Persistido em `AvaliacaoLote.score_roi` continua sendo intrinsic (bom pra ranking algorítmico).
+
+### Floor `dias_giro` 60d em `lucro_reais_por_mes` e `roi_anualizado`
+Defaults categóricos otimistas (HATCH NOVO=25d) faziam `lucro_reais_por_mes = lucro_abs × 30 / 30 = lucro_abs` — operador via "Lucro/mês = Lucro total". Floor 60d em `_FLOOR_DIAS_GIRO_DISPLAY` corrige sem zerar o sinal de lotes onde calibração via Arrematado já deu giro <60d.
+
+### Categoria do veículo é canônica em `calibracao_giro._categoria_de_modelo`
+`_calcular_frete(lote, empresa, categoria=None)` no orquestrador aceita categoria pré-resolvida (laudo + fallback do pipeline). Quando `None`, usa `_categoria_de_modelo` da MESMA tabela do calibrador. Antes do fix, o frete tinha lista reduzida (5 marcas) enquanto o calibrador tinha 50 — Toro virava OUTRO no frete mas PICAPE no giro. Não criar terceira lista de keywords pra qualquer feature nova: passa pela função canônica.
+
+### Threshold ROI absurdo — 500%, não 1000%
+`audit.CHECKS["ROI anualizado (%)"]` flaga >500% (era 1000%). Calibração: operação real Reinaldo 21 carros = ~60-75% ano linear; Polo Track real = 21% em 7 meses. ROI >500% num leilão de carros é matematicamente possível mas operacionalmente irreal — quase sempre indica `dias_giro` otimista colidindo com fatores no teto. Mensagem aponta a causa raiz provável.
+
+### Audit deve espelhar o exporter
+`audit._build_rows` filtra `lote.fim_em is None` igual ao `SheetsExporter._query` — sem isso reportava violações em lotes invisíveis na UI (alarme falso). Teste guarda: `TestAuditParidadeSheets`. Quando `SheetsExporter` filtrar coisa nova, replicar no audit.

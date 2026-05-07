@@ -94,9 +94,52 @@ def _lucro_absoluto_no_alvo(av: AvaliacaoLote) -> int:
     que subestimava sistematicamente em ~10% (capital_alvo > preco_alvo por causa
     de reforma/frete/taxas/custo_op).
     """
+    # Defesa contra registros antigos com NULL — campos são non-nullable hoje
+    # mas migrações passadas podem ter deixado lixo. Sem isso, `None <= 0` levanta
+    # TypeError e quebra a planilha inteira.
+    if av.score_roi is None or av.preco_giro is None:
+        return 0
     if av.score_roi <= 0 or av.preco_giro <= 0:
         return 0
     return int(round(av.preco_giro * av.score_roi / (1.0 + av.score_roi)))
+
+
+def _score_roi_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> float:
+    """ROI honesto considerando entrada pelo `max(lance_atual, preco_alvo)`.
+
+    Quando `lance_atual > preco_alvo`, o operador real entra acima do alvo:
+    capital empatado cresce, retorno cai. A coluna `ROI anualizado` e `Lucro/mês`
+    devem refletir esse cenário, NÃO o alvo intrinsic. `score_roi` persistido
+    em `AvaliacaoLote` continua sendo o intrinsic (caso médio no alvo) — só o
+    display da planilha vira "ROI realista".
+
+    Aproximação: ignora a parcela `taxa_leilao_pct × delta_lance` no capital
+    incremental (≈zero em Auto Avaliar com taxa fixa; até 8% num leilão judicial,
+    erro pequeno frente ao gap lance-alvo). Refator no precificador pra computar
+    `score_roi_efetivo` exato seria possível, mas exigiria persistir mais campos.
+    """
+    if av.score_roi is None or av.preco_giro is None or av.preco_giro <= 0:
+        return 0.0
+    if lance_atual is None or lance_atual <= (av.preco_alvo or 0):
+        return av.score_roi  # entrada pelo alvo é factível
+    capital_alvo = av.preco_giro / (1.0 + av.score_roi)
+    capital_ef = capital_alvo + (lance_atual - av.preco_alvo)
+    if capital_ef <= 0:
+        return 0.0
+    return (av.preco_giro - capital_ef) / capital_ef
+
+
+def _lucro_absoluto_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> int:
+    """Lucro absoluto pelo cenário REAL (entrada por `max(lance_atual, preco_alvo)`).
+
+    Espelha `_lucro_absoluto_no_alvo` mas usa `_score_roi_efetivo`. Quando
+    lance_atual ≤ preco_alvo, devolve o mesmo valor — só diverge no caso onde
+    o leilão já passou do alvo.
+    """
+    score_ef = _score_roi_efetivo(av, lance_atual)
+    if score_ef <= 0 or av.preco_giro is None or av.preco_giro <= 0:
+        return 0
+    return int(round(av.preco_giro * score_ef / (1.0 + score_ef)))
 
 
 class SheetsExporter:
@@ -210,16 +253,19 @@ class SheetsExporter:
             from carros_sa.agents.calibracao_giro import (
                 lucro_reais_por_mes, roi_anualizado,
             )
-            # ROI anualizado: usa `score_roi` (caso médio no preço-alvo, calibrado
-            # por risco/liquidez) — não `roi_max`, que cai num quase-constante
-            # `margem_min/(1-margem_min)` por construção (ver justificativa no
-            # docstring de precificador.py:154-162). Bate com a CLI `top`.
-            roi_anual = roi_anualizado(av.score_roi, av.dias_giro_estimado) * 100
-            # Lucro esperado / mês — métrica intuitiva pro operador:
-            # "esse lote rende R$X/mês enquanto no pátio". Fórmula exata:
-            # lucro_absoluto = preco_giro × score_roi / (1 + score_roi).
+            # ROI anualizado e Lucro/mês — usam `score_roi_efetivo`, NÃO o
+            # `score_roi` persistido. Diferença: quando `lance_atual > preco_alvo`
+            # (zona apertada), o operador real entra acima do alvo e o ROI cai.
+            # `score_roi` no DB continua sendo o intrinsic (caso médio no alvo);
+            # display vira "ROI realista" considerando o piso de entrada do leilão.
+            # Antes (até 2026-05-03): exibia ROI baseado no alvo mesmo em lotes
+            # onde lance_atual já tinha passado do alvo — número otimista que
+            # sugeria retorno maior do que a entrada real permitiria.
+            score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
+            roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
             lucro_mes = lucro_reais_por_mes(
-                _lucro_absoluto_no_alvo(av), av.dias_giro_estimado,
+                _lucro_absoluto_efetivo(av, lote.lance_atual),
+                av.dias_giro_estimado,
             )
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -366,10 +412,22 @@ class SheetsExporter:
                 tese_cell = "—"
             else:
                 preco_max_cell = r["preco_max"]
-                lucro_mes_cell = r["lucro_mes"]
-                roi_anual_cell = r["roi_anualizado"]
+                # Em lotes inviáveis (lance atual já passou do nosso teto),
+                # Lucro/mês e ROI anualizado pressupõem comprar pelo preço-ALVO
+                # — que é menor que o lance atual. Cenário fantasioso. Em lote
+                # estrutural inviável, o score_roi inflado pela margem alta
+                # (~1.0) produz Lucro/mês de R$5k+ e ROI 500%/ano, induzindo o
+                # operador a achar que vale negociar. Mantemos preco_max +
+                # reforma + FIPE pra ele entender por que descartamos.
+                if r["viavel"]:
+                    lucro_mes_cell = r["lucro_mes"]
+                    roi_anual_cell = r["roi_anualizado"]
+                    tese_cell = r["tese"]
+                else:
+                    lucro_mes_cell = "—"
+                    roi_anual_cell = "—"
+                    tese_cell = "—"
                 reforma_cell = r["reforma_estimada"]
-                tese_cell = r["tese"]
 
             # FIPE é referência de mercado, NÃO depende do laudo — sempre mostra
             # quando a avaliação tem o valor (registros pré-workstream K podem
@@ -541,7 +599,7 @@ class SheetsExporter:
                 "Situação",
                 "Derivado",
                 "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO quando o scraper não conseguiu extrair a URL do PDF (modal lazy, 429, etc). Lotes encerrados (badge ARREMATADO ou Fim do Leilão já passou) são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Os números numéricos ficam '—' até o retry do laudo rodar.",
+                "Resumo de uma célula do que o operador pode/deve fazer. ⚠ NÃO significa que o laudo não exista — quase sempre ele está disponível no anúncio do AA, só o scraper falhou em pegar. Operador pode abrir o anúncio manualmente. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro/mês, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro/mês, ROI e Tese ficam '—' (números pressupõem comprar pelo preço-alvo, que é menor que o lance atual nesses lotes — fantasia); Lance Máximo, FIPE e Reforma continuam visíveis pra o operador entender por que descartamos.",
             ],
             [
                 "Marca",
@@ -600,14 +658,14 @@ class SheetsExporter:
             [
                 "Lucro/mês (R$)",
                 "Derivado",
-                "lucro_absoluto × 30 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). lucro_absoluto exato = preco_giro × score_roi ÷ (1 + score_roi) — equivale a (preco_giro − capital_alvo).",
-                "Métrica intuitiva: 'esse lote rende R$X/mês enquanto fica no pátio'. Permite comparar lotes de capitais e prazos diferentes na mesma unidade.",
+                "lucro_absoluto × 30 ÷ dias_giro (floor 60d; fallback 90d quando dias_giro=NULL). lucro_absoluto = preco_giro × score_efetivo ÷ (1 + score_efetivo). score_efetivo = score_roi original quando lance_atual ≤ preco_alvo; reduzido proporcionalmente quando lance_atual > preco_alvo (capital efetivo cresce). Em lotes '✗ Caro demais' a célula vai pra '—': comprar pelo preço-alvo é cenário fantasioso quando o lance atual já passou do nosso teto.",
+                "Métrica intuitiva: 'esse lote rende R$X/mês se entrar HOJE no leilão'. Não usa cenário-alvo otimista quando o leilão já passou do alvo — comparação entre lotes reflete o capital real empatado. Floor 60d evita o caso degenerado 'Lucro/mês = Lucro absoluto' que ocorria com dias_giro=30d (defaults categóricos otimistas).",
             ],
             [
                 "ROI anualizado (%)",
                 "Derivado",
-                "score_roi × 365 ÷ dias_giro (floor 30d; fallback 90d quando dias_giro=NULL). score_roi é o retorno % esperado se ganhar pelo preço-ALVO, calibrado por risco e liquidez do lote.",
-                "Normaliza o retorno pelo tempo de giro — carro rápido com ROI menor pode ganhar de carro lento com ROI maior. Coluna varia por lote (ao contrário do 'ROI no máximo' que vira tautologia constante por empresa).",
+                "score_efetivo × 365 ÷ dias_giro (floor 60d; fallback 90d quando dias_giro=NULL). score_efetivo é igual ao score_roi (caso médio no preço-ALVO, calibrado por risco/liquidez) quando o lance atual ainda está abaixo do alvo. Quando lance_atual > preco_alvo, recalcula com o capital ajustado pra cima — o operador entra acima do alvo e o ROI cai proporcionalmente. margem_aplicada (componente do score_roi) é capada em 50% pra evitar que lotes com fatores no teto (laudo estrutural + mercado ilíquido) inflem o ROI artificialmente. Em lotes '✗ Caro demais' a célula vai pra '—'.",
+                "Normaliza retorno pelo tempo de giro E pelo cenário REAL de entrada. Coluna reflete o que o operador realmente ganha se der lance hoje. Valores >500% sinalizados pelo audit como provável otimismo (benchmark operacional real ~60-75% ao ano).",
             ],
             [
                 "Reforma (R$)",

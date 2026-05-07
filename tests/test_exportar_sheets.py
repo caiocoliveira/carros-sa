@@ -19,7 +19,9 @@ from carros_sa.tools.sheets import (
     HEADER,
     SheetsExporter,
     _col_letter,
+    _lucro_absoluto_efetivo,
     _lucro_absoluto_no_alvo,
+    _score_roi_efetivo,
 )
 
 
@@ -140,6 +142,72 @@ class TestLucroAbsolutoNoAlvo:
         av = _avaliacao(preco_giro=0, score_roi=0.3)
         assert _lucro_absoluto_no_alvo(av) == 0
 
+    def test_score_roi_none_nao_quebra(self):
+        """Defesa contra registros antigos com NULL — `None <= 0` levantava
+        TypeError e quebrava planilha inteira. Agora cai no caminho de zero."""
+        av = _avaliacao(score_roi=0.3)
+        av.score_roi = None
+        assert _lucro_absoluto_no_alvo(av) == 0
+
+
+class TestScoreRoiEfetivo:
+    """ROI honesto: quando lance_atual > preco_alvo, o capital empatado real
+    cresce e o ROI efetivo cai. Quando lance_atual ≤ preco_alvo, mantém o
+    score_roi original (entrada pelo alvo é factível)."""
+
+    def test_lance_abaixo_do_alvo_devolve_score_roi(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        # lance abaixo do alvo (default=25000) → score_efetivo = score_roi
+        assert _score_roi_efetivo(av, 20000) == pytest.approx(0.4, abs=1e-9)
+
+    def test_lance_no_alvo_devolve_score_roi(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        assert _score_roi_efetivo(av, 25000) == pytest.approx(0.4, abs=1e-9)
+
+    def test_lance_acima_do_alvo_reduz_score(self):
+        # capital_alvo = 50000 / 1.4 ≈ 35714. Lance 30k > alvo 25k:
+        # capital_ef = 35714 + (30000-25000) = 40714. score_ef = (50000-40714)/40714 ≈ 0.228
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        score_ef = _score_roi_efetivo(av, 30000)
+        assert score_ef < 0.4
+        assert score_ef == pytest.approx(0.228, abs=0.01)
+
+    def test_lance_none_devolve_score_roi(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        assert _score_roi_efetivo(av, None) == pytest.approx(0.4, abs=1e-9)
+
+    def test_lance_destruidor_zera_score(self):
+        # Lance absurdo > preco_giro torna capital_ef > preco_giro → ROI<0,
+        # cai pra 0 (não exibimos ROI negativo realista — operador já tem o
+        # sinal de "Caro demais").
+        av = _avaliacao(score_roi=0.4, preco_giro=50000, preco_max=30000)
+        score_ef = _score_roi_efetivo(av, 100000)
+        assert score_ef <= 0.0  # capital_ef >= preco_giro
+
+    def test_score_roi_none_nao_quebra(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        av.score_roi = None
+        assert _score_roi_efetivo(av, 30000) == 0.0
+
+
+class TestLucroAbsolutoEfetivo:
+    """Espelha _lucro_absoluto_no_alvo mas usando o capital efetivo (lance > alvo)."""
+
+    def test_lance_abaixo_do_alvo_igual_a_lucro_no_alvo(self):
+        av = _avaliacao(score_roi=0.3, preco_giro=50000)
+        assert _lucro_absoluto_efetivo(av, 20000) == _lucro_absoluto_no_alvo(av)
+
+    def test_lance_acima_do_alvo_reduz_lucro(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        lucro_alvo = _lucro_absoluto_no_alvo(av)
+        lucro_ef = _lucro_absoluto_efetivo(av, 30000)
+        assert lucro_ef > 0
+        assert lucro_ef < lucro_alvo
+
+    def test_lance_destruidor_zera_lucro(self):
+        av = _avaliacao(score_roi=0.4, preco_giro=50000)
+        assert _lucro_absoluto_efetivo(av, 100000) == 0
+
 
 class TestSheetsExporterQuery:
     def test_exportar_retorna_n_linhas(self):
@@ -258,19 +326,23 @@ class TestSheetsExporterQuery:
         """
         engine = _engine_mem()
         with Session(engine) as session:
-            # BARATO: folga = R$ 25k, ROI = 10% → 0.10 × 365 / 90 = 40.6%
+            # BARATO: lance < preco_alvo (entrada factível pelo alvo). ROI = 10% →
+            # score_efetivo = 0.10 → 0.10 × 365 / 90 = 40.6%
             session.add(_lote("L_BARATO", marca="VW", modelo="Gol", lance_atual=5000))
             av_b = _avaliacao(
                 "L_BARATO", score_roi=0.10, preco_giro=35000, preco_max=30000,
             )
+            av_b.preco_alvo = 25000  # lance 5000 < alvo 25000 (zona normal)
             av_b.dias_giro_estimado = 90
             session.add(av_b)
             session.add(_laudo("L_BARATO"))
-            # LUCRATIVO: folga = R$ 5k, ROI = 50% → 0.50 × 365 / 90 = 202.8%
+            # LUCRATIVO: lance < preco_alvo (entrada factível pelo alvo). ROI = 50% →
+            # score_efetivo = 0.50 → 0.50 × 365 / 90 = 202.8%
             session.add(_lote("L_LUCRATIVO", marca="VW", modelo="Polo", lance_atual=70000))
             av_l = _avaliacao(
                 "L_LUCRATIVO", score_roi=0.50, preco_giro=120000, preco_max=75000,
             )
+            av_l.preco_alvo = 72000  # lance 70000 < alvo 72000 (zona normal, folga pra alvo)
             av_l.dias_giro_estimado = 90
             session.add(av_l)
             session.add(_laudo("L_LUCRATIVO"))
@@ -533,6 +605,43 @@ class TestSheetsExporterQuery:
         idx_situacao = HEADER.index("Situação")
         # rows[0]=banner, rows[1]=header, rows[2]=primeiro lote
         assert "Viável" in rows[2][idx_situacao]
+
+    def test_exportar_inviavel_oculta_lucro_roi_tese(self):
+        """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro/mês,
+        ROI anualizado nem Tese — esses números pressupõem comprar pelo preço-alvo
+        (que é menor que o lance atual nesse caso, cenário fantasioso). Mantemos
+        Lance Máximo + FIPE + Reforma pra o operador entender o descarte.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # lance_atual=35k > preco_max=30k → "✗ Caro demais"
+            session.add(_lote("L001", lance_atual=35_000))
+            session.add(_avaliacao("L001", preco_max=30_000, score_roi=0.8))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        row = rows[2]
+        assert row[HEADER.index("Situação")] == "✗ Caro demais"
+        # Numéricos especulativos suprimidos
+        assert row[HEADER.index("Lucro/mês (R$)")] == "—"
+        assert row[HEADER.index("ROI anualizado (%)")] == "—"
+        assert row[HEADER.index("Tese")] == "—"
+        # Mas contexto pra triagem manual continua visível
+        assert row[HEADER.index("Lance Máximo (R$)")] == 30_000
+        assert row[HEADER.index("Reforma (R$)")] == 3_000
+        assert row[HEADER.index("FIPE (R$)")] == "—"  # _avaliacao default não passa fipe
 
     def test_exportar_url_como_hyperlink_clicavel(self):
         """A coluna Anúncio deve virar =HYPERLINK(url, "Abrir anúncio") pra célula ficar curta e clicável."""

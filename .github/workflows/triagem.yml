@@ -72,6 +72,9 @@ jobs:
           python-version: "3.12"
 
       - uses: astral-sh/setup-uv@v3
+        with:
+          # Cache padrão exige uv.lock; o projeto usa só pyproject.toml.
+          enable-cache: false
 
       - name: Install deps + Chromium
         run: |

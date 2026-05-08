@@ -166,9 +166,10 @@ def test_gol_2015_em_uberlandia_sem_frete(
 
     av = precificar(lote_local, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
-    # Checks:
-    # preco_giro = webmotors_mediana = 25_000 (fixture); AA ausente
-    assert av.preco_giro == 25_000
+    # Checks (refactor FIPE-only 2026-05-08):
+    # preco_giro = FIPE × f_km × 0.95 = 28000 × 1.0 × 0.95 = 26_600
+    # webmotors_mediana=25000 da fixture vai pro display, não pro cálculo.
+    assert av.preco_giro == 26_600
     assert av.frete_incluso == 0
     assert av.reforma_estimada == 3_500
 
@@ -182,10 +183,10 @@ def test_gol_2015_em_uberlandia_sem_frete(
 
     # Margem: fator_risco ≈ 1.295, fator_liquidez ≈ 1.431
     # margem_aplicada ≈ 0.25 * 1.295 * 1.431 ≈ 0.4632
-    # margem_reais = int(25000 * 0.4632) = 11580
-    # bruto_alvo = 25000 - 3500 - 0 - 2523 - 11580 = 7397
-    # preco_alvo = (7397 - 999) / (1+0.0) = 6398
-    assert 6_000 < av.preco_alvo < 6_700
+    # margem_reais = int(26600 * 0.4632) = 12321
+    # bruto_alvo = 26600 - 3500 - 0 - 2523 - 12321 = 8256
+    # preco_alvo = (8256 - 999) / 1 = 7257
+    assert 6_900 < av.preco_alvo < 7_500
     assert av.preco_max > av.preco_alvo           # margem mínima é menos restritiva
 
 
@@ -202,16 +203,19 @@ def test_gol_2015_em_goiania_com_frete(
 
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
-    # Comparado com Uberlândia (6398), preco_alvo cai em exatamente R$ 1400 (frete)
+    # Comparado com Uberlândia (~7257), preco_alvo cai em exatamente R$ 1400 (frete)
     # pois taxa_pct=0 → não há divisor amplificando o desconto
-    # bruto_alvo = 25000 - 3500 - 1400 - 2523 - 11580 = 5997
-    # preco_alvo = (5997 - 999) / 1 = 4998
+    # preco_giro = FIPE × 0.95 = 26600 (refactor FIPE-only)
+    # bruto_alvo = 26600 - 3500 - 1400 - 2523 - 12321 = 6856
+    # preco_alvo = (6856 - 999) / 1 = 5857
     assert av.frete_incluso == 1_400
-    assert 4_700 < av.preco_alvo < 5_300
+    assert 5_500 < av.preco_alvo < 6_200
 
-    # Lance atual (R$ 15k) está acima do preco_max → lote caro demais
-    # preco_max = (25000 - 3500 - 1400 - 2523 - 2500 - 999) / 1 = 14078
-    assert gol_2015_lote.lance_atual > av.preco_max
+    # Lance atual (R$ 15k) ficou JUST abaixo do preco_max — pré-refactor
+    # FIPE-only (preco_giro 25k) o lote era inviável; com FIPE 28k × 0.95 =
+    # preco_giro 26600, o teto subiu pra 15518 e cabe lance 15k por margem mínima.
+    # preco_max = (26600 - 3500 - 1400 - 2523 - 2660 - 999) / 1 = 15518
+    assert gol_2015_lote.lance_atual < av.preco_max
 
 
 # =============================================================================
@@ -328,36 +332,35 @@ def test_sem_auto_avaliar_mantem_comportamento_fipe_only(
     assert av.preco_giro_aa is None
 
 
-def test_com_auto_avaliar_mais_baixo_escolhe_aa_como_giro_consolidado(
+def test_auto_avaliar_ref_nao_afeta_preco_giro_fipe_only(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
 ):
-    """Quando Auto Avaliar dá preço MENOR que mediana, consolidado = AA."""
+    """Refactor FIPE-only (2026-05-08): auto_avaliar_ref e webmotors_mediana
+    NÃO entram mais no cálculo do preco_giro — viraram referência informativa.
+    Preserva o sinal em SinalMercado pra display, mas preco_giro_aa fica None.
+    """
     empresa = carregar_empresa("carros_uberlandia")
-    # webmotors_mediana=25k → preco_giro_fipe = 25k
-    # Auto Avaliar ref = 22k → preco_giro_aa = min(22k, 25k) = 22k
-    # Consolidado = min(25k, 22k) = 22k (AA ganha).
-    mercado_aa = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 22_000})
     frete = _frete("Goiânia", "GO", empresa.patio.cidade, empresa.patio.uf, 420, 1_400)
-    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_aa, gol_2015_reforma, frete, empresa)
-    assert av.preco_giro_fipe == 25_000
-    assert av.preco_giro_aa == 22_000
-    assert av.preco_giro == 22_000  # consolidado = o menor
 
+    # Mesmo lote com 3 valores diferentes de auto_avaliar_ref → preco_giro idêntico
+    sem_aa = gol_2015_mercado
+    aa_baixo = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 22_000})
+    aa_alto = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 30_000})
 
-def test_com_auto_avaliar_mais_alto_consolidado_fica_no_fipe(
-    gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
-):
-    """Se AA for mais otimista que mediana, consolidado trava na mediana (conservadorismo)."""
-    empresa = carregar_empresa("carros_uberlandia")
-    mercado_aa_alto = gol_2015_mercado.model_copy(update={"auto_avaliar_ref": 30_000})
-    frete = _frete("Goiânia", "GO", empresa.patio.cidade, empresa.patio.uf, 420, 1_400)
-    av = precificar(gol_2015_lote, gol_2015_laudo, mercado_aa_alto, gol_2015_reforma, frete, empresa)
-    # webmotors_mediana=25k → preco_giro_fipe = 25k
-    # Auto Avaliar ref=30k → preco_giro_aa = min(30k, 25k mediana) = 25k (mediana aperta)
-    # Consolidado = min(25k, 25k) = 25k
-    assert av.preco_giro == 25_000
-    assert av.preco_giro_fipe == 25_000
-    assert av.preco_giro_aa == 25_000
+    av_sem = precificar(gol_2015_lote, gol_2015_laudo, sem_aa, gol_2015_reforma, frete, empresa)
+    av_baixo = precificar(gol_2015_lote, gol_2015_laudo, aa_baixo, gol_2015_reforma, frete, empresa)
+    av_alto = precificar(gol_2015_lote, gol_2015_laudo, aa_alto, gol_2015_reforma, frete, empresa)
+
+    # FIPE × f_km × 0.95 = 28000 × 1.0 × 0.95 = 26_600 (idêntico nos 3 cenários)
+    assert av_sem.preco_giro == 26_600
+    assert av_baixo.preco_giro == 26_600
+    assert av_alto.preco_giro == 26_600
+    # preco_giro_aa sempre None (campo de referência, não usado no cálculo)
+    assert av_sem.preco_giro_aa is None
+    assert av_baixo.preco_giro_aa is None
+    assert av_alto.preco_giro_aa is None
+    # webmotors_mediana segue persistido pra display
+    assert av_sem.webmotors_mediana == 25_000
 
 
 def test_auto_avaliar_ref_zero_rejeitado_pela_validacao():
@@ -429,8 +432,9 @@ def test_taxa_leilao_fixa_auto_avaliar_polo_track_real():
 
     # Taxa Auto Avaliar é R$ 999 fixos, não percentual
     assert av.taxas_leilao == 999
-    # Preço de giro: webmotors_mediana = 68_000 (nova fórmula; vende próximo da FIPE)
-    assert av.preco_giro == 68_000
+    # Preço de giro: FIPE × f_km × 0.95 = 69400 × 1.0 × 0.95 = 65_930 (refactor
+    # FIPE-only de 2026-05-08; antes era webmotors_mediana=68_000).
+    assert av.preco_giro == 65_930
     # Custos op = R$ 2.523 (decomposto em config)
     assert empresa.custo_op_fixo == 2_523
     # Preço-alvo deve estar abaixo de R$ 52.200 (o que o Caio pagou) — sistema
@@ -572,7 +576,7 @@ def test_ajuste_km_lote_com_km_alta_reduz_preco_alvo(
 
     Sem webmotors_km_mediana → f_km=1.0, preco_giro cheio.
     Com webmotors_km_mediana=50k e lote.km=150k → f_km ≈ 0.70 → clamp 0.75 →
-    preco_giro cai de 25k pra ~18.7k → preço-alvo várias milhares menor.
+    preco_giro cai de FIPE×0.95 pra FIPE×0.95×0.75 → preço-alvo várias milhares menor.
     """
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
@@ -593,8 +597,9 @@ def test_ajuste_km_lote_com_km_alta_reduz_preco_alvo(
         lote_km_alta, gol_2015_laudo, mercado_com_km, gol_2015_reforma, frete, empresa,
     )
 
-    # preco_giro aplicado com f_km=0.75 → 25000 * 0.75 = 18_750
-    assert av_km_alta.preco_giro == 18_750
+    # preco_giro aplicado com f_km=0.75 → FIPE × 0.95 × 0.75 = 28000 × 0.7125 = 19_950
+    # (refactor FIPE-only 2026-05-08; antes: 25000 × 0.75 = 18_750)
+    assert av_km_alta.preco_giro == 19_950
     # preço-alvo cai proporcionalmente (sem sair negativo)
     assert av_km_alta.preco_alvo < av_baseline.preco_alvo
     # justificativa exibe f_km quando aplicado
@@ -626,8 +631,9 @@ def test_ajuste_km_lote_com_km_baixa_eleva_preco_alvo(
         lote_km_baixa, gol_2015_laudo, mercado_com_km, gol_2015_reforma, frete, empresa,
     )
 
-    # preco_giro: 25000 * 1.15 = 28_750
-    assert av_com_ajuste.preco_giro == 28_750
+    # preco_giro: FIPE × 0.95 × 1.15 = 28000 × 1.0925 = 30_590
+    # (refactor FIPE-only 2026-05-08; antes: 25000 × 1.15 = 28_750)
+    assert av_com_ajuste.preco_giro == 30_590
     # preço-alvo sobe com f_km > 1
     assert av_com_ajuste.preco_alvo > av_sem_ajuste.preco_alvo
     assert "f_km=1.15" in av_com_ajuste.justificativa
@@ -680,53 +686,115 @@ def test_margem_aplicada_brando_nao_atinge_cap(gol_2015_lote, gol_2015_laudo, go
 
 
 # =============================================================================
-# Cap defensivo `preco_giro_fipe ≤ FIPE × 1.20`
+# Refactor FIPE-only (2026-05-08): preco_giro = FIPE × f_km × 0.95
 # =============================================================================
-# Cap mediana similares Auto Avaliar é 1.20×FIPE quando n<5 (avaliador_mercado.py).
-# Sem cap final em `preco_giro_fipe`, multiplicação pelo f_km saturado (1.15)
-# levava a até 1.38×FIPE no precificador — lance acima da FIPE em casos
-# adversariais (similares premium dominando + lote km baixa). Cap defensivo
-# em 1.20 mantém o caso legítimo Civic/Corolla ~110% FIPE em alta + bloqueia
-# combinação patológica. Audit em 1.10 continua sinalizando como dado fraco.
+# Antes existiam 3 caps em série (n<5 no avaliador, 1.20×FIPE no precificador,
+# 1.05×FIPE no audit) tentando consertar similares poluídos do Auto Avaliar
+# (Tiggo 7 vs Tiggo 2, Airtrek vs Outlander, Ka descontinuado vs seminovos
+# europeus). Removidos os 2 primeiros — fórmula nova torna `preco_max > FIPE`
+# matematicamente inviável (max teórico = FIPE × 1.15 × 0.95 × 0.90 ≈ 0.98×FIPE).
+# `webmotors_mediana` continua persistido pra display.
 
-def test_preco_giro_fipe_capado_em_120pct_fipe(gol_2015_lote, gol_2015_laudo, gol_2015_reforma):
-    """Mediana inflada (similares premium) não deve produzir preco_giro_fipe
-    acima de 120% da FIPE — independente de f_km saturado.
+def test_preco_giro_fipe_independe_de_mediana_inflada(gol_2015_lote, gol_2015_laudo, gol_2015_reforma):
+    """Mediana de mercado inflada (similares poluídos) não impacta preco_giro
+    desde o refactor FIPE-only. Antes: gerava lance > FIPE em adversarial.
     """
     # Cenário adversarial: mediana 168% FIPE (similares de outro modelo entrando),
     # f_km=1.15 (km do lote MUITO abaixo da mediana).
     mercado_inflado = SinalMercado(
         fipe=50_000,
-        webmotors_mediana=84_000,  # 168% FIPE — só passa se cap mediana falhar
+        webmotors_mediana=84_000,  # 168% FIPE — antes do refactor: viraria preco_giro
         webmotors_p25=70_000,
         n_anuncios_competidores=10,
         dias_giro_estimado=60,
-        webmotors_km_mediana=100_000,  # vs km_lote=95k → f_km≈1.015 (suave)
+        webmotors_km_mediana=100_000,  # vs km_lote=95k → f_km≈1.015
     )
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
 
     av = precificar(gol_2015_lote, gol_2015_laudo, mercado_inflado, gol_2015_reforma, frete, empresa)
 
-    # Cap defensivo: preco_giro_fipe ≤ FIPE × 1.20 = 60_000.
-    # Sem o cap, valor seria ~84k × 1.015 ≈ 85_300 (170% FIPE → bug operacional).
-    assert av.preco_giro_fipe <= int(50_000 * 1.20), (
-        f"preco_giro_fipe {av.preco_giro_fipe} excede cap 1.20×FIPE (60_000)"
+    # FIPE-only: preco_giro_fipe = FIPE × f_km × 0.95, NÃO depende da mediana.
+    # 50000 × ~1.015 × 0.95 = ~48_212 (mediana 84k é IGNORADA no cálculo)
+    assert av.preco_giro_fipe < int(50_000 * 1.10), (
+        f"preco_giro_fipe {av.preco_giro_fipe} acima do esperado pra FIPE-only"
     )
-    # Sanidade: preco_max consequente fica abaixo da FIPE (não dispara
+    # Sanidade: preco_max consequente fica BEM abaixo da FIPE (não dispara
     # `Lance Máximo > FIPE × 1.05` no audit).
     assert av.preco_max < int(50_000 * 1.05)
+    # Mediana fica persistida pra display (referência informativa)
+    assert av.webmotors_mediana == 84_000
 
 
-def test_preco_giro_fipe_caso_normal_nao_e_afetado_pelo_cap(
+def test_preco_giro_fipe_eh_fipe_vezes_fkm_vezes_095(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma,
 ):
-    """Sanidade: cap defensivo não afeta lote calibrado típico (mediana ≤ FIPE).
+    """Sanidade da fórmula nova: preco_giro_fipe = FIPE × f_km × 0.95.
     """
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
-    # FIPE=28k, mediana=25k → preco_giro_fipe = 25k × f_km, longe do cap 33.6k
+    # FIPE=28k da fixture, sem webmotors_km_mediana → f_km=1.0
+    # preco_giro_fipe = 28000 × 1.0 × 0.95 = 26_600
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
-    assert av.preco_giro_fipe < int(28_000 * 1.20)
-    # E é o valor "natural" (mediana × f_km), não a borda do cap
-    assert av.preco_giro_fipe == av.webmotors_mediana  # f_km==1.0 quando km_mediana=None
+    assert av.preco_giro_fipe == 26_600
+    # Não depende mais da webmotors_mediana (que é 25_000 da fixture)
+    assert av.preco_giro_fipe != av.webmotors_mediana
+
+
+# 4 carros reais que o operador reportou no screenshot de 2026-05-08 com
+# `Lance Máximo > FIPE`. Todos disparavam adversarial pré-refactor (mediana
+# saturada 1.20×FIPE + custos baixos Uberlândia + reforma=0). Guard test
+# trava regressão se alguém reintroduzir a mediana no cálculo.
+@pytest.mark.parametrize(
+    "label, fipe",
+    [
+        ("Mitsubishi Airtrek 2008", 32_994),
+        ("Chery Tiggo 2.0 2015", 41_634),
+        ("Ford Ka 1.0 2020", 48_199),
+        ("Fiat Argo 1.0 2019", 50_570),
+    ],
+)
+def test_lance_maximo_nunca_excede_fipe_em_uberlandia_sem_dano(
+    label, fipe, gol_2015_lote, gol_2015_reforma,
+):
+    """Caso real do screenshot de 2026-05-08: 4 carros com `Lance Máximo > FIPE`.
+
+    Cenário ADVERSARIAL: lote em Uberlândia (frete=0, mesma cidade pátio),
+    sem dano (reforma=0), mediana de mercado inflada (similares poluídos
+    do AA). Pré-refactor (mediana × f_km com cap 1.20×FIPE) podia produzir
+    Lance Máximo até 101% FIPE. Pós-refactor (FIPE × f_km × 0.95) o teto
+    teórico cai pra ~98% FIPE mesmo no pior caso (f_km=1.15, custos zero).
+    """
+    empresa = carregar_empresa("carros_uberlandia")
+    laudo = LaudoEstruturado(
+        avarias=[],
+        severidade_geral=SeveridadeAvaria.NENHUMA,
+        motor_ok=True,
+        documentacao=StatusDocumentacao.OK,
+        categoria_veiculo=CategoriaVeiculo.HATCH,
+        confidence=0.95,
+    )
+    # Mediana 130% FIPE (cenário adversarial: similares poluídos), f_km=1.15
+    # (km do lote << km mediana). Pré-refactor: preco_giro = 1.30×1.15×FIPE = 1.495×FIPE
+    # → preco_max ~1.07×FIPE (acima da FIPE). Pós-refactor: ignora a mediana.
+    mercado = SinalMercado(
+        fipe=fipe,
+        webmotors_mediana=int(fipe * 1.30),
+        webmotors_p25=int(fipe * 1.10),
+        n_anuncios_competidores=10,
+        dias_giro_estimado=60,
+        webmotors_km_mediana=100_000,
+    )
+    lote_local = gol_2015_lote.model_copy(update={
+        "origem_cidade": "Uberlândia", "origem_uf": "MG", "km": 10_000,
+    })
+    reforma_zero = CustoReforma(itens=[], custo_total=0, range_min=0, range_max=0)
+    frete_zero = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+    av = precificar(lote_local, laudo, mercado, reforma_zero, frete_zero, empresa)
+
+    # Invariante pós-refactor FIPE-only: preco_max < FIPE em qualquer cenário.
+    # 1.05×FIPE é o threshold do audit; aqui exigimos margem confortável.
+    assert av.preco_max < int(fipe * 1.00), (
+        f"{label}: preco_max R${av.preco_max} >= FIPE R${fipe} — refactor FIPE-only deve bloquear"
+    )

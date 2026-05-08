@@ -30,12 +30,12 @@ SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 # Severidades >= MEDIA exigem reforma > 0. NENHUMA/LEVE/desconhecido podem ter R$ 0.
 _SEVERIDADES_QUE_EXIGEM_REFORMA = {"media", "grave", "estrutural"}
 
-# Limite acima do qual `preco_giro_fipe` (= webmotors_mediana × f_km) começa a
-# ficar suspeito. Por construção pode chegar a ~1.115×FIPE no fallback
-# `webmotors_mediana = FIPE × 0.97` somado a `f_km = 1.15` (km do lote MUITO
-# abaixo da mediana). Acima de 1.10 = combinação otimista das duas premissas
-# rodando ao mesmo tempo — sinal pra checar a entrada de Webmotors live ou km
-# do mercado. Não é bug matemático, é dado fraco.
+# Limite acima do qual `preco_giro_fipe` (= FIPE × f_km × 0.95 desde refactor
+# FIPE-only de 2026-05-08) começa a ficar suspeito. Max teórico hoje é
+# `FIPE × 1.15 × 0.95 = 1.0925×FIPE`, então este threshold em 1.10 só dispara
+# se alguém reativar mediana no precificador OU passar f_km > 1.157 (impossível
+# pelo clamp). Funciona como guard de regressão — se o check disparar em
+# produção saudável, é porque mexeram no precificador sem cap.
 _PRECO_GIRO_FIPE_RATIO_MAX = 1.10
 
 
@@ -91,14 +91,12 @@ CHECKS: Dict[str, Validator] = {
     # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
     # de scraping/cache do client FIPE.
     #
-    # Cross-field: `preco_giro_fipe` é a âncora de revenda (webmotors_mediana × f_km).
-    # Por construção fica próximo de FIPE — quando AA "Talvez se interesse" não
-    # tem dados, fallback é FIPE × 0.97; quando tem, é mediana de similares (que
-    # historicamente bate em ±15% da FIPE). Divergência grande sinaliza:
-    #  - mediana de similares poluída (regex pegou R$ de outras seções, ver
-    #    `_extrai_precos_similares` em parsers.py)
-    #  - FIPE da consulta cacheada está stale ou veio de marca/modelo errado
-    #  - f_km saturado (lote km muito acima/abaixo da mediana real do mercado)
+    # Cross-field: `preco_giro_fipe` é `FIPE × f_km × 0.95` desde refactor
+    # FIPE-only de 2026-05-08. Pelo clamp do f_km ∈ [0.75, 1.15], o ratio
+    # máximo natural é 1.0925. Threshold _PRECO_GIRO_FIPE_RATIO_MAX = 1.10 só
+    # dispara se alguém reintroduzir mediana sem cap ou bypass do clamp —
+    # vira guard de regressão. Pré-refactor a fórmula era mediana × f_km com
+    # cap 1.20×FIPE, e este check existia pra detectar mediana inflada.
     # Threshold ±25% é largo de propósito: f_km contribui no máximo ±15%,
     # então gap >25% praticamente exige outra fonte de erro.
     "FIPE (R$)": lambda v, r: (
@@ -118,6 +116,15 @@ CHECKS: Dict[str, Validator] = {
             )
             else None
         )
+    ),
+    # Mediana de mercado é coluna informativa (refactor FIPE-only de 2026-05-08).
+    # Não entra no cálculo do Lance Máximo. Aceita "—" (registros antigos com
+    # NULL ou avaliações sem similares + sem FIPE pra fallback). Quando presente,
+    # deve ser inteiro positivo — zero/negativo indicaria bug do AvaliadorMercado.
+    "Mediana mercado (R$)": lambda v, r: (
+        "Mediana de mercado não-positiva — bug do AvaliadorMercado (similares + fallback FIPE×0.97 deveriam dar valor > 0)"
+        if isinstance(v, (int, float)) and v <= 0
+        else None
     ),
     # Threshold de 500% calibrado contra benchmark real do operador (Reinaldo:
     # 21 carros, ~60-75% anual; Polo Track: 21% em 7m). ROI > 500% num negócio
@@ -189,6 +196,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
+    "Mediana mercado (R$)": lambda r: r.get("webmotors_mediana") if r.get("webmotors_mediana") else "—",
     "ROI anualizado (%)": lambda r: r["roi_anualizado"] if r["viavel"] else "—",
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—") if r["viavel"] else "—",
     "Reforma (R$)": lambda r: r["reforma_estimada"],
@@ -281,6 +289,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "fipe": av.fipe,
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
+            "webmotors_mediana": av.webmotors_mediana,
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
             "score_roi": av.score_roi,
             "dias_giro": av.dias_giro_estimado,
@@ -354,14 +363,14 @@ def _check_columns(row: Dict[str, Any]) -> List[CheckResult]:
 
 
 def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> List[CheckResult]:
-    """preco_giro > FIPE × 1.10 sinaliza f_km saturando ou mediana inflada.
+    """preco_giro > FIPE × 1.10 sinaliza regressão pra fórmula antiga.
 
-    Por construção, preco_giro = webmotors_mediana × f_km. webmotors_mediana
-    pode ser FIPE × 0.97 (fallback) ou similares Auto Avaliar. f_km tem cap
-    1.15 (lote com km muito baixa). No pior caso teórico: 0.97 × 1.15 =
-    1.1155 — chega na borda mas não passa muito. Quando passa, geralmente
-    a mediana já vem inflada (similares premium dominando) ou f_km está
-    saturado num caso onde o lote real não é tão raro.
+    Refactor FIPE-only de 2026-05-08: preco_giro = FIPE × f_km × 0.95, com
+    f_km ∈ [0.75, 1.15] → max ratio = 1.0925×FIPE. Em produção saudável este
+    check NUNCA dispara. Mantido como guard de regressão: se aparecer, é
+    porque alguém reintroduziu webmotors_mediana no cálculo OU bypass do
+    clamp do f_km. Antes do refactor, era detector de mediana inflada
+    (similares poluídos do Auto Avaliar saturando 1.20×FIPE).
     """
     pg = row.get("preco_giro")
     fipe = row.get("fipe")

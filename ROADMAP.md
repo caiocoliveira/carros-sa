@@ -4,7 +4,26 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 423/423 testes passando
+✅ **Fundação + EstimadorReforma** — 432/432 testes passando
+
+### BB — Refactor FIPE-only no precificador + coluna "Mediana mercado" (2026-05-08) ✅
+- **Branch:** `claude/add-fipe-price-column-9mvUa`
+- **Motivação:** Operador relatou 4 carros do screenshot (Airtrek 2008, Tiggo 2.0 2015, Ka 1.0 2020, Argo 1.0 2019) com `Lance Máximo > FIPE` na planilha. Simulação algébrica confirmou: 3 caps em série (n<5 no avaliador → 1.20×FIPE no precificador → 1.05×FIPE no audit) tentavam consertar similares poluídos do Auto Avaliar (Tiggo 7 vs Tiggo 2, Airtrek vs Outlander, Ka descontinuado vs seminovos europeus) — band-aids reativos sobre fonte de ruído estrutural. Como Webmotors live ainda não está conectado (workstream G), `webmotors_mediana` era na prática `FIPE × 0.97` com ruído — sistema já era FIPE-driven mascarado.
+- **Decisão arquitetural:** simplificar pra **FIPE-only**:
+  - `preco_giro_fipe = FIPE × f_km × 0.95` (era `webmotors_mediana × f_km` com cap 1.20×FIPE)
+  - `preco_giro_aa = None` sempre (campo de referência apenas, não no cálculo)
+  - `webmotors_mediana` continua persistido em `Avaliacao` pra display
+  - Removidos os 2 caps no precificador (`_PRECO_GIRO_FIPE_TETO_PCT_FIPE` e o cap n<5 redundância) — fórmula nova torna `preco_max > FIPE` matematicamente inviável (max teórico = `FIPE × 1.15 × 0.95 × 0.90 ≈ 0.98 × FIPE`)
+  - Cap n<5 no `avaliador_mercado.py` mantido (limpa o display da mediana)
+- **Display:** nova coluna `Mediana mercado (R$)` na planilha entre FIPE e Lucro/mês — operador vê FIPE × Mediana × Lance Atual lado a lado pra contextualizar a decisão da máquina. Glossário atualizado.
+- **Trade-off conhecido:** modelos premium (Civic/Corolla) que de fato vendem ~108% FIPE em alta perdem o uplift que `webmotors_mediana` daria. Calibração mais conservadora em troca de eliminação categórica do bug "Lance Máximo > FIPE". Quando Webmotors live conectar (workstream G), reativar mediana com cap mais apertado.
+- **Cobertura:** 4 testes guard novos (`test_lance_maximo_nunca_excede_fipe_em_uberlandia_sem_dano` parametrizado nos 4 carros do screenshot) + atualização de 7 testes que assumiam fórmula antiga + nova suite `test_preco_giro_fipe_independe_de_mediana_inflada` e `test_preco_giro_fipe_eh_fipe_vezes_fkm_vezes_095`. **Total: 432/432 verde** (eram 429).
+- **Limitações conhecidas:**
+  - `auto_avaliar_ref` em `SinalMercado` continua exposto no schema mas não usado em nenhum cálculo. Considerado contrato (models.py) — mantido pra future re-ativação.
+  - Coluna "Mediana mercado" mostra `FIPE × 0.97` (fallback) na maioria das linhas até Webmotors live ligar. Operador precisa contextualizar.
+- **Follow-ups:**
+  - Quando workstream G ligar Webmotors live, redesenhar a ponderação `FIPE × β + mediana × (1−β)` com `β` variando por `n_anuncios_competidores` (sample size).
+  - Considerar deprecar `preco_giro_aa` no schema (atualmente sempre None) — exige coordenação multi-sessão (contrato em models.py).
 
 ### AA — Audit cross-checks independentes + reforma pesada (2026-05-08) ✅
 - **Branch:** `claude/sleepy-wright-0eJhG`

@@ -144,8 +144,14 @@ Por construção: `preco_max + reforma + frete + taxas_max + custo_op = preco_gi
 ### Lucro absoluto exato — fórmula fechada
 `score_roi = lucro / capital_alvo` ⇒ `capital_alvo = preco_giro / (1 + score_roi)` ⇒ `lucro_absoluto = preco_giro × score_roi / (1 + score_roi)`. Não use `score_roi × preco_alvo` como aproximação — subestima ~10% porque `capital_alvo > preco_alvo` (engloba reforma/frete/taxas/custo_op). Helper canônico em `sheets._lucro_absoluto_no_alvo`.
 
-### Naming hint — `preco_giro_fipe`
-O campo `preco_giro_fipe` em `Avaliacao`/`AvaliacaoLote` é literalmente `webmotors_mediana × f_km`, NÃO `min(FIPE × 0.95, webmotors_p25)`. Quando Webmotors live ainda não está conectado, `webmotors_mediana` é populado pelo `AvaliadorMercado` como `FIPE × 0.97` (ver `agents/avaliador_mercado.py:134`). Daí o nome ser inerte: a fonte primária é a mediana de mercado, com fallback indireto pra FIPE. `webmotors_p25` é exposto em `SinalMercado` mas hoje **não é consumido** pelo precificador (versão antiga usava). Não renomear o campo persistido sem coordenar — é contrato (models.py).
+### Refactor FIPE-only no precificador (2026-05-08)
+`preco_giro_fipe = FIPE × f_km × 0.95` desde 2026-05-08. Antes era `webmotors_mediana × f_km` com 3 caps em série (n<5 no avaliador → 1.20×FIPE no precificador → 1.05×FIPE no audit) tentando consertar similares poluídos do Auto Avaliar (Tiggo 7 vs Tiggo 2, Airtrek vs Outlander, Ka descontinuado). Como Webmotors live não está conectado (workstream G), `webmotors_mediana` era `FIPE × 0.97` na prática — sistema já era FIPE-driven mascarado por camadas de incerteza. Refactor matou os 2 caps redundantes; cap n<5 no `avaliador_mercado.py` mantido só pra limpar display da mediana (não afeta cálculo).
+
+`preco_giro_aa` agora é sempre `None`. `webmotors_mediana` continua persistido em `Avaliacao`/`AvaliacaoLote` pra display na nova coluna **"Mediana mercado (R$)"** da planilha (entre FIPE e Lucro/mês). Operador vê FIPE × Mediana × Lance Atual lado a lado pra contextualizar.
+
+**Por construção `preco_max < FIPE`** em qualquer cenário (max teórico = `FIPE × 1.15 × 0.95 × 0.90 ≈ 0.98 × FIPE`). Audit threshold 1.05×FIPE mantido como guard de regressão. **Não renomear campos persistidos** — contratos (models.py).
+
+Quando workstream G ligar Webmotors live, redesenhar como `FIPE × β + mediana × (1−β)` com `β` variando por `n_anuncios_competidores` (sample size).
 
 ### Antes de mexer em precificador / sheets / cli, rodar `make test` com olhos abertos
 Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_columns.py::test_roi_absurdo_reportado` são guard-rails das fórmulas — qualquer mudança que quebrá-los provavelmente está reintroduzindo um dos bugs anteriores (ROI tautológico ou lucro subestimado).

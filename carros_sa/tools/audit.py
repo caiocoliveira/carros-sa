@@ -76,40 +76,16 @@ CHECKS: Dict[str, Validator] = {
     "Lance Atual (R$)": lambda v, r: (
         "Lance atual negativo" if v is not None and v < 0 else None
     ),
+    # Sanidade de coluna individual: lote 'Viável' tem que ter teto positivo. Os
+    # cross-checks (zona apertada, preco_max > FIPE, preco_alvo > preco_max) vivem
+    # em `ALL_CHECKS` como funções independentes — assim múltiplos sintomas na
+    # MESMA linha emergem juntos (antes o if/elif encadeado escondia red flags
+    # atrás de yellow flags: zona apertada coexistindo com preco_max > FIPE
+    # mostrava só o 1º).
     "Lance Máximo (R$)": lambda v, r: (
         "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
         if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
-        else (
-            # Cross-check: preco_alvo > preco_max é violação por construção.
-            # `margem_aplicada >= margem.minima_absoluta` ⇒ `preco_alvo ≤ preco_max`
-            # sempre. Se inverteu, há bug ou dado corrompido (round-off não causa
-            # isso porque ambos usam o mesmo `int(round(...))` truncation).
-            f"preco_alvo R$ {r.get('preco_alvo')} > Lance Máximo R$ {v} — viola identidade do precificador"
-            if v is not None and r.get("preco_alvo") is not None and r["preco_alvo"] > v
-            else (
-                # Zona apertada: lance_atual já passou do alvo (entrada acima da
-                # margem calibrada) mas ainda cabe no teto. ROI/Lucro/mês exibidos
-                # devem usar `_score_roi_efetivo` — caso contrário, número otimista.
-                # Sinaliza pro operador que a folga é só pra margem mínima.
-                f"Zona apertada: lance_atual R$ {r.get('lance_atual')} > preco_alvo R$ {r.get('preco_alvo')} (Lance Máximo R$ {v}) — ROI realista < ROI alvo"
-                if (
-                    v is not None and r.get("preco_alvo") is not None
-                    and r.get("lance_atual") is not None
-                    and r["lance_atual"] > r["preco_alvo"]
-                    and r["lance_atual"] <= v
-                )
-                else (
-                    # Sanidade de cabeça: por construção `preco_max ≤ preco_giro × (1−margem_min)`
-                    # < FIPE, tirando casos extremos (km do lote MUITO abaixo da mediana de
-                    # mercado → f_km próximo do teto 1.15). Lance Máximo > FIPE × 1.05 é
-                    # red flag — indica dado desalinhado (FIPE errada, mediana inflada,
-                    # f_km saturado num caso onde não devia).
-                    f"Lance Máximo R$ {v} > FIPE × 1.05 (FIPE={r.get('fipe')}) — checar âncora de revenda"
-                    if v is not None and r.get("fipe") and v > int(r["fipe"] * 1.05)
-                    else None
-                )
-            )
-        )
+        else None
     ),
     # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
     # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
@@ -418,6 +394,82 @@ def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> List[CheckResult]:
     return []
 
 
+def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
+    """`lance_atual > preco_alvo` mas ainda `≤ preco_max` — entrada acima da
+    margem calibrada. ROI/Lucro/mês exibidos usam `_score_roi_efetivo` (já
+    descontado), mas o aviso lembra o operador de que a folga é só pra margem
+    mínima absoluta — não pra a margem-alvo.
+    """
+    preco_max = row.get("preco_max")
+    preco_alvo = row.get("preco_alvo")
+    lance_atual = row.get("lance_atual")
+    if (
+        preco_max is None or preco_alvo is None or lance_atual is None
+        or preco_max <= 0
+    ):
+        return []
+    if lance_atual > preco_alvo and lance_atual <= preco_max:
+        return [(
+            "Lance Máximo (R$)",
+            f"Zona apertada: lance_atual R$ {lance_atual} > preco_alvo R$ {preco_alvo} "
+            f"(Lance Máximo R$ {preco_max}) — ROI realista < ROI alvo",
+            preco_max,
+        )]
+    return []
+
+
+def _check_lance_maximo_acima_fipe(row: Dict[str, Any]) -> List[CheckResult]:
+    """`Lance Máximo > FIPE × 1.05` é red flag econômico.
+
+    Por construção `preco_max ≤ preco_giro × (1 − margem.minima_absoluta)` —
+    chega na FIPE só com f_km saturado a 1.15 + margem mínima MUITO baixa
+    (≤10%). Quando passa, sinaliza dado quebrado: FIPE stale, mediana de
+    similares poluída ou cap defensivo do precificador (1.20×FIPE) batendo
+    com mediana inflada legítima (Webmotors n≥5 sem cap em avaliador). É
+    independente da zona apertada — pode coexistir e ambos devem aparecer.
+    """
+    preco_max = row.get("preco_max")
+    fipe = row.get("fipe")
+    if not preco_max or not fipe or preco_max <= 0:
+        return []
+    if preco_max > int(fipe * 1.05):
+        return [(
+            "Lance Máximo (R$)",
+            f"Lance Máximo R$ {preco_max} > FIPE × 1.05 (FIPE={fipe}) — checar âncora de revenda",
+            preco_max,
+        )]
+    return []
+
+
+def _check_reforma_pesada(row: Dict[str, Any]) -> List[CheckResult]:
+    """Reforma > 30% do preco_giro num lote 'Viável' = lote economicamente
+    questionável.
+
+    Tecnicamente o precificador já desconta a reforma do preco_max e a margem
+    aplicada continua respeitada — então o lote passa como 'Viável'. Mas
+    operacionalmente, gastar R$10k+ em reforma pra revender um carro de R$30k
+    significa: (a) capital empatado por mais tempo, (b) risco de surpresa na
+    oficina (estimativa subestima o real), (c) revenda mais difícil porque
+    histórico de avaria assusta comprador. Dispara só pra lote viável — em
+    inviáveis o display já suprime tudo, audit acompanha.
+    """
+    if not row.get("viavel"):
+        return []
+    reforma = row.get("reforma_estimada")
+    preco_giro = row.get("preco_giro")
+    if not reforma or not preco_giro or preco_giro <= 0:
+        return []
+    pct = reforma / preco_giro
+    if pct > 0.30:
+        return [(
+            "Reforma (R$)",
+            f"Reforma R$ {reforma} é {pct:.0%} do preco_giro R$ {preco_giro} — "
+            "lote economicamente questionável (capital de reforma alto vs. revenda)",
+            reforma,
+        )]
+    return []
+
+
 def _check_margem_no_teto(row: Dict[str, Any]) -> List[CheckResult]:
     """Margem efetiva ≥ 49% sinaliza fatores risco × liquidez perto do teto.
 
@@ -444,6 +496,9 @@ ALL_CHECKS: List[CheckFn] = [
     _check_columns,
     _check_preco_giro_acima_fipe,
     _check_preco_alvo_gt_preco_max,
+    _check_zona_apertada,
+    _check_lance_maximo_acima_fipe,
+    _check_reforma_pesada,
     _check_margem_no_teto,
 ]
 

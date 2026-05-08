@@ -6,6 +6,24 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ✅ **Fundação + EstimadorReforma** — 423/423 testes passando
 
+### AA — Audit cross-checks independentes + reforma pesada (2026-05-08) ✅
+- **Branch:** `claude/sleepy-wright-0eJhG`
+- **Motivação:** Revisão preventiva diária. Simulação algébrica de 6 cenários (gold Polo Track, km saturando teto/piso, ESTRUTURAL conf 0.5, mediana inflada 1.20×FIPE, zona apertada) expôs duas falhas residuais.
+- **Bugs encontrados e corrigidos:**
+  1. **Audit `Lance Máximo (R$)` usava if/elif encadeado** — só o primeiro motivo aparecia. Cenário patológico: lote com `lance_atual > preco_alvo` (zona apertada, yellow) + `preco_max > FIPE × 1.05` (red flag, indica dado quebrado) disparava SÓ o yellow — operador via amarelo e ignorava enquanto se preparava pra dar lance acima da FIPE. Refatorado em 3 funções independentes em `ALL_CHECKS` (`_check_zona_apertada`, `_check_lance_maximo_acima_fipe`, `_check_preco_alvo_gt_preco_max` — esta já existia). Múltiplos sintomas na mesma linha emergem juntos. Padrão registrado em LESSONS.md/P5d.
+  2. **Audit não tinha check pra reforma pesada** — `reforma_estimada > 30% × preco_giro` em lote viável é sinal de lote economicamente questionável (capital empatado em reforma alto vs. revenda; surpresa na oficina pode tornar o investimento inviável post-hoc). Mesmo com margem aprovada pelo precificador, é red flag operacional. Adicionado `_check_reforma_pesada` em `ALL_CHECKS`. Suprimido em lotes inviáveis (paridade com display).
+- **Análise das colunas (resposta direta às perguntas do usuário, 6 cenários):**
+  - **Lance Máximo > FIPE?** Não em condições normais. Cenário 5 simulado (mediana=1.20×FIPE, f_km=1.0) produz preco_max em 101.9% FIPE — dentro do cap defensivo do precificador (1.20) MAS audit agora avisa explicitamente como red flag separado.
+  - **`preco_giro_fipe` muito diferente de FIPE?** Cenário 2 (km baixíssima, f_km=1.15) produz 111.7% FIPE → audit dispara `> FIPE × 1.10`. Cenário 3 (km alta, f_km=0.75) produz 73.3% FIPE → ok.
+  - **Linha-a-linha (6 cenários):** identidades algébricas confirmadas. Lucro absoluto exato bate com helper `_lucro_absoluto_no_alvo` em todos os 6. `_score_roi_efetivo` cai pra negativo em lote inviável (cenário 4 ESTRUTURAL: -6%) e display suprime corretamente.
+- **Cobertura:** 6 testes novos (`TestAuditChecksIndependentes` com 3 + `TestAuditReformaPesada` com 3). **Total: 429/429 verde** (eram 423).
+- **Limitações conhecidas:**
+  - Threshold 30% pra reforma pesada é heurístico; calibrar com histórico real Arrematado quando tiver ≥10 vendas com `gastos_reforma_real`.
+  - Audit ainda NÃO espelha `laudo_analisado=False` (confidence < 0.6) — display oculta Reforma/Lance Máximo nesses lotes mas audit lê valores persistidos. Paridade incompleta. Follow-up registrado.
+- **Follow-ups:**
+  - Espelhar `laudo_analisado` no `audit._build_rows` — paridade total com sheets (toda supressão de display deve refletir no audit, padrão LESSONS.md/P5c).
+  - Avaliar threshold reforma pesada com histórico real (calibrar com Arrematado).
+
 ### Z — Hardening operacional + refactor audit (2026-05-07) ✅
 - **PRs:** #55, #56, #57, #58, #59, #60 (sequência consolidada num único dia)
 - **Motivação:** revisão preventiva do workflow CI + caça a silent failures (RC3 do LESSONS) após primeiro run real chegar a 3h+ e quebrar no `Persiste DB`.

@@ -2,9 +2,8 @@
 
 Fórmula efetiva (espelha o código abaixo):
     f_km             = fator_km(km_lote, webmotors_km_mediana)            # ∈ [0.75, 1.15]
-    preco_giro_fipe  = webmotors_mediana × f_km
-    preco_giro_aa    = min(auto_avaliar_ref, webmotors_mediana) × f_km    # só se auto_avaliar_ref
-    preco_giro       = min(preco_giro_fipe, preco_giro_aa)                # consolidado, mais conservador
+    preco_giro_fipe  = FIPE × f_km × 0.95                                 # âncora única
+    preco_giro       = preco_giro_fipe                                    # FIPE-only desde 2026-05-08
     margem_min       = margem_base × fator_risco × fator_liquidez
     preco_alvo_lance = (preco_giro − reforma − frete − custo_op − margem_min×preco_giro − taxa_fixa)
                       / (1 + taxa_pct)
@@ -12,24 +11,26 @@ Fórmula efetiva (espelha o código abaixo):
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
 
-Sobre as duas âncoras:
-- `webmotors_mediana` é a fonte primária de revenda. Quando Webmotors live ainda
-  não está conectado (workstream G), o AvaliadorMercado a preenche como
-  `FIPE × 0.97` (ver `agents/avaliador_mercado.py`). Daí o nome `preco_giro_fipe`
-  não é literal: é a âncora de mediana (com fallback indireto pra FIPE).
-  `webmotors_p25` é exposto em `SinalMercado` mas hoje NÃO é usado no precificador
-  (versões anteriores usavam `min(FIPE×0.95, p25)`; a fórmula evoluiu).
-- Tabela Auto Avaliar só está disponível quando o lote (ou um lote histórico do
-  mesmo modelo) trouxe a "ULTIMA AVALIAÇÃO" embutida. Reflete atacado real e
-  costuma ser mais baixo que FIPE — daí usarmos o menor dos dois como preço
-  de giro consolidado.
+Sobre a âncora única (FIPE × 0.95):
+- FIPE é tabulada com base em revenda de seminovos em concessionária. Loja
+  pequena vende com leve desconto vs FIPE em condições normais — daí o ajuste
+  conservador de 0.95.
+- `webmotors_mediana` e `auto_avaliar_ref` continuam exibidos na planilha como
+  REFERÊNCIA informativa (col "Mediana mercado"), mas NÃO entram no cálculo.
+  Operador vê os dois sinais lado a lado e contextualiza a decisão da máquina.
+- Histórico: até 2026-05-08 o âncora era `webmotors_mediana × f_km` com 3 caps
+  em série tentando consertar similares poluídos do Auto Avaliar (Tiggo 7 vs
+  Tiggo 2, Airtrek vs Outlander, Ka descontinuado). Como Webmotors live ainda
+  não está conectado (workstream G), `webmotors_mediana` era na prática
+  `FIPE × 0.97` com ruído — o sistema já era FIPE-driven mascarado. Refactor
+  removeu mediana do cálculo e deixou os 2 sinais de mercado como display.
+- `webmotors_p25` continua em `SinalMercado` mas não é consumido (legado).
 
 Invariantes esperados (validados pelo audit):
 - `preco_max ≤ preco_giro × (1 − margem_min)` por construção (resolve a circularidade
   da taxa de leilão).
-- `preco_max < FIPE` em condições normais. Pode ficar perto/acima de FIPE só em
-  cenários extremos: f_km no teto (km do lote << km mediana de mercado) somado a
-  custos baixos; alerta no audit captura isso.
+- `preco_giro_fipe / FIPE ≤ 1.15` (máximo do f_km) → `preco_max < FIPE` mesmo
+  com custos zero. Inviável Lance Máximo > FIPE no design FIPE-only.
 """
 
 from __future__ import annotations
@@ -116,32 +117,31 @@ def precificar(
     Não decide se lance atual é aceitável — só retorna o target. Orquestrador
     compara `lote.lance_atual` vs `avaliacao.preco_alvo` pra descartar.
     """
-    # 1. Preço de venda âncora — usamos a mediana de mercado como estimativa de
-    #    revenda (usuário confirmou que vende próximo da FIPE; mediana fallback=97%).
-    #    Quando Webmotors (workstream B) chegar, webmotors_mediana terá dado real.
-    #    Auto Avaliar ref: preço de referência da própria plataforma quando disponível.
-    #    fator_km calibra a âncora pela km do lote vs km mediana do mercado:
-    #    lote com km acima da mediana → fator < 1 → preço-alvo cai.
+    # 1. Preço de venda âncora — FIPE como única fonte primária, ajustada por km
+    #    do lote vs km mediana de mercado. FIPE × 0.95 reflete o desconto típico
+    #    da revenda em loja pequena (a tabela é calibrada com concessionária).
+    #
+    #    Histórico do design: até 2026-05-08 a âncora era `webmotors_mediana × f_km`
+    #    com cap n<5 no avaliador (1.20×FIPE) + cap final no precificador
+    #    (1.20×FIPE). A "mediana" vinha de `similares_precos` extraídos do
+    #    Auto Avaliar — mas frequentemente era poluída por outliers categóricos
+    #    (Tiggo 7 entre Tiggo 2, Airtrek entre Outlander, Ka descontinuado vs
+    #    seminovos europeus) e elevava o lance máximo acima da FIPE. Os 3 caps
+    #    em série mascaravam a fonte do ruído sem removê-la. Com Webmotors live
+    #    ainda não conectado (workstream G), `webmotors_mediana` era literalmente
+    #    `FIPE × 0.97` em maior parte dos casos — então o sistema já era
+    #    FIPE-driven, só com camadas extras de incerteza.
+    #
+    #    `webmotors_mediana` e `auto_avaliar_ref` continuam persistidos em
+    #    `Avaliacao` como campos de REFERÊNCIA exibidos na planilha (col
+    #    "Mediana mercado") — operador vê os dois lado a lado, sistema decide
+    #    com FIPE. Quando workstream G ligar Webmotors live, reativa-se a
+    #    mediana com ponderação dependente de `n_anuncios_competidores`.
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
-    preco_giro_fipe = int(round(mercado.webmotors_mediana * f_km))
-    # Cap defensivo: cap mediana similares (1.20×FIPE quando n<5) + f_km no
-    # teto (1.15) podiam multiplicar pra 1.38×FIPE — lance proposto saía
-    # acima da FIPE em casos com Webmotors live (futuro) ou amostras n≥5
-    # totalmente erradas. 1.20×FIPE preserva o caso legítimo de modelo que
-    # vende premium (Civic/Corolla ~110% FIPE em alta) mas evita combinação
-    # patológica de duas otimizações em série. Audit em 1.10 continua avisando
-    # como sinal cedo; cap em 1.20 limita o estrago no preço-alvo.
-    _PRECO_GIRO_FIPE_TETO_PCT_FIPE = 1.20
-    teto_fipe = int(mercado.fipe * _PRECO_GIRO_FIPE_TETO_PCT_FIPE)
-    preco_giro_fipe = min(preco_giro_fipe, teto_fipe)
-    preco_giro_aa: Optional[int] = None
-    if mercado.auto_avaliar_ref is not None:
-        preco_giro_aa = int(round(
-            min(mercado.auto_avaliar_ref, mercado.webmotors_mediana) * f_km
-        ))
-    # Consolidado = o mais conservador entre os dois (mais baixo preço de giro
-    # => preço-alvo de lance também mais baixo => decisão mais cautelosa).
-    preco_giro = min(preco_giro_fipe, preco_giro_aa) if preco_giro_aa is not None else preco_giro_fipe
+    _AJUSTE_FIPE_REVENDA = 0.95
+    preco_giro_fipe = int(round(mercado.fipe * f_km * _AJUSTE_FIPE_REVENDA))
+    preco_giro_aa: Optional[int] = None  # campo de referência apenas
+    preco_giro = preco_giro_fipe
 
     # 2. Fatores
     fator_risco = calcular_fator_risco(laudo, empresa.fator_risco_bounds)
@@ -218,9 +218,8 @@ def precificar(
             f"km_mercado={mercado.webmotors_km_mediana})"
         )
     justificativa = (
-        f"preco_giro=R${preco_giro} (fipe={preco_giro_fipe}"
-        f"{f', aa={preco_giro_aa}' if preco_giro_aa is not None else ''}){km_txt} "
-        f"(FIPE={mercado.fipe}{aa_txt}, WM_p25={mercado.webmotors_p25}) "
+        f"preco_giro=R${preco_giro} (FIPE×0.95×f_km){km_txt} "
+        f"(FIPE={mercado.fipe}{aa_txt}, WM_med={mercado.webmotors_mediana} ref) "
         f"reforma=R${reforma.custo_total} frete=R${frete_incluso} "
         f"taxas≈R${taxas_leilao_max} ({taxa_desc}) op=R${custo_op} "
         f"margem={margem_aplicada:.1%} (risco={fator_risco:.2f}, liq={fator_liquidez:.2f})"

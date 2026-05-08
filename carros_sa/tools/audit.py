@@ -119,6 +119,15 @@ CHECKS: Dict[str, Validator] = {
             else None
         )
     ),
+    # Mediana de mercado é coluna informativa (refactor FIPE-only de 2026-05-08).
+    # Não entra no cálculo do Lance Máximo. Aceita "—" (registros antigos com
+    # NULL ou avaliações sem similares + sem FIPE pra fallback). Quando presente,
+    # deve ser inteiro positivo — zero/negativo indicaria bug do AvaliadorMercado.
+    "Mediana mercado (R$)": lambda v, r: (
+        "Mediana de mercado não-positiva — bug do AvaliadorMercado (similares + fallback FIPE×0.97 deveriam dar valor > 0)"
+        if isinstance(v, (int, float)) and v <= 0
+        else None
+    ),
     # Threshold de 500% calibrado contra benchmark real do operador (Reinaldo:
     # 21 carros, ~60-75% anual; Polo Track: 21% em 7m). ROI > 500% num negócio
     # de leilão de carros é matematicamente possível mas operacionalmente irreal
@@ -189,6 +198,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"],
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
+    "Mediana mercado (R$)": lambda r: r.get("webmotors_mediana") if r.get("webmotors_mediana") else "—",
     "ROI anualizado (%)": lambda r: r["roi_anualizado"] if r["viavel"] else "—",
     "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—") if r["viavel"] else "—",
     "Reforma (R$)": lambda r: r["reforma_estimada"],
@@ -281,6 +291,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "fipe": av.fipe,
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
+            "webmotors_mediana": av.webmotors_mediana,
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
             "score_roi": av.score_roi,
             "dias_giro": av.dias_giro_estimado,

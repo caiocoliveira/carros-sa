@@ -43,6 +43,7 @@ HEADER = [
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
     "FIPE (R$)",
+    "Mediana mercado (R$)",
     "Lucro/mês (R$)",
     "ROI anualizado (%)",
     "Reforma (R$)",
@@ -65,6 +66,7 @@ COLUMN_FORMATS = {
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
     "FIPE (R$)": _NUMBER_INTEIRO,
+    "Mediana mercado (R$)": _NUMBER_INTEIRO,
     "Lucro/mês (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
@@ -360,6 +362,13 @@ class SheetsExporter:
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
                 "fipe": av.fipe,
+                # Mediana de mercado é REFERÊNCIA — não entra no cálculo do
+                # Lance Máximo desde o refactor FIPE-only (2026-05-08). Origem:
+                # similares do Auto Avaliar quando disponíveis, fallback FIPE×0.97
+                # quando o lote não trouxe similares. Workstream G (Webmotors live)
+                # vai substituir por dado real. Operador compara FIPE vs mediana
+                # vs Lance Atual lado a lado pra contextualizar.
+                "webmotors_mediana": av.webmotors_mediana,
                 "roi_anualizado": round(roi_anual, 1),
                 "lucro_mes": lucro_mes,
                 "reforma_estimada": av.reforma_estimada,
@@ -495,6 +504,11 @@ class SheetsExporter:
             # estar com fipe=NULL; nesses casos cai pro placeholder).
             fipe_cell = r["fipe"] if r["fipe"] is not None else "—"
 
+            # Mediana de mercado: referência informativa lado a lado com FIPE.
+            # Não depende do laudo (sinal de mercado externo). Sempre exibe
+            # quando persistido. Em registros antigos (NULL) cai pro placeholder.
+            mediana_cell = r["webmotors_mediana"] if r.get("webmotors_mediana") else "—"
+
             sheet_rows.append([
                 rank,
                 situacao,
@@ -507,6 +521,7 @@ class SheetsExporter:
                 r["lance_atual"],
                 preco_max_cell,
                 fipe_cell,
+                mediana_cell,
                 lucro_mes_cell,
                 roi_anual_cell,
                 reforma_cell,
@@ -707,14 +722,20 @@ class SheetsExporter:
             [
                 "Lance Máximo (R$)",
                 "Precificador",
-                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo. Audit dispara checks INDEPENDENTES (podem coexistir na mesma linha): (a) zona apertada — lance_atual > preco_alvo mas ≤ preco_max (entrada acima da margem calibrada, ROI realista < ROI alvo); (b) Lance Máximo > FIPE × 1.05 — red flag econômico (FIPE stale ou mediana inflada); (c) preco_alvo > preco_max — viola identidade do precificador (bug). Antes de 2026-05-08 esses 3 motivos eram if/elif encadeado e só o 1º aparecia — agora os 3 emergem juntos.",
-                "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
+                "(preco_giro − reforma − frete − custo_op − margem_min×giro − taxa_fixa) ÷ (1 + taxa_pct). preco_giro = FIPE × f_km × 0.95 (refactor FIPE-only de 2026-05-08). Equação resolve circularidade da taxa proporcional cobrada sobre o lance vencedor. Já embute reforma, frete, FIPE e fator de risco do laudo. Audit dispara checks INDEPENDENTES (podem coexistir na mesma linha): (a) zona apertada — lance_atual > preco_alvo mas ≤ preco_max (entrada acima da margem calibrada, ROI realista < ROI alvo); (b) Lance Máximo > FIPE × 1.05 — red flag (manteve threshold de defesa em camadas; design FIPE-only torna inviável bater FIPE, mas mantemos o check pra detectar regressão); (c) preco_alvo > preco_max — viola identidade do precificador (bug).",
+                "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário. Por construção FIPE-only, sempre fica abaixo da FIPE.",
             ],
             [
                 "FIPE (R$)",
                 "API FIPE (cache `modelo_fipe_cache`)",
                 "Valor da Tabela FIPE pra (marca, modelo, ano) consultado no momento da avaliação. Persistido em `avaliacao_lote.fipe` pra não depender de re-consulta. '—' em registros pré-workstream K (NULL).",
-                "Âncora bruta de mercado pro operador comparar lance atual e máximo contra a referência pública. Não depende do laudo.",
+                "Âncora ÚNICA do precificador desde 2026-05-08 (refactor FIPE-only). preco_giro = FIPE × f_km × 0.95. Antes era `webmotors_mediana × f_km` com 3 caps em série tentando consertar similares poluídos do Auto Avaliar — bugs categóricos persistiam (Tiggo 7 entre Tiggo 2, Airtrek vs Outlander, Ka descontinuado). FIPE-only mata categoricamente Lance Máximo > FIPE.",
+            ],
+            [
+                "Mediana mercado (R$)",
+                "Auto Avaliar (similares do anúncio) ou fallback FIPE×0.97",
+                "Mediana dos preços de 'Talvez se interesse por' do Auto Avaliar quando o lote traz similares. Quando não traz, fallback FIPE×0.97. Persistido em `avaliacao_lote.webmotors_mediana` pra display. Em registros antigos (NULL) mostra '—'. Cap n<5 em FIPE×1.20 (avaliador_mercado.py) reduz outliers categóricos no display, mas a coluna pode ainda divergir da FIPE quando a amostra de similares é boa.",
+                "Sinal de mercado INFORMATIVO — não entra no cálculo de Lance Máximo desde o refactor FIPE-only. Operador compara FIPE × Mediana × Lance Atual lado a lado pra contextualizar a decisão da máquina (ex.: mediana muito acima da FIPE pode indicar similares poluídos no AA — vale conferir manualmente). Workstream G (Webmotors live) substituirá fallback por dado real e a coluna passará a refletir mercado de revenda real.",
             ],
             [
                 "Lucro/mês (R$)",

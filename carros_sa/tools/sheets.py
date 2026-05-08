@@ -44,7 +44,7 @@ HEADER = [
     "Lance Máximo (R$)",
     "FIPE (R$)",
     "Mediana mercado (R$)",
-    "Lucro/mês (R$)",
+    "Lucro (R$)",
     "ROI anualizado (%)",
     "Reforma (R$)",
     "Tese",
@@ -67,7 +67,7 @@ COLUMN_FORMATS = {
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
     "FIPE (R$)": _NUMBER_INTEIRO,
     "Mediana mercado (R$)": _NUMBER_INTEIRO,
-    "Lucro/mês (R$)": _NUMBER_INTEIRO,
+    "Lucro (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
 }
@@ -280,23 +280,18 @@ class SheetsExporter:
 
             viavel = av.preco_max > (lote.lance_atual or 0)
 
-            from carros_sa.agents.calibracao_giro import (
-                lucro_reais_por_mes, roi_anualizado,
-            )
-            # ROI anualizado e Lucro/mês — usam `score_roi_efetivo`, NÃO o
+            from carros_sa.agents.calibracao_giro import roi_anualizado
+            # ROI anualizado e Lucro — usam `score_roi_efetivo`, NÃO o
             # `score_roi` persistido. Diferença: quando `lance_atual > preco_alvo`
             # (zona apertada), o operador real entra acima do alvo e o ROI cai.
             # `score_roi` no DB continua sendo o intrinsic (caso médio no alvo);
             # display vira "ROI realista" considerando o piso de entrada do leilão.
-            # Antes (até 2026-05-03): exibia ROI baseado no alvo mesmo em lotes
-            # onde lance_atual já tinha passado do alvo — número otimista que
-            # sugeria retorno maior do que a entrada real permitiria.
+            # Lucro é absoluto (em R$ no fim da revenda), NÃO normalizado por mês —
+            # operador prefere ver o número total que vai entrar no caixa em vez de
+            # uma fração mensal que depende de `dias_giro_estimado` calibrado.
             score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
             roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
-            lucro_mes = lucro_reais_por_mes(
-                _lucro_absoluto_efetivo(av, lote.lance_atual),
-                av.dias_giro_estimado,
-            )
+            lucro = _lucro_absoluto_efetivo(av, lote.lance_atual)
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
             # Dupla checagem pra cobrir os dois vetores (snapshot velho + detecção
@@ -370,7 +365,7 @@ class SheetsExporter:
                 # vs Lance Atual lado a lado pra contextualizar.
                 "webmotors_mediana": av.webmotors_mediana,
                 "roi_anualizado": round(roi_anual, 1),
-                "lucro_mes": lucro_mes,
+                "lucro": lucro,
                 "reforma_estimada": av.reforma_estimada,
                 "tese": tese_texto,
                 "url": lote.url,
@@ -473,7 +468,7 @@ class SheetsExporter:
             # tenta preencher esses campos na próxima passada.
             if nao_analisado:
                 preco_max_cell = "—"
-                lucro_mes_cell = "—"
+                lucro_cell = "—"
                 roi_anual_cell = "—"
                 reforma_cell = "—"
                 # Tese depende do lance_max pra detectar "ticket acima do teto";
@@ -483,18 +478,18 @@ class SheetsExporter:
             else:
                 preco_max_cell = r["preco_max"]
                 # Em lotes inviáveis (lance atual já passou do nosso teto),
-                # Lucro/mês e ROI anualizado pressupõem comprar pelo preço-ALVO
+                # Lucro e ROI anualizado pressupõem comprar pelo preço-ALVO
                 # — que é menor que o lance atual. Cenário fantasioso. Em lote
                 # estrutural inviável, o score_roi inflado pela margem alta
-                # (~1.0) produz Lucro/mês de R$5k+ e ROI 500%/ano, induzindo o
+                # (~1.0) produz Lucro de R$5k+ e ROI 500%/ano, induzindo o
                 # operador a achar que vale negociar. Mantemos preco_max +
                 # reforma + FIPE pra ele entender por que descartamos.
                 if r["viavel"]:
-                    lucro_mes_cell = r["lucro_mes"]
+                    lucro_cell = r["lucro"]
                     roi_anual_cell = r["roi_anualizado"]
                     tese_cell = r["tese"]
                 else:
-                    lucro_mes_cell = "—"
+                    lucro_cell = "—"
                     roi_anual_cell = "—"
                     tese_cell = "—"
                 reforma_cell = r["reforma_estimada"]
@@ -522,7 +517,7 @@ class SheetsExporter:
                 preco_max_cell,
                 fipe_cell,
                 mediana_cell,
-                lucro_mes_cell,
+                lucro_cell,
                 roi_anual_cell,
                 reforma_cell,
                 tese_cell,
@@ -675,7 +670,7 @@ class SheetsExporter:
                 "Situação",
                 "Derivado",
                 "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro/mês, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro/mês, ROI e Tese ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito.",
+                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro, ROI e Tese ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito.",
             ],
             [
                 "Marca",
@@ -738,10 +733,10 @@ class SheetsExporter:
                 "Sinal de mercado INFORMATIVO — não entra no cálculo de Lance Máximo desde o refactor FIPE-only. Operador compara FIPE × Mediana × Lance Atual lado a lado pra contextualizar a decisão da máquina (ex.: mediana muito acima da FIPE pode indicar similares poluídos no AA — vale conferir manualmente). Workstream G (Webmotors live) substituirá fallback por dado real e a coluna passará a refletir mercado de revenda real.",
             ],
             [
-                "Lucro/mês (R$)",
+                "Lucro (R$)",
                 "Derivado",
-                "lucro_absoluto × 30 ÷ dias_giro (floor 60d; fallback 90d quando dias_giro=NULL). lucro_absoluto = preco_giro × score_efetivo ÷ (1 + score_efetivo). score_efetivo = score_roi original quando lance_atual ≤ preco_alvo; reduzido proporcionalmente quando lance_atual > preco_alvo (capital efetivo cresce). Em lotes '✗ Caro demais' a célula vai pra '—': comprar pelo preço-alvo é cenário fantasioso quando o lance atual já passou do nosso teto.",
-                "Métrica intuitiva: 'esse lote rende R$X/mês se entrar HOJE no leilão'. Não usa cenário-alvo otimista quando o leilão já passou do alvo — comparação entre lotes reflete o capital real empatado. Floor 60d evita o caso degenerado 'Lucro/mês = Lucro absoluto' que ocorria com dias_giro=30d (defaults categóricos otimistas).",
+                "lucro_absoluto = preco_giro × score_efetivo ÷ (1 + score_efetivo). score_efetivo = score_roi original quando lance_atual ≤ preco_alvo; reduzido proporcionalmente quando lance_atual > preco_alvo (capital efetivo cresce). Em lotes '✗ Caro demais' a célula vai pra '—': comprar pelo preço-alvo é cenário fantasioso quando o lance atual já passou do nosso teto.",
+                "Lucro TOTAL absoluto em R$ projetado pra revenda do lote (preço de venda - capital total investido). Antes era exibido como 'Lucro/mês' normalizando por `dias_giro_estimado`, mas a normalização confundia o operador (depende de calibração de giro frequentemente otimista). Agora mostra o número que efetivamente entra no caixa. Pra ritmo de operação use ROI anualizado lado a lado.",
             ],
             [
                 "ROI anualizado (%)",

@@ -451,7 +451,7 @@ class TestSheetsExporterQuery:
         assert data_row[HEADER.index("Reforma (R$)")] == "—"
         assert data_row[HEADER.index("Lance Máximo (R$)")] == "—"
         assert data_row[HEADER.index("ROI anualizado (%)")] == "—"
-        assert data_row[HEADER.index("Lucro/mês (R$)")] == "—"
+        assert data_row[HEADER.index("Lucro (R$)")] == "—"
 
     def test_exportar_laudo_fallback_confidence_baixa_marca_nao_capturado(self):
         """LaudoCache com confidence=0.5 é fallback `_laudo_sem_pdf` — trata igual a
@@ -622,7 +622,7 @@ class TestSheetsExporterQuery:
         assert "Viável" in rows[2][idx_situacao]
 
     def test_exportar_inviavel_oculta_lucro_roi_tese(self):
-        """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro/mês,
+        """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro,
         ROI anualizado nem Tese — esses números pressupõem comprar pelo preço-alvo
         (que é menor que o lance atual nesse caso, cenário fantasioso). Mantemos
         Lance Máximo + FIPE + Reforma pra o operador entender o descarte.
@@ -655,7 +655,7 @@ class TestSheetsExporterQuery:
         situacao = row[HEADER.index("Situação")]
         assert "✗ Caro demais" in situacao
         # Numéricos especulativos suprimidos
-        assert row[HEADER.index("Lucro/mês (R$)")] == "—"
+        assert row[HEADER.index("Lucro (R$)")] == "—"
         assert row[HEADER.index("ROI anualizado (%)")] == "—"
         assert row[HEADER.index("Tese")] == "—"
         # Mas contexto pra triagem manual continua visível

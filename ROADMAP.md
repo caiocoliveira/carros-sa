@@ -4,7 +4,11 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Fundação + EstimadorReforma** — 432/432 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 432/432 testes passando
+
+Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário, multi-tenancy por YAML.
+
+Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
 
 ### CC — Coluna "Lucro (R$)" total absoluto (sem quebra mensal) (2026-05-08) ✅
 - **Branch:** `claude/lucro-total-sem-quebra-mensal` (PR #65 mergeado em `d2906cc`)
@@ -28,7 +32,7 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
   - `webmotors_mediana` continua persistido em `Avaliacao` pra display
   - Removidos os 2 caps no precificador (`_PRECO_GIRO_FIPE_TETO_PCT_FIPE` e o cap n<5 redundância) — fórmula nova torna `preco_max > FIPE` matematicamente inviável (max teórico = `FIPE × 1.15 × 0.95 × 0.90 ≈ 0.98 × FIPE`)
   - Cap n<5 no `avaliador_mercado.py` mantido (limpa o display da mediana)
-- **Display:** nova coluna `Mediana mercado (R$)` na planilha entre FIPE e Lucro/mês — operador vê FIPE × Mediana × Lance Atual lado a lado pra contextualizar a decisão da máquina. Glossário atualizado.
+- **Display:** nova coluna `Mediana mercado (R$)` na planilha entre FIPE e Lucro — operador vê FIPE × Mediana × Lance Atual lado a lado pra contextualizar a decisão da máquina. Glossário atualizado.
 - **Trade-off conhecido:** modelos premium (Civic/Corolla) que de fato vendem ~108% FIPE em alta perdem o uplift que `webmotors_mediana` daria. Calibração mais conservadora em troca de eliminação categórica do bug "Lance Máximo > FIPE". Quando Webmotors live conectar (workstream G), reativar mediana com cap mais apertado.
 - **Cobertura:** 4 testes guard novos (`test_lance_maximo_nunca_excede_fipe_em_uberlandia_sem_dano` parametrizado nos 4 carros do screenshot) + atualização de 7 testes que assumiam fórmula antiga + nova suite `test_preco_giro_fipe_independe_de_mediana_inflada` e `test_preco_giro_fipe_eh_fipe_vezes_fkm_vezes_095`. **Total: 432/432 verde** (eram 429).
 - **Limitações conhecidas:**
@@ -406,8 +410,19 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Cobertura:** 6 testes em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) (ROI, ordenação, sem laudo, sem avaliações), todos mockando gspread.
 - **Limitações:** depende de `avaliacao_lote` populado (workstream E). Setup one-time: service account JSON + compartilhar Sheet com e-mail do SA.
 
-### G — Tracking longitudinal Webmotors 🕐 futuro
-Cron semanal que popula `anuncio_webmotors.sumiu_em`. Só faz sentido depois de ≥2 semanas de coleta contínua.
+### G — Webmotors live + tracking longitudinal 🕐 futuro
+Escopo expandido em 2026-05-08 (workstreams BB e CC dependem dele). Inclui dois entregáveis:
+
+**G.1 — Scraper Webmotors live (bloqueante pra reativar mediana real):**
+- Hoje `webmotors_mediana` em `SinalMercado` cai pra `FIPE × 0.97` quando Auto Avaliar não tem similares — não é dado real de Webmotors. BB removeu a mediana do cálculo do `preco_giro` justamente porque o sinal era ruído.
+- Quando G.1 ligar, redesenhar precificador como `preco_giro = FIPE × β + mediana × (1−β)` com `β` variando por `n_anuncios_competidores` (sample size). β alto → confia mais na FIPE; β baixo → confia na mediana de mercado real.
+- Anti-bot é red flag (CLAUDE.md): discutir estratégia ANTES de qualquer scraping agressivo. Pode queimar IP.
+
+**G.2 — Tracking longitudinal:**
+- Cron semanal que popula `anuncio_webmotors.sumiu_em` (calibra `dias_giro_estimado` via tempo real de mercado).
+- Só faz sentido depois de ≥2 semanas de coleta contínua de G.1.
+
+**Critério de "G concluído pra desbloquear BB/CC":** scraper Webmotors live retornando ≥5 amostras reais por modelo nas categorias mais comuns (hatch popular, sedan popular) com taxa de captura >70% por semana.
 
 ### H — Calibração coeficientes 🔓 destravado (dados disponíveis)
 - **Pré-requisito atendido:** [data/historico/uberlandia_arrematado.csv](data/historico/uberlandia_arrematado.csv) com **32 vendas reais** importáveis via `carros-sa arrematado-import`. Carregadas em `arrematado` + `lote` (sintético com `leilao="historico_offline"`) — preserva FK sem mexer em `models.py`.
@@ -448,15 +463,23 @@ Cron semanal que popula `anuncio_webmotors.sumiu_em`. Só faz sentido depois de 
 - **Calibração real (32 vendas importadas):** sedan calibrado 98d (vs prior 30d), hatch 128d (vs 25d), SUV 79d, picape 64d. **Sistema estava otimista demais** — operador real opera com mix de carros antigos e nichos que demoram muito mais que o prior categórico assumia.
 - **Cobertura:** 13 testes novos — 12 em [tests/test_calibracao_giro.py](tests/test_calibracao_giro.py) (inferência de categoria, calibração ≥3 vs fallback, idempotência por empresa, ROI anualizado com floor) + 1 em [tests/test_cli.py](tests/test_cli.py) (`test_top_ranqueia_por_roi_anualizado_default` — lote rápido com ROI menor passa lento com ROI maior).
 
-#### Pendência identificada por Caio (2026-04-16): granularidade da calibração
-A categoria genérica é grosseira demais. O hatch 128d agrupa Polo Track 2024 (227d, preço-cheio) com Onix Joy 1.0 2018 (278d) e Gol 2014 (22d) — perfis muito diferentes.
+#### Pendência identificada por Caio (2026-04-16): granularidade da calibração — promovida pra **DD** (ver abaixo)
+- **Limitações:** calibração de qualidade modesta com 32 vendas (~poucas por categoria). Workstream H futuro vai melhorar com séries temporais e overlap real entre AA + Arrematado.
 
-Caminhos pra refinar (em ordem de simplicidade):
+### DD — Calibração granular de `dias_giro` 🔓 destravado
+**Promovido em 2026-05-08 a partir da pendência inline do Bloco C (linha histórica 451)** — fica visível como item de trabalho nomeado em vez de prosa enterrada num "####".
+
+**Problema:** A categoria genérica é grosseira demais. O hatch 128d agrupa Polo Track 2024 (227d, preço-cheio) com Onix Joy 1.0 2018 (278d) e Gol 2014 (22d) — perfis muito diferentes. Defaults categóricos otimistas eram a causa do bug "Lucro/mês = Lucro absoluto" que motivou o workstream CC (mascarado por floor 60d, não resolvido na raiz).
+
+**Caminhos pra refinar (em ordem de simplicidade):**
 1. **Sub-bucket por idade** (`hatch_novo` ≤3 anos / `hatch_velho` >3 anos). Implementação: ~1h. Custo: precisa rodar mais lotes pra ter ≥3 amostras por sub-bucket.
 2. **Calibração por modelo** quando há ≥2 amostras do MESMO modelo (cai pra categoria quando não). Mais granular, mas requer histórico denso.
 3. **Filtrar outliers**: usar mediana em vez de média; ou peso decrescente por idade da amostra.
 4. **Distinguir "demanda intrínseca" de "política de preço"**: o Polo demorou 227d porque vendeu na FIPE cheia. Dividir `dias_giro` em `dias_se_FIPE` vs `dias_se_FIPE-5%` exigiria histórico com info de quanto desconto deu (não temos hoje).
-- **Limitações:** calibração de qualidade modesta com 32 vendas (~poucas por categoria). Workstream H futuro vai melhorar com séries temporais e overlap real entre AA + Arrematado.
+
+**Critério de aceite:** `dias_giro_estimado` calibrado em granularidade que faz Polo Track 2024 e Gol 2014 saírem em buckets distintos. Cobertura: novo teste em `tests/test_calibracao_giro.py` validando `dias_giro` divergente entre `(hatch, novo)` e `(hatch, velho)` com fixture real.
+
+**Pré-requisito:** ≥3 amostras por sub-bucket (cobrir com Bloco C importer + dados Reinaldo + AA real).
 
 ---
 
@@ -465,8 +488,13 @@ Caminhos pra refinar (em ordem de simplicidade):
 ### Quem mexe em `carros_sa/models.py`?
 **Ninguém sem discussão.** Se workstream precisa de campo novo: (a) comenta aqui no ROADMAP na seção "Pendências de schema", (b) abre issue/mensagem, (c) espera merge coordenado antes de começar.
 
-Pendências de schema:
-- _(nenhuma ainda)_
+Pendências de schema (dead-fields aguardando reativação OU deprecação coordenada):
+- **`Avaliacao.preco_giro_aa` / `AvaliacaoLote.preco_giro_aa`** — sempre `None` desde o refactor FIPE-only (BB, 2026-05-08). Mantido no schema pra futura reativação quando workstream G ligar Webmotors live com ponderação `FIPE × β + mediana × (1−β)`. Se workstream G não ressuscitar a mediana no precificador, deprecar formalmente o campo.
+- **`SinalMercado.auto_avaliar_ref`** — coletado pelo scraper mas não consumido em nenhum cálculo desde BB. Idem `preco_giro_aa`: sobrevive aguardando G. Considerar usar como sinal secundário no futuro (preço atacado real da plataforma).
+- **`SinalMercado.webmotors_p25`** — dead read antigo (versões anteriores do precificador usavam `min(FIPE×0.95, p25)`). Continua exposto mas nunca é lido. Candidato a deprecar quando a estratégia de Webmotors live for definida.
+
+Pendências de cleanup (não-schema):
+- **`carros_sa.agents.calibracao_giro.lucro_reais_por_mes`** — dead code desde CC (2026-05-08). Mantido por CLAUDE.md/3 ("código morto pré-existente: comenta, não apaga"). Em varredura de housekeeping considerar deletar/renomear pra `_lucro_diario_legacy` e atualizar referências em CLAUDE.md/Padrões aprendidos + LESSONS.md/P6.
 
 ### Como mergear?
 1. Rodar `make test` no worktree — 100% verde, incluindo teste novo

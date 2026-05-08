@@ -15,7 +15,13 @@ name: pr-review
 
 on:
   pull_request:
-    types: [opened]
+    # `opened` cobre PR novo (incluindo draft). `reopened` cobre fechar+reabrir
+    # como modo manual de re-triggerar review. `synchronize` dispara em todo
+    # push de commits — se o user fizer mudança após primeiro review, ganha
+    # um novo review automaticamente. Concurrency abaixo cancela run anterior
+    # pra evitar reviews em paralelo no mesmo PR.
+    types: [opened, reopened, synchronize]
+  workflow_dispatch: {}
 
 permissions:
   contents: read

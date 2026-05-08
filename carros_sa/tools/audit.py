@@ -141,8 +141,8 @@ CHECKS: Dict[str, Validator] = {
             else None
         )
     ),
-    "Lucro/mês (R$)": lambda v, r: (
-        "Lucro/mês negativo — verificar score_roi ou preco_alvo"
+    "Lucro (R$)": lambda v, r: (
+        "Lucro negativo — verificar score_roi ou preco_alvo"
         if isinstance(v, (int, float)) and v < 0
         else None
     ),
@@ -176,7 +176,7 @@ CHECKS: Dict[str, Validator] = {
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
 #
-# IMPORTANTE: ROI anualizado e Lucro/mês são suprimidos ("—") em lotes
+# IMPORTANTE: ROI anualizado e Lucro são suprimidos ("—") em lotes
 # inviáveis pra ESPELHAR o que `SheetsExporter._write_sheet` exibe (linhas
 # 422-429): comprar pelo preço-alvo é cenário fantasioso quando lance_atual
 # já passou do nosso teto. Sem essa paridade, o audit reportava "ROI
@@ -198,7 +198,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
     "Mediana mercado (R$)": lambda r: r.get("webmotors_mediana") if r.get("webmotors_mediana") else "—",
     "ROI anualizado (%)": lambda r: r["roi_anualizado"] if r["viavel"] else "—",
-    "Lucro/mês (R$)": lambda r: r.get("lucro_mes", "—") if r["viavel"] else "—",
+    "Lucro (R$)": lambda r: r.get("lucro", "—") if r["viavel"] else "—",
     "Reforma (R$)": lambda r: r["reforma_estimada"],
     "Tese": lambda r: r.get("tese", "—") if r["viavel"] else "—",
     "Anúncio": lambda r: r["url"],
@@ -405,7 +405,7 @@ def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> List[CheckResult]:
 
 def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
     """`lance_atual > preco_alvo` mas ainda `≤ preco_max` — entrada acima da
-    margem calibrada. ROI/Lucro/mês exibidos usam `_score_roi_efetivo` (já
+    margem calibrada. ROI/Lucro exibidos usam `_score_roi_efetivo` (já
     descontado), mas o aviso lembra o operador de que a folga é só pra margem
     mínima absoluta — não pra a margem-alvo.
     """

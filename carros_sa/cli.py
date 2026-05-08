@@ -89,7 +89,7 @@ def top(
     """
     from sqlmodel import select
 
-    from carros_sa.agents.calibracao_giro import lucro_reais_por_mes, roi_anualizado
+    from carros_sa.agents.calibracao_giro import roi_anualizado
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, Lote
 
@@ -162,7 +162,7 @@ def top(
     tbl.add_column("ROI%", justify="right")
     tbl.add_column("Dias", justify="right")
     tbl.add_column("ROI/ano%", justify="right")
-    tbl.add_column("R$/mês", justify="right")
+    tbl.add_column("Lucro", justify="right")
     tbl.add_column("Pop.", justify="left")
     tbl.add_column("Risco", justify="right")
     from carros_sa.tools.sheets import _lucro_absoluto_efetivo
@@ -171,9 +171,8 @@ def top(
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
         # Lucro absoluto efetivo: usa entrada por `max(lance_atual, preco_alvo)`
         # pra refletir o capital empatado real (no alvo se leilão ainda permite,
-        # acima do alvo se já passou). Bate com `R$/mês` exibido na planilha.
+        # acima do alvo se já passou). Bate com a coluna "Lucro (R$)" da planilha.
         lucro_esperado = _lucro_absoluto_efetivo(av, lote.lance_atual)
-        r_mes = lucro_reais_por_mes(lucro_esperado, av.dias_giro_estimado)
         tbl.add_row(
             lote.id,
             f"{lote.marca} {lote.modelo[:30]}",
@@ -183,7 +182,7 @@ def top(
             f"{av.score_roi * 100:.1f}%",
             str(av.dias_giro_estimado) if av.dias_giro_estimado else "—",
             f"{roi_anual * 100:.1f}%",
-            f"R$ {r_mes:,}",
+            f"R$ {lucro_esperado:,}",
             bucket.value,
             f"{av.fator_risco:.2f}",
         )

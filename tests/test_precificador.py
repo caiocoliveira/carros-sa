@@ -211,9 +211,11 @@ def test_gol_2015_em_goiania_com_frete(
     assert av.frete_incluso == 1_400
     assert 5_500 < av.preco_alvo < 6_200
 
-    # Lance atual (R$ 15k) está acima do preco_max → lote caro demais
+    # Lance atual (R$ 15k) ficou JUST abaixo do preco_max — pré-refactor
+    # FIPE-only (preco_giro 25k) o lote era inviável; com FIPE 28k × 0.95 =
+    # preco_giro 26600, o teto subiu pra 15518 e cabe lance 15k por margem mínima.
     # preco_max = (26600 - 3500 - 1400 - 2523 - 2660 - 999) / 1 = 15518
-    assert gol_2015_lote.lance_atual < av.preco_max  # 15k < 15518: agora viável (com FIPE-only o teto subiu levemente)
+    assert gol_2015_lote.lance_atual < av.preco_max
 
 
 # =============================================================================

@@ -707,7 +707,7 @@ class SheetsExporter:
             [
                 "Lance Máximo (R$)",
                 "Precificador",
-                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo.",
+                "(preco_giro − reforma − frete − custo_op − margem_min×giro) ÷ (1 + taxa_leilão). Equação resolve circularidade da taxa de ~8% cobrada sobre o próprio lance vencedor. Já embute reforma, frete, FIPE/Webmotors e fator de risco do laudo. Audit dispara checks INDEPENDENTES (podem coexistir na mesma linha): (a) zona apertada — lance_atual > preco_alvo mas ≤ preco_max (entrada acima da margem calibrada, ROI realista < ROI alvo); (b) Lance Máximo > FIPE × 1.05 — red flag econômico (FIPE stale ou mediana inflada); (c) preco_alvo > preco_max — viola identidade do precificador (bug). Antes de 2026-05-08 esses 3 motivos eram if/elif encadeado e só o 1º aparecia — agora os 3 emergem juntos.",
                 "Teto ABSOLUTO — acima disso a margem mínima da empresa não é respeitada nem no melhor cenário",
             ],
             [
@@ -731,8 +731,8 @@ class SheetsExporter:
             [
                 "Reforma (R$)",
                 "EstimadorReformaLLM (fallback: tabela YAML)",
-                "Custo total dos itens retornados pelo LLM a partir do laudo; se LLM falhar, soma da tabela (família_peça × severidade) + adicional estrutural quando aplicável. Já descontado do Lance Máximo.",
-                "Custo ANTES de vender. Números grandes aqui = lote com dano material relevante; confirmar no PDF do laudo antes do lance.",
+                "Custo total dos itens retornados pelo LLM a partir do laudo; se LLM falhar, soma da tabela (família_peça × severidade) + adicional estrutural quando aplicável. Já descontado do Lance Máximo. Audit sinaliza Reforma > 30% do preco_giro como 'lote economicamente questionável' (mesmo viável: capital empatado em reforma é alto vs. revenda) e Reforma R$ 0 com severidade ≥ média como contradição (LLM ignorou laudo).",
+                "Custo ANTES de vender. Números grandes aqui = lote com dano material relevante; confirmar no PDF do laudo antes do lance. Operador deve abrir o laudo quando Reforma se aproxima de 30% do preco_giro — surpresa na oficina pode tornar o investimento inviável post-hoc.",
             ],
             [
                 "Tese",

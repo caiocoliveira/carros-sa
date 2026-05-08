@@ -553,6 +553,118 @@ class TestAuditDerivado:
 # pra lotes onde o operador NÃO vê o número — alarme falso operacional.
 # ---------------------------------------------------------------------------
 
+class TestAuditChecksIndependentes:
+    """Refator 2026-05-08: Lance Máximo (R$) deixou de ser if/elif encadeado
+    no `CHECKS` (que só permite 1 motivo por linha) e virou conjunto de
+    funções independentes em `ALL_CHECKS`. Múltiplos sintomas na MESMA linha
+    coexistem — antes o red flag (preco_max > FIPE × 1.05) ficava escondido
+    atrás do yellow (zona apertada).
+    """
+
+    def test_zona_apertada_E_preco_max_acima_fipe_disparam_juntos(self):
+        """Cenário patológico: lote com lance acima do alvo (zona apertada) +
+        preco_max acima da FIPE × 1.05 (red flag). Ambos devem aparecer.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # FIPE 50k, preco_max 60k = 120% FIPE → red flag
+            # alvo 25k (default), lance_atual 30k → zona apertada (30 > 25, 30 ≤ 60)
+            session.add(_lote("L001", lance_atual=30_000))
+            session.add(_avaliacao(
+                "L001",
+                preco_max=60_000,
+                fipe=50_000,
+                preco_giro=55_000,
+                preco_giro_fipe=55_000,  # mantido < FIPE×1.10 pra não duplicar com check de preco_giro
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        zona = [v for v in violacoes if "Zona apertada" in v]
+        acima = [v for v in violacoes if "FIPE × 1.05" in v]
+        assert zona, f"Esperava 'Zona apertada': {violacoes}"
+        assert acima, f"Esperava 'Lance Máximo > FIPE × 1.05': {violacoes}"
+
+    def test_preco_max_acima_fipe_em_lote_sem_zona_apertada(self):
+        """Sanidade: red flag dispara mesmo quando não há zona apertada."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # lance abaixo do alvo (sem zona apertada) + preco_max acima da FIPE
+            session.add(_lote("L001", lance_atual=10_000))
+            session.add(_avaliacao(
+                "L001",
+                preco_max=60_000,
+                fipe=50_000,
+                preco_giro=55_000,
+                preco_giro_fipe=55_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("FIPE × 1.05" in v for v in violacoes), (
+            f"Esperava red flag preco_max > FIPE × 1.05: {violacoes}"
+        )
+
+    def test_preco_max_dentro_de_fipe_nao_dispara(self):
+        """Caso normal: preco_max < FIPE × 1.05 não dispara warning."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            # preco_max 30k, FIPE 40k → 75% FIPE, ok
+            session.add(_avaliacao("L001", preco_max=30_000, fipe=40_000))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("FIPE × 1.05" in v for v in violacoes), (
+            f"75% FIPE não deveria flag: {violacoes}"
+        )
+
+
+class TestAuditReformaPesada:
+    """Reforma > 30% do preco_giro indica lote economicamente questionável,
+    mesmo quando passa pela margem do precificador. Capital empatado em
+    reforma alto = risco operacional (surpresa na oficina, revenda mais lenta).
+    """
+
+    def test_reforma_acima_30pct_preco_giro_em_lote_viavel_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            # preco_giro 30k, reforma 12k → 40% > 30% → flag
+            session.add(_avaliacao(
+                "L001", preco_max=20_000, preco_giro=30_000, reforma_estimada=12_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("economicamente questionável" in v for v in violacoes), (
+            f"Esperava flag de reforma pesada: {violacoes}"
+        )
+
+    def test_reforma_abaixo_30pct_nao_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            # preco_giro 35k, reforma 3k → 8.5% — caso normal
+            session.add(_avaliacao("L001"))  # default reforma=3000, preco_giro=35000
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("economicamente questionável" in v for v in violacoes), (
+            f"Reforma 8% não deveria flag: {violacoes}"
+        )
+
+    def test_reforma_pesada_em_lote_inviavel_nao_dispara(self):
+        """Em lotes inviáveis o display suprime tudo — audit acompanha."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # lance > preco_max → inviável; reforma 50% do giro mas display oculta
+            session.add(_lote("L001", lance_atual=25_000))
+            session.add(_avaliacao(
+                "L001", preco_max=20_000, preco_giro=30_000, reforma_estimada=15_000,
+            ))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("economicamente questionável" in v for v in violacoes), (
+            f"Lote inviável não deveria disparar reforma pesada (display oculta): {violacoes}"
+        )
+
+
 class TestAuditEspelhaDisplay:
     """Lotes inviáveis (lance_atual > preco_max) viram '—' em ROI/Lucro/Tese
     no `SheetsExporter._write_sheet`. Audit deve espelhar — caso contrário

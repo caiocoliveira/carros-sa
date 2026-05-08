@@ -126,6 +126,29 @@ linhas" (P5 original). Toda **substituição** de display (campo X vira `"—"`
 em condição Y) precisa do mesmo no `COLUMN_EXTRACTORS` do audit. Audit é uma
 view sobre o display, não sobre o DB cru.
 
+### P5d. If/elif encadeado num check esconde red flags atrás de yellow flags
+
+Sintoma: validador de coluna usa `if cond_A else (if cond_B else (if cond_C ...))`
+e só retorna o **primeiro** motivo encontrado. Quando uma linha tem mais de
+um sintoma simultâneo (caso patológico), o operador só vê o sintoma mais
+superficial.
+
+Caso de referência (2026-05-08, `carros_sa/tools/audit.py`): `CHECKS["Lance
+Máximo (R$)"]` aninhava 4 condições — (1) preco_max ≤ 0 num viável,
+(2) preco_alvo > preco_max, (3) zona apertada, (4) preco_max > FIPE × 1.05.
+Cenário simulado: lote com mediana inflada (similares Webmotors n≥5 sem cap)
++ lance acima do alvo. Disparava SÓ "zona apertada" (yellow) — o "Lance Máximo
+> FIPE × 1.05" (red flag, indica dado economicamente quebrado) ficava
+silenciado pelo encadeamento. Operador via amarelo e ignorava; o vermelho
+escondido sinalizava que ele estava prestes a dar lance acima da FIPE.
+
+Fix: cross-checks vivem em `ALL_CHECKS` como funções independentes que
+retornam `List[CheckResult]` (cada uma 0-1 motivos), não em `CHECKS` dict
+que força lambda 1-motivo. Múltiplos sintomas na mesma linha emergem
+simultaneamente. Padrão genérico: **se um check tem 3+ ramos, separar em
+funções independentes — encadeamento vira ponto cego garantido em casos
+patológicos**.
+
 ### P6. Audit por coluna isolada não pega contradição cross-field
 
 Sintoma: cada célula passa no validador individual, mas a combinação é

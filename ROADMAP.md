@@ -6,6 +6,19 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ✅ **Fundação + EstimadorReforma** — 432/432 testes passando
 
+### CC — Coluna "Lucro (R$)" total absoluto (sem quebra mensal) (2026-05-08) ✅
+- **Branch:** `claude/lucro-total-sem-quebra-mensal` (PR #65 mergeado em `d2906cc`)
+- **Motivação:** Operador pediu pra ver o lucro TOTAL projetado da revenda em vez de normalizado por mês. Divisão por `dias_giro_estimado` confundia: defaults categóricos otimistas (HATCH NOVO=25d sem floor) faziam `Lucro/mês = Lucro absoluto`, levando operador a achar que entrava aquele valor todo mês.
+- **Mudanças:**
+  - `sheets.py`: header `"Lucro/mês (R$)"` → `"Lucro (R$)"`. Valor passa a ser `_lucro_absoluto_efetivo(av, lance_atual)` direto.
+  - `audit.py`: `CHECKS` + `COLUMN_EXTRACTORS` atualizados.
+  - `cli.py` (`top` command): coluna `R$/mês` → `Lucro` pra paridade com a planilha (princípio CLAUDE.md "mesma métrica em dois arquivos").
+  - Glossário reescrito explicando que ROI anualizado lado a lado carrega o sinal de ritmo.
+- **Cobertura:** 432/432 verde, sem regressão.
+- **Review arquitetural** (Plan agent): aprovou com 1 nit não-bloqueante.
+- **Follow-ups (não-bloqueantes):**
+  - **`lucro_reais_por_mes` em `carros_sa/agents/calibracao_giro.py:211` virou dead code** — único caller restante removido. Manter por enquanto (CLAUDE.md/3 "código morto pré-existente: comenta, não apaga"), mas em varredura de housekeeping considerar deletar/renomear pra `_lucro_diario_legacy` e atualizar referências em CLAUDE.md/Padrões aprendidos + LESSONS.md/P6.
+
 ### BB — Refactor FIPE-only no precificador + coluna "Mediana mercado" (2026-05-08) ✅
 - **Branch:** `claude/add-fipe-price-column-9mvUa`
 - **Motivação:** Operador relatou 4 carros do screenshot (Airtrek 2008, Tiggo 2.0 2015, Ka 1.0 2020, Argo 1.0 2019) com `Lance Máximo > FIPE` na planilha. Simulação algébrica confirmou: 3 caps em série (n<5 no avaliador → 1.20×FIPE no precificador → 1.05×FIPE no audit) tentavam consertar similares poluídos do Auto Avaliar (Tiggo 7 vs Tiggo 2, Airtrek vs Outlander, Ka descontinuado vs seminovos europeus) — band-aids reativos sobre fonte de ruído estrutural. Como Webmotors live ainda não está conectado (workstream G), `webmotors_mediana` era na prática `FIPE × 0.97` com ruído — sistema já era FIPE-driven mascarado.

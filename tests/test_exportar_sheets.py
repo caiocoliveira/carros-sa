@@ -1466,3 +1466,133 @@ class TestCidadesFreteSheet:
                 # `uberlandia_mg` não tem YAML — exportar deve completar sem erro
                 n = exporter.exportar("uberlandia_mg", session)
         assert n == 1
+
+
+class TestRacionalReforma:
+    """Coluna 'Racional Reforma' — texto que justifica a Reforma (R$).
+
+    Renderiza `av.reforma_racional` em lotes com laudo analisado; '—' caso
+    contrário (None no DB ou laudo não capturado).
+    """
+
+    def test_header_inclui_racional_reforma_apos_reforma(self):
+        """HEADER expõe 'Racional Reforma' imediatamente após 'Reforma (R$)'.
+
+        Posição garante leitura natural 'Reforma R$X — porque Y' no Sheets.
+        """
+        idx_reforma = HEADER.index("Reforma (R$)")
+        idx_racional = HEADER.index("Racional Reforma")
+        assert idx_racional == idx_reforma + 1
+
+    def test_racional_renderiza_quando_presente(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            av = _avaliacao("L001")
+            av.reforma_racional = "Coluna B reparada → solda + pintura; capô amassado"
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx = HEADER.index("Racional Reforma")
+        assert rows[2][idx] == "Coluna B reparada → solda + pintura; capô amassado"
+
+    def test_racional_none_renderiza_traco(self):
+        """Registro pré-workstream O com `reforma_racional=NULL` cai pro placeholder."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            av = _avaliacao("L001")
+            av.reforma_racional = None
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx = HEADER.index("Racional Reforma")
+        assert rows[2][idx] == "—"
+
+    def test_racional_visivel_em_lote_inviavel(self):
+        """Lote 'Caro demais' (lance > preco_max) ainda mostra racional — operador
+        precisa entender por que descartamos. Mesma regra de 'Reforma (R$)'."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # lance_atual=50000 > preco_max=30000 → inviável
+            session.add(_lote("L001", lance_atual=50000))
+            av = _avaliacao("L001", preco_max=30000)
+            av.reforma_racional = "Frente esmagada — substituir longarina + radiador"
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_situacao = HEADER.index("Situação")
+        idx_racional = HEADER.index("Racional Reforma")
+        assert "Caro" in rows[2][idx_situacao]
+        # Racional persiste mesmo em lote descartado
+        assert "longarina" in rows[2][idx_racional]
+
+    def test_racional_suprimido_em_laudo_nao_capturado(self):
+        """Sem laudo válido o estimador não rodou — racional vira '—'
+        (mesmo se o DB tiver lixo de uma run anterior)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            av = _avaliacao("L001")
+            # Lixo de run anterior: campo populado mas laudo NÃO foi extraído.
+            # Planilha deve esconder igual zera Reforma/Lance Máximo.
+            av.reforma_racional = "lixo de run anterior — não deveria aparecer"
+            session.add(av)
+            # SEM LaudoCache → laudo não capturado
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_situacao = HEADER.index("Situação")
+        idx_racional = HEADER.index("Racional Reforma")
+        assert "LAUDO NÃO CAPTURADO" in rows[2][idx_situacao]
+        assert rows[2][idx_racional] == "—"

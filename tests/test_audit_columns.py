@@ -64,6 +64,7 @@ def _avaliacao(
     preco_giro_aa: Optional[int] = None,
     score_roi: float = 0.3,
     justificativa: str = "Laudo leve, FIPE R$40k, giro estimado 90 dias.",
+    reforma_racional: Optional[str] = "Coluna B reparada (R$3000)",
 ) -> AvaliacaoLote:
     return AvaliacaoLote(
         empresa_id=empresa_id,
@@ -84,6 +85,7 @@ def _avaliacao(
         webmotors_mediana=webmotors_mediana,
         dias_giro_estimado=dias_giro_estimado,
         justificativa=justificativa,
+        reforma_racional=reforma_racional,
         criado_em=datetime.utcnow(),
     )
 
@@ -525,6 +527,105 @@ class TestAuditInvariantesCruzadas:
 
 
 # ---------------------------------------------------------------------------
+# Indicador agregado de cobertura de reforma — % de lotes com laudo analisado
+# que saem com reforma=0 (suspeita de pipeline quebrado).
+# ---------------------------------------------------------------------------
+
+class TestCoberturaReforma:
+    """Premissa operacional: a maior parte dos carros precisa de alguma reforma.
+    Quando >=30% dos lotes com laudo analisado saem com reforma=0, o audit
+    aponta pro `make diagnose-cobertura` em vez de só descrever o problema.
+
+    Filtra lotes SEM laudo analisado (confidence<0.6) — esses têm reforma=0
+    por construção e poluiriam o denominador.
+    """
+
+    def _setup_batch(self, session: Session, n_total: int, n_sem_reforma: int) -> None:
+        """N lotes com laudo válido (confidence=0.95). Os primeiros `n_sem_reforma`
+        têm reforma_estimada=0; o resto tem reforma=3000 (default do _avaliacao).
+        """
+        for i in range(n_total):
+            lid = f"L{i:03d}"
+            session.add(_lote(lid))
+            reforma = 0 if i < n_sem_reforma else 3000
+            session.add(_avaliacao(lid, reforma_estimada=reforma))
+            session.add(_laudo(lid))
+
+    def test_cobertura_reforma_dispara_acima_30pct(self):
+        """40% sem reforma (4/10) → flag, mensagem aponta pro diagnose-cobertura."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            self._setup_batch(session, n_total=10, n_sem_reforma=4)
+            session.commit()
+        violacoes = audit(engine)
+        cobertura = [v for v in violacoes if "Cobertura de reforma" in v]
+        assert len(cobertura) == 1, f"Esperava 1 violação de cobertura: {violacoes}"
+        msg = cobertura[0]
+        assert "4/10" in msg
+        assert "40%" in msg
+        # Aponta pro script de diagnóstico
+        assert "diagnose-cobertura" in msg
+
+    def test_cobertura_reforma_silencia_abaixo_30pct(self):
+        """20% sem reforma (2/10) → silêncio."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            self._setup_batch(session, n_total=10, n_sem_reforma=2)
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Cobertura de reforma" in v for v in violacoes), (
+            f"Não deveria flagar 20%: {violacoes}"
+        )
+
+    def test_cobertura_reforma_no_limite_30_dispara(self):
+        """Exatamente 30% (3/10) → dispara (>= no threshold)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            self._setup_batch(session, n_total=10, n_sem_reforma=3)
+            session.commit()
+        violacoes = audit(engine)
+        cobertura = [v for v in violacoes if "Cobertura de reforma" in v]
+        assert len(cobertura) == 1, f"30% deveria disparar: {violacoes}"
+
+    def test_cobertura_reforma_ignora_amostra_pequena(self):
+        """4 lotes (todos sem reforma) → silêncio porque amostra<5."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            self._setup_batch(session, n_total=4, n_sem_reforma=4)
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Cobertura de reforma" in v for v in violacoes), (
+            f"Amostra pequena não deveria disparar: {violacoes}"
+        )
+
+    def test_cobertura_reforma_exclui_laudos_nao_analisados(self):
+        """10 lotes mas só 3 com laudo válido (todos sem reforma). Amostra
+        elegível = 3 → silêncio porque <5, mesmo com 100% sem reforma.
+        Garante que o denominador filtra lotes sem laudo (confidence<0.6)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            for i in range(3):
+                lid = f"L_OK_{i}"
+                session.add(_lote(lid))
+                session.add(_avaliacao(lid, reforma_estimada=0))
+                session.add(_laudo(lid))
+            for i in range(7):
+                lid = f"L_FALLBACK_{i}"
+                session.add(_lote(lid))
+                session.add(_avaliacao(lid, reforma_estimada=0))
+                laudo = _laudo(lid)
+                # Confidence 0.5 = fallback `_laudo_sem_pdf`, NÃO conta como
+                # analisado pelo verificar_laudo_completo (limite 0.6).
+                laudo.confidence = 0.5
+                session.add(laudo)
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Cobertura de reforma" in v for v in violacoes), (
+            f"Lotes sem laudo válido não deveriam contar: {violacoes}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Invariantes derivadas — cruzam mais de um campo. Testam o pipeline
 # `_DERIVED_CHECKS` introduzido junto com o cap de margem.
 # ---------------------------------------------------------------------------
@@ -952,4 +1053,38 @@ class TestAuditLaudoNaoAnalisadoSuprime:
         violacoes = audit(engine)
         assert not any("Reforma negativa" in v for v in violacoes), (
             f"Lote sem laudo não deveria flag reforma negativa (display oculta): {violacoes}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cross-field per-row check: Racional Reforma vazio com reforma>0
+# ---------------------------------------------------------------------------
+
+class TestRacionalReformaVazio:
+    def test_racional_vazio_com_reforma_positiva_dispara(self):
+        """Lote com laudo analisado + reforma_estimada=3000 + reforma_racional=None
+        → flag. Sinaliza precificador que não montou sumário fallback (bug futuro
+        ou DB pré-workstream O envenenado)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", reforma_estimada=3000, reforma_racional=None))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Racional Reforma" in v for v in violacoes), (
+            f"Esperava flag de racional vazio: {violacoes}"
+        )
+
+    def test_racional_vazio_sem_reforma_silencia(self):
+        """Reforma=0 + racional None é coerente — laudo sem avarias relevantes."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", reforma_estimada=0, reforma_racional=None))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Racional Reforma" in v for v in violacoes), (
+            f"Reforma 0 + racional vazio NÃO deveria disparar: {violacoes}"
         )

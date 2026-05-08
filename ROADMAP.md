@@ -637,8 +637,26 @@ Já registrado:
   - Prompt pede regra "SEMPRE incluir alinhamento de chassi quando estrutural" — se LLM ignorar, o custo fica baixo demais. Nos testes de fixture o LLM respeitou, mas em produção pode falhar silenciosamente. Validar com 20 lotes reais quando Gemini voltar ao ar.
   - Tabela determinística em `config/reforma/*.yaml` **fica como safety net** — usada no fallback e pode ser auditada em paralelo. Não remover até termos confiança em 50+ lotes reais.
 
+### O.1.1 — Cabeamento do frontend "Racional Reforma" + indicador de cobertura (2026-05-08) ✅
+- **Branch:** `claude/investigate-missing-report-Wvzuh`
+- **Motivação:** O.1 marcou ✅ em 2026-04-17 mas o **frontend nunca foi cabeado** — `AvaliacaoLote.reforma_racional` era populado pelo precificador e persistido pelo orquestrador, porém nem `HEADER` nem `_write_sheet` em [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) referenciavam o campo, então a coluna não aparecia na planilha. O usuário pediu hoje (2026-05-08) pra finalmente expor. Aproveitei pra adicionar o indicador de saúde da coleta que ficou pendente como follow-up.
+- **Arquivos:**
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `HEADER` ganha "Racional Reforma" entre "Reforma (R$)" e "Tese"; `_query` propaga `av.reforma_racional`; `_write_sheet` renderiza com supressão em "⚠ LAUDO NÃO CAPTURADO"; nova entrada no Glossário.
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — `COLUMN_EXTRACTORS` + `CHECKS` cobrem a coluna nova (sinaliza racional vazio com reforma>0); `_build_rows` enriquece com `reforma_racional` e `laudo_analisado`; nova função `_check_cobertura_reforma` + abstração `BATCH_CHECKS` (extensível pra próximos checks agregados).
+  - [`scripts/diagnose_cobertura.py`](scripts/diagnose_cobertura.py) — script novo invocado por `make diagnose-cobertura`. Read-only: identifica causa provável (LLM em fallback, lotes pendentes, possível bug no estimador) e sugere comando exato pra retry direcionado.
+  - [`Makefile`](Makefile) — target `diagnose-cobertura` + entry no `make help`.
+  - [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) — `TestRacionalReforma` (5 testes: posição da coluna, render com texto, render com None, persistência em "✗ Caro demais", supressão em "⚠ LAUDO NÃO CAPTURADO").
+  - [`tests/test_audit_columns.py`](tests/test_audit_columns.py) — `TestCoberturaReforma` (5 testes do indicador agregado: dispara em 40%, silencia em 20%, dispara no limite 30%, ignora amostra<5, exclui laudos não-analisados) + `TestRacionalReformaVazio` (2 testes do per-row check).
+  - [`tests/test_diagnose_cobertura.py`](tests/test_diagnose_cobertura.py) — 4 testes do script (sugestão muda conforme dominância: lotes sem laudo → retry; todos com laudo + reforma=0 → bug no estimador; sem GEMINI_API_KEY → setar config primeiro; DB vazio não crasha).
+- **Como funciona o indicador:** premissa operacional "a maior parte dos carros precisa de alguma reforma" — quando ≥30% dos lotes com laudo analisado saem com `reforma=0`, audit aponta pro `make diagnose-cobertura`. Threshold em 30% por preferência do usuário ("30% já é muito"); single-tier (alarme ou silêncio, sem warning intermediário); amostra mínima 5 lotes pra evitar ruído.
+- **Limitações conhecidas:**
+  - Threshold 30% pode ser ruidoso em batches pequenos (5-10 lotes) onde 1-2 lotes legítimos sem reforma viram alta porcentagem. Calibrar pra 40-50% se a primeira run mostrar falso positivo.
+  - Script de diagnóstico é read-only: não dispara retry automático nem chama LLM. Operador (ou workflow) decide o que fazer com base na sugestão. `--auto-retry` pode ser adicionado depois se virar atrito.
+  - Healthcheck do Gemini é raso (só checa env var presente + tamanho mínimo). Ping real custaria cota; pode ser melhorado quando tiver retry budget pra gastar.
+
 ### O.1 — Coluna "Racional Reforma" na planilha ✅
 - **Branch:** `claude/gifted-bassi-a24b51`
+- **Status (2026-05-08):** backend marcado ✅ em 2026-04-17 mas o **frontend nunca foi cabeado** (HEADER + render no Sheets ficaram de fora). Gap fechado em O.1.1 acima.
 - **Arquivos:**
   - [`carros_sa/models.py`](carros_sa/models.py) — +campo `racional: Optional[str]` em `CustoReforma`; +campo `reforma_racional: Optional[str]` em `Avaliacao` e `AvaliacaoLote` (aditivos, nullable, aprovados explicitamente).
   - [`carros_sa/db.py`](carros_sa/db.py) — migração leve `ALTER TABLE avaliacao_lote ADD COLUMN reforma_racional TEXT` pros DBs existentes.

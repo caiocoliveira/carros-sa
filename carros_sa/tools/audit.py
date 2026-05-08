@@ -23,7 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
-from carros_sa.tools.laudo_audit import LAUDO_CONFIDENCE_MIN
+from carros_sa.tools.laudo_audit import LAUDO_CONFIDENCE_MIN, verificar_laudo_completo
 from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -47,6 +47,19 @@ _SEVERIDADES_QUE_EXIGEM_REFORMA = {"media", "grave", "estrutural"}
 # Se o check disparar em produção saudável, é porque mexeram no precificador
 # sem cap OU `_FATOR_MAX` foi aumentado além de 1.19 (1.19 × 0.95 = 1.130).
 _PRECO_GIRO_FIPE_RATIO_MAX = 1.13
+
+# Cobertura mínima esperada de reforma>0 entre lotes com laudo analisado.
+# Premissa operacional: a maior parte dos carros de leilão precisa de ALGUMA
+# reforma (ainda que pequena). Se >=30% dos lotes com laudo analisado saem
+# com reforma=0, é sinal de pipeline quebrado (LLM caiu pra fallback vazio,
+# severidade enviesada, prompt regredindo). Threshold calibrado por preferência
+# operacional: usuário considera 30% já ALTO demais — preferiu sensibilidade
+# alta + ação direta (script de diagnóstico) a tier de "atenção" intermediário
+# que vira ruído. Vide LESSONS.md/P6 e memory/MEMORY.md.
+_COBERTURA_REFORMA_PCT_LIMITE = 0.30
+# Amostra mínima pra evitar disparo em batches pequenos onde 1-2 lotes
+# legitimamente sem reforma viram alto percentual.
+_COBERTURA_REFORMA_AMOSTRA_MIN = 5
 
 
 # Validator retorna None se ok; string com motivo se suspeito.
@@ -188,6 +201,19 @@ CHECKS: Dict[str, Validator] = {
             )
         )
     ),
+    # Cross-field: lote com laudo analisado e reforma>0 deve ter racional
+    # textual. Estimador LLM sempre devolve `justificativa`; quando ele falha,
+    # o precificador monta sumário fallback a partir dos itens da tabela YAML
+    # (ver `precificador._sumario_reforma_fallback`). Racional vazio aqui sinaliza
+    # bug no precificador OU registro pré-workstream O (DB envenenado, esperado
+    # nas primeiras runs após o merge — `make limpar-decoys` repopula).
+    "Racional Reforma": lambda v, r: (
+        "Racional Reforma vazio com reforma > 0 — precificador deveria ter montado sumário fallback"
+        if (v is None or v == "—")
+        and r.get("reforma_estimada", 0) > 0
+        and r.get("laudo_analisado")
+        else None
+    ),
     # Coluna informativa. Valores esperados: texto com emoji prefixo (🟢/🟡/🔴)
     # ou "—" quando config/tese.yaml não carrega ou laudo pendente. String vazia
     # seria bug (calcular_tese deveria sempre produzir algo).
@@ -239,6 +265,7 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
         r.get("lucro", "—") if r["viavel"] and r.get("laudo_analisado") else "—"
     ),
     "Reforma (R$)": lambda r: r["reforma_estimada"] if r.get("laudo_analisado") else "—",
+    "Racional Reforma": lambda r: r.get("reforma_racional") or "—",
     "Tese": lambda r: (
         r.get("tese", "—") if r["viavel"] and r.get("laudo_analisado") else "—"
     ),
@@ -330,6 +357,15 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         laudo_analisado = laudo is not None and (laudo.confidence or 0) >= LAUDO_CONFIDENCE_MIN
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
+
+        # `laudo_analisado` espelha o critério de UI da planilha: laudo só
+        # conta como "analisado" se veio de PDF real (confidence >= 0.6).
+        # Lotes sem laudo válido têm `reforma_estimada=0` por construção
+        # (estimador não rodou), então NÃO podem ser contados no indicador
+        # de cobertura — poluiriam o denominador.
+        laudo_status = verificar_laudo_completo(lote, laudo)
+        laudo_analisado = laudo_status.laudo_cache_ok
+
         rows.append({
             "lote_id": av.lote_id,
             "modelo": f"{lote.marca} {lote.modelo}".strip(),
@@ -360,6 +396,8 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "confidence_laudo": (laudo.confidence if laudo else None),
             "laudo_analisado": laudo_analisado,
             "reforma_estimada": av.reforma_estimada,
+            "reforma_racional": av.reforma_racional,
+            "laudo_analisado": laudo_analisado,
             "frete": av.frete_incluso,
             "justificativa": av.justificativa,
             "url": lote.url,
@@ -696,6 +734,45 @@ ALL_CHECKS: List[CheckFn] = [
 ]
 
 
+def _check_cobertura_reforma(rows: List[Dict[str, Any]]) -> List[str]:
+    """Indicador agregado: % de lotes com laudo analisado que saíram com reforma=0.
+
+    Premissa operacional: a maior parte dos carros de leilão precisa de alguma
+    reforma. Quando muitos lotes saem com reforma=0, é sinal de pipeline
+    quebrado (LLM em fallback degradado, severidade enviesada pra NENHUMA,
+    prompt regredido). Filtra lotes SEM laudo analisado (`reforma=0` por
+    construção) — só conta os que TINHAM como produzir valor.
+
+    Aciona o operador a rodar `make diagnose-cobertura` quando dispara — o
+    script identifica causa provável e sugere retry direcionado.
+
+    Single-tier (>=30%) por preferência: usuário considera 30% já alto demais
+    pra ser ignorado. Sem amostra mínima de 5 lotes, retorna silêncio.
+    """
+    com_laudo = [r for r in rows if r.get("laudo_analisado")]
+    if len(com_laudo) < _COBERTURA_REFORMA_AMOSTRA_MIN:
+        return []
+    sem_reforma = sum(1 for r in com_laudo if (r.get("reforma_estimada") or 0) == 0)
+    pct = sem_reforma / len(com_laudo)
+    if pct < _COBERTURA_REFORMA_PCT_LIMITE:
+        return []
+    return [
+        f"⚠ Cobertura de reforma: {sem_reforma}/{len(com_laudo)} lotes "
+        f"({pct * 100:.0f}%) com laudo analisado saíram com reforma=0 — "
+        f"rodar 'make diagnose-cobertura' pra identificar causa "
+        f"(LLM em fallback, severidade enviesada, lotes pendentes) "
+        f"e re-disparar retry direcionado"
+    ]
+
+
+# Cada entrada recebe a lista inteira de rows e retorna 0+ strings de violação.
+# Diferente de CHECKS (per-row), checa AGREGADOS — % de lotes num estado, drift
+# entre amostras, etc. Extensível: adicionar nova função à lista pra ganhar
+# cobertura sem mexer em `audit()`.
+BatchCheckFn = Callable[[List[Dict[str, Any]]], List[str]]
+BATCH_CHECKS: List[BatchCheckFn] = [_check_cobertura_reforma]
+
+
 def audit(engine, sample_size: int = 20) -> List[str]:
     """Retorna lista de violações. Vazia = tudo ok.
 
@@ -734,4 +811,12 @@ def audit(engine, sample_size: int = 20) -> List[str]:
             f"⚠ {coluna}: {info['count']} linha{suffix} — {motivo} "
             f"(ex: lote {info['exemplo_lote']} valor={info['exemplo_valor']!r})"
         )
+
+    # Checks agregados (% de lotes num estado, drift, etc) — recebem o batch
+    # inteiro e devolvem suas próprias strings de violação prontas. Não passam
+    # pelo agregador per-coluna porque a violação é da AMOSTRA, não de uma
+    # célula específica.
+    for batch_check in BATCH_CHECKS:
+        saida.extend(batch_check(rows))
+
     return saida

@@ -1,7 +1,7 @@
 # Carros SA — atalhos pra comandos comuns
 # Uso: `make <target>` (ex: `make test`)
 
-.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit limpar-decoys auditar-laudos
+.PHONY: help test test-fast ingest extrair-laudo db-reset sheets triagem triagem-debug top empresas setup-cron worktree-new worktree-remove audit limpar-decoys auditar-laudos diagnose-cobertura
 
 PY := PYTHONPATH=. .venv/bin/python
 
@@ -10,6 +10,7 @@ help:
 	@echo "  make test                          # roda toda a suíte (baseline obrigatório)"
 	@echo "  make test-fast                     # roda suíte, para no 1o erro"
 	@echo "  make audit                         # valida colunas exportadas contra o Glossário"
+	@echo "  make diagnose-cobertura            # diagnostica cobertura baixa de reforma (read-only)"
 	@echo "  make ingest [FILE=...]             # persiste JSON de listagem no SQLite"
 	@echo "  make extrair-laudo PDF=...         # roda ExtratorLaudo num PDF local"
 	@echo "  make db-reset                      # apaga carros_sa.db e recria schema"
@@ -73,6 +74,9 @@ db-reset:
 
 audit:
 	$(PY) scripts/audit_columns.py
+
+diagnose-cobertura:
+	$(PY) scripts/diagnose_cobertura.py
 
 worktree-new:
 ifndef WS

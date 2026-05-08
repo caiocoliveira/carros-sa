@@ -26,6 +26,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  id-token: write  # claude-code-action usa OIDC pra trocar pelo token de app GitHub
 
 concurrency:
   group: pr-review-${{ github.event.pull_request.number }}

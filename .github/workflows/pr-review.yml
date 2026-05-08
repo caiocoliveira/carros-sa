@@ -1,0 +1,93 @@
+name: pr-review
+
+# Review automático em todo PR aberto (drafts incluídos por default — `opened`
+# dispara antes do GitHub distinguir draft vs ready_for_review).
+#
+# Auth: usa `CLAUDE_CODE_OAUTH_TOKEN` (gerado localmente via `claude setup-token`,
+# Pro/Max only) em vez de ANTHROPIC_API_KEY pra queimar quota da assinatura
+# em vez de cobrar separado por API. Setup one-time:
+#   1. Local: `claude setup-token` → copiar token impresso
+#   2. GitHub: Settings → Secrets → New: nome `CLAUDE_CODE_OAUTH_TOKEN`,
+#      valor = token do passo 1
+#
+# Sem o secret o workflow falha silenciosamente (log do Actions); não bloqueia
+# merge nem polui PR.
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Claude precisa do histórico pra contextualizar mudanças
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Token OAuth da assinatura (não API key). Aceita pelo input
+          # `anthropic_api_key` por design da action.
+          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--max-turns 8"
+          prompt: |
+            Você é reviewer técnico do projeto Carros SA — PoC multi-agente que
+            ranqueia lotes de leilão online por ROI potencial. Leia `CLAUDE.md`
+            e `LESSONS.md` antes de tudo: contém invariantes do projeto, padrões
+            de falha recorrentes e regras inegociáveis.
+
+            Faça review do PR atual. Foque APENAS em problemas reais — sem
+            elogios, sem sugestões cosméticas, sem comentar coisas óbvias.
+
+            Sinalizar com prioridade:
+
+            1. **Mudanças em `carros_sa/models.py`** — contratos imutáveis entre
+               sessões paralelas. Qualquer alteração precisa ter justificativa
+               explícita no corpo do PR; senão é red flag.
+
+            2. **Identidade econômica do precificador** (CLAUDE.md/Padrões):
+               `preco_max + reforma + frete + taxas_max + custo_op = preco_giro × (1 − margem_min)`.
+               Mudanças em `precificador.py` ou no display de ROI/Lucro precisam
+               preservar essa identidade. Ranqueamento usa `score_roi` (caso médio
+               no preço-alvo), nunca uma "ROI no máximo" derivada — virá tautológica.
+
+            3. **Fórmula fechada do lucro absoluto** (LESSONS.md):
+               `lucro = preco_giro × score_roi / (1 + score_roi)`.
+               NÃO `score_roi × preco_alvo` — subestima ~10%. Helper canônico
+               é `sheets._lucro_absoluto_no_alvo`.
+
+            4. **Calibração contra benchmark operacional** (LESSONS.md/P6) —
+               qualquer threshold/limiar (audit, BATCH_CHECKS, scores) deve
+               citar de onde vem o número. Se o PR introduz threshold sem
+               justificar, comente.
+
+            5. **LLM em testes** — proibido. Testes usam fixture salva em
+               `tests/fixtures/`. Se ver `import google.genai` ou
+               `AnthropicClient` num teste sem mock, sinalize.
+
+            6. **Cobertura de teste** — feature nova precisa de teste novo com
+               fixture de dado real (modelo: `tests/test_extrator_laudo_consolidacao.py`).
+               Bug fix precisa de teste que reproduza o bug. Se o diff adiciona
+               código não-trivial sem teste correspondente, comente.
+
+            7. **Segredos** — `.env`, chaves, tokens. Se o diff cola algo que
+               parece secret, FLAGUE com URGÊNCIA pra o usuário rotacionar.
+
+            Formato do output:
+            - Comente como review do PR (post via GitHub API).
+            - Se zero problemas reais, comente "LGTM, sem red flags identificados"
+              + 1-2 frases sobre o que o PR faz. Não inventar problemas.
+            - Use line comments quando o problema for específico de uma linha.
+            - Use general comment pra observações arquiteturais.
+
+            Brevidade é virtude. Reviewer humano não tem tempo pra ler ensaio.

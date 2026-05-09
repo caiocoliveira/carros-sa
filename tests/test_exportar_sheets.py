@@ -450,7 +450,7 @@ class TestSheetsExporterQuery:
         # tudo chute, então a planilha esconde.
         assert data_row[HEADER.index("Reforma (R$)")] == "—"
         assert data_row[HEADER.index("Lance Máximo (R$)")] == "—"
-        assert data_row[HEADER.index("ROI anualizado (%)")] == "—"
+        assert data_row[HEADER.index("ROI alvo (%)")] == "—"
         assert data_row[HEADER.index("Lucro (R$)")] == "—"
 
     def test_exportar_laudo_fallback_confidence_baixa_marca_nao_capturado(self):
@@ -656,7 +656,7 @@ class TestSheetsExporterQuery:
         assert "✗ Caro demais" in situacao
         # Numéricos especulativos suprimidos
         assert row[HEADER.index("Lucro (R$)")] == "—"
-        assert row[HEADER.index("ROI anualizado (%)")] == "—"
+        assert row[HEADER.index("ROI alvo (%)")] == "—"
         assert row[HEADER.index("Tese")] == "—"
         # Mas contexto pra triagem manual continua visível
         assert row[HEADER.index("Lance Máximo (R$)")] == 30_000
@@ -886,18 +886,19 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
-    def test_exportar_roi_anualizado_baseado_em_score_roi(self):
-        """ROI anualizado = score_roi × 365 / dias_giro.
+    def test_exportar_roi_alvo_eh_score_roi_intrinsic(self):
+        """ROI alvo = score_roi × 100 (cru, sem anualizar).
 
-        Antes a coluna usava `roi_max` (≈margem_min/(1−margem_min) ≈ constante por
-        empresa) — virava tautologia que só variava por dias_giro. Agora reflete
-        score_roi calibrado por risco/liquidez do lote, deixando a coluna
-        informativa pro ranking.
+        Antes (até 2026-05-08) era 'ROI anualizado (%)' = score_roi × 365 / dias_giro
+        com floor 60d. Operador pediu pra ver o ROI cru da operação no preço-alvo —
+        anualizar dependia de calibração de giro frequentemente otimista. Ranking
+        interno continua usando o anualizado (key do sorted), mas a coluna exibe
+        o intrinsic puro.
         """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=20000))
-            # score_roi=0.3 conhecido; dias_giro_estimado=None → fallback 90d
+            # score_roi=0.3 conhecido
             av = _avaliacao("L001", preco_giro=35000, preco_max=25000, score_roi=0.3)
             session.add(av)
             session.add(_laudo("L001"))
@@ -915,10 +916,10 @@ class TestSheetsExporterQuery:
                 exporter.exportar("uberlandia_mg", session)
 
         rows = mock_ws.update.call_args_list[0][0][0]
-        idx_roi = HEADER.index("ROI anualizado (%)")
+        idx_roi = HEADER.index("ROI alvo (%)")
         roi_val = rows[2][idx_roi]
-        # 0.3 × 365 / 90 = 121.67%
-        assert roi_val == pytest.approx(121.7, abs=0.5)
+        # 0.3 × 100 = 30.0% (ROI cru intrinsic, não anualizado)
+        assert roi_val == pytest.approx(30.0, abs=0.1)
 
 
 class TestSheetsExporterFimEmObrigatorio:

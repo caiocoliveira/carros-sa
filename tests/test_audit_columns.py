@@ -150,11 +150,9 @@ class TestAuditHappyPath:
 
 class TestAuditDeteccao:
     def test_roi_absurdo_reportado(self):
-        """ROI anualizado > 500% sinaliza dias_giro otimista ou margem×fator inflado.
-
-        Threshold apertado de 1000% → 500% pra pegar saturação realista (operação
-        Reinaldo: 60-75% ano; sistema chega a 500% só quando dias_giro<60d
-        otimista colide com fatores próximos do teto).
+        """ROI alvo > 100% sinaliza bug de cálculo (margem cap em 50% deveria
+        limitar score_roi a ≤100%). Antes (até 2026-05-08) a coluna era ROI
+        anualizado com threshold 500% — calibrado pra giro otimista.
 
         Lote precisa ser VIÁVEL (preco_max > lance_atual) — em inviáveis o
         ROI vai pra "—" no display e o audit espelha (suprime check).
@@ -162,10 +160,10 @@ class TestAuditDeteccao:
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001", lance_atual=1000))
-            # score_roi=2.0 × 365/60 (floor) = 1217% > 500
+            # score_roi=2.0 × 100 = 200% > 100 (matematicamente impossível com cap)
             session.add(_avaliacao(
                 "L001",
-                preco_max=2000,  # > lance_atual → viável (sem isso o ROI vira '—')
+                preco_max=2000,  # > lance_atual → viável
                 preco_giro=100_000,
                 reforma_estimada=0,
                 frete_incluso=0,
@@ -176,13 +174,14 @@ class TestAuditDeteccao:
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"
 
-    def test_roi_300_pct_nao_reportado(self):
-        """ROI ~300% (lote viável típico do Polo/Compass simulados) NÃO deve
-        ser flagged — está dentro da zona "otimista mas plausível"."""
+    def test_roi_50_pct_nao_reportado(self):
+        """ROI alvo 50% (lote viável típico) NÃO deve ser flagged — está dentro
+        do range plausível pré-cap de margem (margem 33% → score_roi 50%).
+        """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))
-            # score_roi=0.50, dias_giro=60 (floor) → 0.50×365/60 = 304%
+            # score_roi=0.50 → ROI alvo = 50%
             session.add(_avaliacao(
                 "L001",
                 dias_giro_estimado=60,
@@ -191,7 +190,7 @@ class TestAuditDeteccao:
             session.commit()
         violacoes = audit(engine)
         assert not any("ROI" in v for v in violacoes), (
-            f"ROI 304% não deveria flag (dentro da zona aceita): {violacoes}"
+            f"ROI 50% não deveria flag (dentro da zona aceita): {violacoes}"
         )
 
     def test_reforma_negativa_reportada(self):
@@ -668,15 +667,15 @@ class TestAuditReformaPesada:
 class TestAuditEspelhaDisplay:
     """Lotes inviáveis (lance_atual > preco_max) viram '—' em ROI/Lucro/Tese
     no `SheetsExporter._write_sheet`. Audit deve espelhar — caso contrário
-    aparece dispararado "ROI anualizado negativo" em lotes que o operador
-    NÃO consegue confirmar abrindo a planilha. Padrão geral em LESSONS.md/P5b:
+    aparece disparado "ROI alvo negativo" em lotes que o operador NÃO
+    consegue confirmar abrindo a planilha. Padrão geral em LESSONS.md/P5b:
     audit é uma view sobre o display; toda supressão de display vale aqui também.
     """
 
     def test_lote_inviavel_com_score_efetivo_negativo_nao_dispara_roi(self):
-        """Cenário Fiesta ESTRUTURAL real: lance_atual=22.9k > preco_max=13k
-        → score_efetivo recalculado fica negativo (capital_ef > preco_giro)
-        → ROI anualizado fica -53.9%. Display: '—'. Audit: NÃO deve disparar.
+        """Cenário Fiesta ESTRUTURAL real: lance_atual=22.9k > preco_max=13k →
+        lote inviável → display vira '—' nas colunas ROI/Lucro/Tese. Audit
+        espelha — não deve disparar nem ROI negativo nem ROI absurdo.
         """
         engine = _engine_mem()
         with Session(engine) as session:

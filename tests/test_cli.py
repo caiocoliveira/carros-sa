@@ -242,14 +242,14 @@ def test_top_ranqueia_por_roi_anualizado_default(db_tmp):
             session.add(r)
         session.commit()
 
-    # Default: por ROI anualizado → RAPIDO vem antes.
+    # Default: ranking interno por ROI anualizado → RAPIDO vem antes.
     # --incluir-inviaveis pq fixture tem lance > preco_max (escolha intencional
     # pra isolar a regra de ranking do filtro de viabilidade).
     result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--incluir-inviaveis"],
                            env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert result.stdout.index("RAPIDO") < result.stdout.index("LENTO")
-    assert "ROI anualizado" in result.stdout
+    assert "ROI anualizado interno" in result.stdout
 
     # --absoluto inverte: por score_roi puro → LENTO (30%) vem antes de RAPIDO (20%)
     result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--absoluto",
@@ -257,7 +257,7 @@ def test_top_ranqueia_por_roi_anualizado_default(db_tmp):
                                env={"COLUMNS": "200"})
     assert result_abs.exit_code == 0
     assert result_abs.stdout.index("LENTO") < result_abs.stdout.index("RAPIDO")
-    assert "ROI absoluto" in result_abs.stdout
+    assert "ROI alvo" in result_abs.stdout
 
 
 # ---------------------------------------------------------------------------

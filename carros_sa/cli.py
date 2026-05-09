@@ -81,8 +81,13 @@ def top(
 ) -> None:
     """Lista as top N avaliações da empresa já persistidas no SQLite.
 
-    Ordenação default: ROI anualizado (score_roi × 365 / dias_giro). Premia
-    carros de giro rápido. `--absoluto` volta pro score_roi puro (legado).
+    Coluna principal de retorno: 'ROI alvo (%)' = `score_roi × 100` (cru, sem
+    anualizar). Bate com a coluna 'ROI alvo (%)' da planilha — paridade explícita.
+
+    Ordenação default: ROI ANUALIZADO interno (`score_roi × 365 / dias_giro`).
+    Premia carros de giro rápido — duas linhas com ROI alvo igual podem aparecer
+    em ordens diferentes porque o desempate usa o tempo de giro. `--absoluto`
+    força ranking pelo `score_roi` cru (lote lento empata com lote rápido).
 
     Filtro default: oculta lotes inviáveis (lance atual já passou do nosso teto).
     Use `--incluir-inviaveis` pra ver tudo (útil pra calibrar fórmula).
@@ -149,7 +154,7 @@ def top(
     from carros_sa.agents.calibracao_giro import _categoria_de_modelo
     from carros_sa.tools.popularidade import bucket_modelo
 
-    sufixo = "ROI absoluto" if por_absoluto else "ROI anualizado"
+    sufixo = "ROI alvo" if por_absoluto else "ROI anualizado interno (giro)"
     titulo = f"Top {len(rows)} lotes — {empresa} (ordem: {sufixo})"
     if not incluir_inviaveis and n_inviaveis > 0:
         titulo += f" — {n_inviaveis} inviável(is) ocultado(s)"
@@ -159,14 +164,13 @@ def top(
     tbl.add_column("Ano", justify="right")
     tbl.add_column("Lance", justify="right")
     tbl.add_column("Preço-Alvo", justify="right")
-    tbl.add_column("ROI%", justify="right")
+    tbl.add_column("ROI alvo", justify="right")
     tbl.add_column("Dias", justify="right")
-    tbl.add_column("ROI/ano%", justify="right")
     tbl.add_column("Lucro", justify="right")
     tbl.add_column("Pop.", justify="left")
     tbl.add_column("Risco", justify="right")
     from carros_sa.tools.sheets import _lucro_absoluto_efetivo
-    for av, lote, roi_anual in rows:
+    for av, lote, _roi_anual_ranking_only in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
         # Lucro absoluto efetivo: usa entrada por `max(lance_atual, preco_alvo)`
@@ -181,7 +185,6 @@ def top(
             f"R$ {av.preco_alvo:,}",
             f"{av.score_roi * 100:.1f}%",
             str(av.dias_giro_estimado) if av.dias_giro_estimado else "—",
-            f"{roi_anual * 100:.1f}%",
             f"R$ {lucro_esperado:,}",
             bucket.value,
             f"{av.fator_risco:.2f}",

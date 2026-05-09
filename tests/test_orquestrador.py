@@ -279,14 +279,26 @@ class TestPipelineLote:
             extraido_em=datetime.utcnow(),
         ))
 
-    def test_lote_ja_avaliado_com_laudo_ok_nao_reavalia(self):
-        """Short-circuit: avaliação existente + laudo com conf≥0.6 → retorna sem rodar pipeline."""
+    def test_lote_ja_avaliado_com_laudo_ok_nao_reavalia(self, tmp_path, monkeypatch):
+        """Short-circuit: avaliação existente + laudo com conf≥0.6 + PDF on-disk
+        → retorna sem rodar pipeline.
+
+        Requer PDF on-disk desde 2026-05-09 — antes bastavam (avaliação + cache),
+        mas em CI a pasta `data/laudos_pdfs/` ressuscita vazia entre runs e a
+        auditoria estrita falhava por `pdf_ausente`. Agora `pdf_ok` é parte do
+        critério de short-circuit pra alinhar com a invariante da auditoria.
+        """
         engine, session, lote = self._setup()
         empresa = _empresa()
 
         self._inserir_avaliacao_existente(session)
         self._inserir_laudo(session, "L001", confidence=0.9)
         session.commit()
+
+        # PDF on-disk mockado em tmp_path — `_pdf_persistente_path` é resolvido
+        # via `_PDF_STORAGE_DIR` no módulo do orquestrador, fácil de patchar.
+        monkeypatch.setattr("carros_sa.orquestrador._PDF_STORAGE_DIR", tmp_path)
+        (tmp_path / "L001.pdf").write_bytes(b"%PDF-1.4\n" + b"x" * 200_000)
 
         mock_page = AsyncMock()
         vision_client = MagicMock()
@@ -304,6 +316,46 @@ class TestPipelineLote:
 
         assert res.avaliado is True
         assert res.preco_alvo == 18000
+
+    def test_lote_ja_avaliado_com_laudo_ok_mas_pdf_ausente_reavalia(self, tmp_path, monkeypatch):
+        """Short-circuit NÃO dispara quando o PDF sumiu do disco (cenário CI).
+
+        Em runs subsequentes do workflow, state/db pode falhar ao restaurar
+        `data/laudos_pdfs/<lote>.pdf` (network glitch, branch corrompida).
+        Antes do fix de 2026-05-09, o lote tinha cache>=0.6 + AvaliacaoLote, o
+        short-circuit pulava o pipeline, e o `auditar_laudos --strict` no fim
+        do workflow falhava por `pdf_ausente`. Defesa em profundidade: pipeline
+        re-roda pra re-baixar o PDF.
+        """
+        engine, session, lote = self._setup()
+        empresa = _empresa()
+
+        self._inserir_avaliacao_existente(session)
+        self._inserir_laudo(session, "L001", confidence=0.9)
+        session.commit()
+
+        # tmp_path EXISTE mas o PDF não foi escrito.
+        monkeypatch.setattr("carros_sa.orquestrador._PDF_STORAGE_DIR", tmp_path)
+
+        mock_page = AsyncMock()
+        vision_client = MagicMock()
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            with patch(
+                "carros_sa.orquestrador.coletar_detalhe",
+                new_callable=AsyncMock,
+                return_value=("", None),
+            ) as mock_det:
+                loop.run_until_complete(
+                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+                )
+                # coletar_detalhe DEVE ter sido chamado — o pipeline precisa
+                # voltar pra re-baixar o PDF que sumiu.
+                mock_det.assert_called_once()
+        finally:
+            loop.close()
 
     def test_lote_ja_avaliado_mas_laudo_pendente_reavalia(self):
         """Avaliação existente + laudo conf<0.6 → pipeline RE-executa (re-scrapa detalhe).

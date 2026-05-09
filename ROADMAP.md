@@ -10,6 +10,23 @@ Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator
 
 Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
 
+### DD2 — Persistência de PDFs em state/db + defesa em profundidade no retry (2026-05-09) ✅
+- **Branch:** `claude/great-turing-T0zcC`
+- **Motivação:** Operador pediu pra garantir que TODO carro na planilha tem laudo baixado, revisado e link clicável — e identificar a causa de não estar acontecendo, "pra nunca mais acontecer". Diagnóstico: o workflow do GitHub Actions persistia DB e cookies em `state/db` mas DESCARTAVA `data/laudos_pdfs/` entre runs ("PDFs (data/laudos_pdfs/) NÃO são persistidos"). Em runs subsequentes ao 1º, o DB já trazia `LaudoCache.confidence>=0.6` (laudo "analisado") mas a pasta de PDFs ressuscitava VAZIA. O retry script com `--somente-laudo-pendente` filtrava só `confidence<0.6`, então ignorava esses lotes. Resultado: `auditar_laudos --strict` no fim do workflow falhava cronicamente com motivo `pdf_ausente` em todo run após o 1º — invariante prometida ("todo lote ativo na planilha tem PDF baixado + cache forte + URL clicável") quebrada por design.
+- **Mudanças:**
+  - [`.github/workflows/triagem.yml`](.github/workflows/triagem.yml) — restore step agora restaura subárvore `laudos_pdfs/` de `state/db` pra `data/laudos_pdfs/` via `git ls-tree` + `git show`. Persistência step adiciona subárvore `laudos_pdfs/` ao tree órfão (filtra >5KB pra não persistir HTML de erro). Comentário de cabeçalho explica o porquê (alinhar estado operacional com estado real).
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — short-circuit do `_pipeline_lote` agora exige `pdf_ok` (PDF >5KB on-disk) ALÉM de `ja_avaliado` + `laudo_ok`. Defesa em profundidade: se `state/db` falhar restaurando o PDF parcialmente, o pipeline re-roda e re-baixa em vez de pular silenciosamente.
+  - [`scripts/reprocessar_lotes_do_db.py`](scripts/reprocessar_lotes_do_db.py) — `--somente-laudo-pendente` agora também pega lotes com cache forte mas PDF ausente em disco. Filtro extraído pra helper testável `_filtrar_laudo_pendente`.
+- **Cobertura:** 5 testes novos:
+  - [`tests/test_orquestrador.py`](tests/test_orquestrador.py) — atualiza `test_lote_ja_avaliado_com_laudo_ok_nao_reavalia` (agora exige fake PDF on-disk pra short-circuit) + novo `test_lote_ja_avaliado_com_laudo_ok_mas_pdf_ausente_reavalia` (cenário CI: cache forte + PDF sumiu → pipeline re-roda).
+  - [`tests/test_laudo_audit.py::TestFiltroRetryPdfAusente`](tests/test_laudo_audit.py) — 4 testes do filtro `_filtrar_laudo_pendente` (cache forte + PDF presente: nada; cache forte + PDF ausente: pendente; cache fraco: pendente; cache ausente: pendente).
+- **Limitações conhecidas:**
+  - URLs assinadas do Google Cloud Storage continuam expirando ~1h após geração; a planilha pode mostrar "Ver laudo" clicável que retorna 403 entre runs. Workaround atual: a célula degrada pra "PDF salvo (link expirado)" quando a URL ausente, e agora os PDFs persistidos em `state/db` garantem que esse fallback é honesto. Resolução plena exige servir os PDFs de fonte estável (workstream futuro — GitHub raw URL, S3 público, etc.).
+  - Branch `state/db` cresce em volume (~180MB/600 lotes × 300KB cada). GitHub fará GC dos blobs não referenciados quando o tree mais recente não os listar; até lá, fica nos objects.
+- **Follow-ups (não-bloqueantes, registrados no review arquitetural):**
+  - **Rotação/GC de `state/db`** — cada run faz `commit-tree -p $PARENT`, então blobs antigos ficam acumulados na cadeia. Limite soft de 5GB do GitHub = ~6 meses de runway no ritmo atual. Considerar (a) `git push --force` periódico resetando histórico, ou (b) script de cleanup que reescreve sem parent quando atingir N commits. Não bloqueia agora.
+  - **Re-assinatura de URL "Ver laudo" no export** — substituir as URLs assinadas expirantes (Google Cloud Storage, ~1h) por links estáveis quando o exporter rodar. Caminhos possíveis: GitHub raw URL apontando pra `state/db/laudos_pdfs/<lote>.pdf` (se repo público), ou re-assinar via service account na hora do export. Resolve a mitigação atual ("PDF salvo (link expirado)") deixando link sempre vivo.
+
 ### CC — Coluna "Lucro (R$)" total absoluto (sem quebra mensal) (2026-05-08) ✅
 - **Branch:** `claude/lucro-total-sem-quebra-mensal` (PR #65 mergeado em `d2906cc`)
 - **Motivação:** Operador pediu pra ver o lucro TOTAL projetado da revenda em vez de normalizado por mês. Divisão por `dias_giro_estimado` confundia: defaults categóricos otimistas (HATCH NOVO=25d sem floor) faziam `Lucro/mês = Lucro absoluto`, levando operador a achar que entrava aquele valor todo mês.

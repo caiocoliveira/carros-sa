@@ -126,6 +126,39 @@ linhas" (P5 original). Toda **substituição** de display (campo X vira `"—"`
 em condição Y) precisa do mesmo no `COLUMN_EXTRACTORS` do audit. Audit é uma
 view sobre o display, não sobre o DB cru.
 
+### P5e. Paridade audit ↔ display: TODA dimensão de supressão, não só inviabilidade
+
+Sintoma: display oculta um campo em CONDIÇÃO Y (não só `viavel=False`),
+mas audit lê o valor cru e dispara warning. Operador olha planilha e vê
+"—" no campo, mas o relatório do audit reclama dele. Falso alarme estrutural.
+
+Caso de referência (2026-05-09):
+- **`laudo_analisado=False` (confidence < 0.6 ou ausente)** — `_write_sheet`
+  já oculta Lance Máximo / Lucro / ROI / Reforma / Tese e mostra "⚠ LAUDO
+  NÃO CAPTURADO". Audit cobria só `viavel=False` (paridade P5c). Lotes com
+  laudo fallback `_laudo_sem_pdf` (confidence 0.55) marcam severidade=ESTRUTURAL
+  sem peça → audit disparava "Reforma R$ 0 com severidade estrutural" mesmo
+  quando display oculta toda a linha.
+- **`lance_atual == preco_max` (boundary inviável)** — `viavel = preco_max >
+  lance` é estrito; zona apertada usava `<=` no max. Audit reportava "zona
+  apertada" enquanto display mostrava "✗ Caro demais". Sinais contraditórios
+  na mesma linha.
+
+Generalização (P5c → P5e): **cada `if condicao_X: cell = "—"` no exporter
+precisa de paridade explícita no audit, NÃO importa qual é a condição**.
+Lista de dimensões cresce com o produto (em 2026-05-09 já são ≥3: `fim_em
+is None`, `viavel`, `laudo_analisado`). Ler `_write_sheet` end-to-end antes
+de adicionar novo extractor — caso contrário o audit eventualmente cobre só
+algumas dimensões e gera falsos alarmes silenciosos no resto.
+
+**Antídoto operacional:** ao adicionar nova condição de supressão no display:
+1. listar todos os campos que ficam `"—"` nessa condição
+2. atualizar `_build_rows` pra calcular o flag (`laudo_analisado`, etc.)
+3. atualizar `COLUMN_EXTRACTORS` pra cada campo retornar `"—"` quando o flag for `False`
+4. atualizar cross-checks (`_check_*`) pra retornar `[]` quando o flag for `False`
+5. validators de `CHECKS` que comparam `v <= 0` precisam guarda `isinstance(v, (int, float))` pra tolerar `"—"` sem `TypeError`
+6. teste guard do tipo `test_FOO_em_X_falsa_nao_dispara` pra cada cross-check.
+
 ### P5d. If/elif encadeado num check esconde red flags atrás de yellow flags
 
 Sintoma: validador de coluna usa `if cond_A else (if cond_B else (if cond_C ...))`
@@ -327,3 +360,10 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | (revisão preventiva 2026-05-07, post-cluster) | P5b/P6 | Audit espelha TODAS as supressões do display (não só filtros de linha). Lotes inviáveis substituem ROI/Lucro/Tese por `—` em `_write_sheet:422-429`; antes o `COLUMN_EXTRACTORS` retornava o número cru e `_score_roi_efetivo` com `capital_ef > preco_giro` (Fiesta ESTRUTURAL real, -53.9%) disparava "ROI anualizado negativo" em lotes que o operador NUNCA via. Falso alarme operacional. Padrão genérico: paridade de SUBSTITUIÇÃO, não só de filtragem. |
 | (revisão preventiva 2026-05-07, post-cluster) | P4/RC2 | Cap defensivo `preco_giro_fipe ≤ FIPE × 1.20` no precificador. Cap mediana (entrada, em avaliador_mercado, n<5) + f_km saturado (1.15) podiam multiplicar pra 1.38×FIPE — combinação patológica de duas otimizações. Defesa em camadas: 3 caps com propósitos distintos (entrada, saída, alarme). Não compartilham constante por design — propósitos diferentes pedem ajuste independente. |
 | (revisão preventiva 2026-05-07, post-cluster) | RC3 | `_score_roi_efetivo` coalesce `av.preco_alvo or 0`. Schema diz non-nullable hoje, mas migrações antigas podem ter deixado NULL; sem coalescência o `lance - None` levantava TypeError silencioso que quebrava a planilha inteira. Helper que recebe SQLModel "non-nullable" deve coalescer — schema atual ≠ histórico do DB. |
+| (DD2 2026-05-09) | P3, P5c | **Persistência seletiva quebra invariante de auditoria.** Workflow CI persistia DB+cookies em `state/db` mas descartava `data/laudos_pdfs/` entre runs ("PDFs são só cache pra UX"). Audit demandava PDF on-disk como uma das 3 condições; com DB restaurado e PDFs zerados, `auditar_laudos --strict` falhava cronicamente por `pdf_ausente`. Padrão genérico: **se a auditoria valida (A, B, C) ∧, persistência tem que cobrir (A, B, C) também — persistir 2 dos 3 cria contradição garantida pelo próprio gate**. Fix: persistir `laudos_pdfs/` na subárvore de `state/db` + curto-circuito do orquestrador exigir PDF on-disk + retry filter pegar PDF ausente como pendente. Defesa em profundidade. |
+| (revisão preventiva 2026-05-09) | P5e | Paridade audit ↔ display pra `laudo_analisado=False` (confidence < 0.6 ou laudo ausente). `_build_rows` agora calcula o flag e `COLUMN_EXTRACTORS` retorna `"—"` em Lance Máximo / Lucro / ROI / Reforma / Tese. Cross-checks (`_check_zona_apertada`, `_check_lance_maximo_acima_fipe`, `_check_reforma_pesada`, novos `_check_motor_problema`, `_check_severidade_estrutural`) respeitam o flag. Antes: lote `_laudo_sem_pdf` (confidence 0.55) marcava ESTRUTURAL sem peça → "Reforma R$ 0 com severidade estrutural" disparava enquanto display oculta tudo. Falso alarme estrutural. |
+| (revisão preventiva 2026-05-09) | P5e | `_check_zona_apertada` usa `<` estrito no `preco_max` (era `<=`). Boundary `lance_atual == preco_max` é INVIÁVEL (`viavel = preco_max > lance`); display oculta tudo, audit não deve reportar zona apertada. Antes: planilha mostrava "✗ Caro demais" e audit reportava "zona apertada" — sinais contraditórios na mesma linha. |
+| (revisão preventiva 2026-05-09) | P6 | Cross-checks operacionais novos: `_check_motor_problema_em_viavel` (motor_ok=False em lote viável + laudo analisado) e `_check_severidade_estrutural_em_viavel`. Precificador penaliza ambos via fator_risco mas o teto saturado SÓ não basta — com lance baixo, lote passa como "✓ Viável" sem warning visível. Padrão: condição econômica = "passa pelo precificador"; condição operacional = "warning visível pro operador". Modelar AS DUAS. |
+| (revisão preventiva 2026-05-09) | P5/RC2 | `_check_mediana_distante_fipe` em audit — flag informativo quando webmotors_mediana > FIPE × 1.20 (similares poluídos do AA: Tiggo 7 entre Tiggo 2) ou < FIPE × 0.70 (sample fraca). Refactor FIPE-only de 2026-05-08 tornou a coluna "Mediana mercado" puramente informativa, mas operador olhando "mediana 130% FIPE" pode achar que é "carro premium em alta" — falso. Audit fecha o vetor sem afetar cálculo. |
+| (revisão preventiva 2026-05-09) | RC4 | `_PRECO_GIRO_FIPE_RATIO_MAX` 1.10 → 1.13. Threshold antigo tinha gap de só 0.75pp do max natural (1.0925 = `_FATOR_MAX × 0.95`); qualquer aumento futuro de `_FATOR_MAX` em ajuste_km.py disparava falso positivo automático. Padrão: threshold de "guard de regressão" calibrado pelo max teórico de constante em outro arquivo precisa de **margem ≥ 2-3pp** + comentário cruzado referenciando a constante. Quem altera a constante futuramente vê a referência — caso contrário o gap silenciosamente fecha. |
+| (revisão preventiva 2026-05-09) | RC3 | Validators de `CHECKS` com `v <= 0` precisam de guarda `isinstance(v, (int, float))` quando o coluna pode receber `"—"` da supressão do display. Sem guarda, `"—" <= 0` levanta TypeError em runtime — só dispara quando o caminho da supressão é exercitado em produção (laudo NÃO CAPTURADO num lote real). Audit silenciosamente quebrava na linha em vez de pular o validator. |

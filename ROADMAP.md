@@ -4,11 +4,51 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 432/432 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 444/444 testes passando
 
-Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário, multi-tenancy por YAML.
+Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML.
 
 Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
+
+### DD2 — Persistência de PDFs em state/db + defesa em profundidade no retry (2026-05-09) ✅
+- **Branch:** `claude/great-turing-T0zcC`
+- **Motivação:** Operador pediu pra garantir que TODO carro na planilha tem laudo baixado, revisado e link clicável — e identificar a causa de não estar acontecendo, "pra nunca mais acontecer". Diagnóstico: o workflow do GitHub Actions persistia DB e cookies em `state/db` mas DESCARTAVA `data/laudos_pdfs/` entre runs ("PDFs (data/laudos_pdfs/) NÃO são persistidos"). Em runs subsequentes ao 1º, o DB já trazia `LaudoCache.confidence>=0.6` (laudo "analisado") mas a pasta de PDFs ressuscitava VAZIA. O retry script com `--somente-laudo-pendente` filtrava só `confidence<0.6`, então ignorava esses lotes. Resultado: `auditar_laudos --strict` no fim do workflow falhava cronicamente com motivo `pdf_ausente` em todo run após o 1º — invariante prometida ("todo lote ativo na planilha tem PDF baixado + cache forte + URL clicável") quebrada por design.
+- **Mudanças:**
+  - [`.github/workflows/triagem.yml`](.github/workflows/triagem.yml) — restore step agora restaura subárvore `laudos_pdfs/` de `state/db` pra `data/laudos_pdfs/` via `git ls-tree` + `git show`. Persistência step adiciona subárvore `laudos_pdfs/` ao tree órfão (filtra >5KB pra não persistir HTML de erro). Comentário de cabeçalho explica o porquê (alinhar estado operacional com estado real).
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — short-circuit do `_pipeline_lote` agora exige `pdf_ok` (PDF >5KB on-disk) ALÉM de `ja_avaliado` + `laudo_ok`. Defesa em profundidade: se `state/db` falhar restaurando o PDF parcialmente, o pipeline re-roda e re-baixa em vez de pular silenciosamente.
+  - [`scripts/reprocessar_lotes_do_db.py`](scripts/reprocessar_lotes_do_db.py) — `--somente-laudo-pendente` agora também pega lotes com cache forte mas PDF ausente em disco. Filtro extraído pra helper testável `_filtrar_laudo_pendente`.
+- **Cobertura:** 5 testes novos:
+  - [`tests/test_orquestrador.py`](tests/test_orquestrador.py) — atualiza `test_lote_ja_avaliado_com_laudo_ok_nao_reavalia` (agora exige fake PDF on-disk pra short-circuit) + novo `test_lote_ja_avaliado_com_laudo_ok_mas_pdf_ausente_reavalia` (cenário CI: cache forte + PDF sumiu → pipeline re-roda).
+  - [`tests/test_laudo_audit.py::TestFiltroRetryPdfAusente`](tests/test_laudo_audit.py) — 4 testes do filtro `_filtrar_laudo_pendente` (cache forte + PDF presente: nada; cache forte + PDF ausente: pendente; cache fraco: pendente; cache ausente: pendente).
+- **Limitações conhecidas:**
+  - URLs assinadas do Google Cloud Storage continuam expirando ~1h após geração; a planilha pode mostrar "Ver laudo" clicável que retorna 403 entre runs. Workaround atual: a célula degrada pra "PDF salvo (link expirado)" quando a URL ausente, e agora os PDFs persistidos em `state/db` garantem que esse fallback é honesto. Resolução plena exige servir os PDFs de fonte estável (workstream futuro — GitHub raw URL, S3 público, etc.).
+  - Branch `state/db` cresce em volume (~180MB/600 lotes × 300KB cada). GitHub fará GC dos blobs não referenciados quando o tree mais recente não os listar; até lá, fica nos objects.
+- **Follow-ups (não-bloqueantes, registrados no review arquitetural):**
+  - **Rotação/GC de `state/db`** — cada run faz `commit-tree -p $PARENT`, então blobs antigos ficam acumulados na cadeia. Limite soft de 5GB do GitHub = ~6 meses de runway no ritmo atual. Considerar (a) `git push --force` periódico resetando histórico, ou (b) script de cleanup que reescreve sem parent quando atingir N commits. Não bloqueia agora.
+  - **Re-assinatura de URL "Ver laudo" no export** — substituir as URLs assinadas expirantes (Google Cloud Storage, ~1h) por links estáveis quando o exporter rodar. Caminhos possíveis: GitHub raw URL apontando pra `state/db/laudos_pdfs/<lote>.pdf` (se repo público), ou re-assinar via service account na hora do export. Resolve a mitigação atual ("PDF salvo (link expirado)") deixando link sempre vivo.
+
+### DD — Audit cross-checks operacionais + paridade laudo_analisado (2026-05-09) ✅
+- **Branch:** `claude/sleepy-wright-Ocj2h`
+- **Motivação:** Revisão preventiva diária. Simulação algébrica de 10 cenários (gold Polo Track, f_km saturado teto/piso, ESTRUTURAL conf 0.5, mediana inflada 1.20×FIPE, zona apertada, lote inviável, dias_giro otimista, km=None) confirmou identidades MAS expôs 6 falhas residuais — todas relacionadas ao audit não cobrir contradições cross-field específicas E não espelhar todas as supressões do display.
+- **Bugs encontrados e corrigidos:**
+  1. **`_check_zona_apertada` disparava em lance == preco_max (boundary inviável)** — `viavel = preco_max > lance` é estrito, mas zona apertada usava `<=` no max. Resultado: planilha mostrava "✗ Caro demais" e audit reportava "zona apertada" simultaneamente — sinais contraditórios pro operador. Fix: `<` estrito no `preco_max`.
+  2. **Audit não espelhava `laudo_analisado=False`** — quando display oculta Lance Máximo / Lucro / ROI / Reforma / Tese (laudo extraído com confidence < 0.6 ou ausente), audit lia valores crus de `AvaliacaoLote`. Resultado: lotes "⚠ LAUDO NÃO CAPTURADO" disparavam falsos alarmes (ex.: reforma 0 + severidade ESTRUTURAL via `_laudo_sem_pdf` confidence 0.55). Fix: `_build_rows` calcula `laudo_analisado = laudo is not None and confidence ≥ 0.6` e `COLUMN_EXTRACTORS` retorna "—" pra Lance Máximo / Lucro / ROI / Reforma / Tese quando False. Cross-checks (`_check_zona_apertada`, `_check_lance_maximo_acima_fipe`, `_check_reforma_pesada`) também respeitam.
+  3. **Audit não checava `motor_ok=False` em lote viável** — laudo indica motor não-original ou com problema, mas o lote passa como "✓ Viável" (precificador penaliza via fator_risco mas o teto pode ainda ficar acima do lance). Operador focado em ROI alto podia dar lance sem ver o sinal. Fix: novo `_check_motor_problema_em_viavel` (paridade `viavel + laudo_analisado`).
+  4. **Audit não checava `severidade=ESTRUTURAL` em lote viável** — operador real (Reinaldo) descarta lotes estruturais categoricamente, mas com lance baixo + fator_risco no teto o sistema pode deixar passar. Fix: novo `_check_severidade_estrutural_em_viavel`.
+  5. **Audit não checava `Mediana mercado >> FIPE`** — desde refactor FIPE-only a coluna é informativa, mas mediana >120% FIPE indica similares poluídos do AA (Tiggo 7 entre Tiggo 2). Operador olhando "mediana alta" pode achar que é "carro premium em alta" — falso. Fix: novo `_check_mediana_distante_fipe` (>1.20 ou <0.70 dispara informativo).
+  6. **`_PRECO_GIRO_FIPE_RATIO_MAX = 1.10` apertado contra max natural 1.0925** — gap de só 0.75pp; qualquer aumento futuro de `_FATOR_MAX` em ajuste_km.py disparava falso positivo automático. Fix: 1.10 → 1.13 (margem ergonômica de ~3.5pp), comentário cruzando ref com `_FATOR_MAX`. Validators do `Lance Máximo / Reforma` também ganharam guarda `isinstance(v, (int, float))` pra tolerar "—" sem `TypeError`.
+- **Análise das colunas (resposta direta às perguntas do usuário, 10 cenários):**
+  - **Lance Máximo > FIPE?** Não em condições normais. Por construção FIPE-only, max teórico = `FIPE × 1.15 × 0.95 × 0.90 = 0.984×FIPE`. Cenário 2 (f_km saturado teto, custos zero) chega a 91.9% FIPE. Audit threshold 1.05 mantido como guard de regressão (matematicamente inviável bater FIPE no design atual).
+  - **`preco_giro_fipe` muito diferente da FIPE?** Pode em ±9% naturalmente (`f_km` ∈ [0.75, 1.15] × 0.95). Cenário 2 produz 109.2% FIPE, cenário 3 produz 71.2% FIPE. Audit threshold antigo 1.10 era apertado — agora 1.13 com ~3.5pp de margem ergonômica.
+  - **Linha-a-linha (10 cenários):** identidades algébricas confirmadas em todos. `lucro_alvo = preco_giro × score_roi / (1+score_roi)` exato; `score_efetivo ≤ score_intrinsic` sempre; `preco_alvo ≤ preco_max` sempre.
+- **Cobertura:** 12 testes guard novos (3 motor problema + 2 estrutural viável + 3 mediana distante + 1 zona apertada boundary + 3 paridade laudo_analisado). **Total: 444/444 verde** (eram 432).
+- **Limitações conhecidas:**
+  - Threshold da mediana (>1.20 ou <0.70) é heurístico — calibrar quando Webmotors live conectar (workstream G).
+  - `_check_motor_problema` e `_check_severidade_estrutural` usam `motor_ok` e `severidade` do `LaudoCache` (global). Em lotes onde o LLM categorizou errado, audit segue o LLM — não há sanity check sobre o laudo em si.
+  - Threshold 1.13 para `preco_giro_fipe` ainda dispara se alguém aumentar `_FATOR_MAX` para 1.20+ (raro, mas possível com lotes super-baixa-quilometragem). Comentário cruzado deixa explícita a relação.
+- **Updates persistentes:**
+  - `CLAUDE.md` ganhou 4 entradas em "Padrões aprendidos": (a) audit deve cruzar `laudo_analisado` em TODOS os checks dependentes do display, não só em `viavel`; (b) cross-checks operacionais (motor_ok, severidade ESTRUTURAL) que o precificador NÃO modela explicitamente; (c) thresholds com baixa margem do max natural (gap < 1pp) viram bombas-relógio quando alguém ajusta o max — sempre deixar margem ergonômica de 2-3pp; (d) validators de `CHECKS` com `v <= 0` têm que ter guarda `isinstance` pra tolerar "—" da supressão.
+  - `LESSONS.md` ganhou padrão **P5e** ("Paridade audit ↔ display: TODA dimensão de supressão, não só inviabilidade") + 4 entradas no apêndice.
 
 ### CC — Coluna "Lucro (R$)" total absoluto (sem quebra mensal) (2026-05-08) ✅
 - **Branch:** `claude/lucro-total-sem-quebra-mensal` (PR #65 mergeado em `d2906cc`)

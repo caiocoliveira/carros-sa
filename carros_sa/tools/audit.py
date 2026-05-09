@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.tools.laudo_audit import LAUDO_CONFIDENCE_MIN
 from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -31,12 +32,21 @@ SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 _SEVERIDADES_QUE_EXIGEM_REFORMA = {"media", "grave", "estrutural"}
 
 # Limite acima do qual `preco_giro_fipe` (= FIPE × f_km × 0.95 desde refactor
-# FIPE-only de 2026-05-08) começa a ficar suspeito. Max teórico hoje é
-# `FIPE × 1.15 × 0.95 = 1.0925×FIPE`, então este threshold em 1.10 só dispara
-# se alguém reativar mediana no precificador OU passar f_km > 1.157 (impossível
-# pelo clamp). Funciona como guard de regressão — se o check disparar em
-# produção saudável, é porque mexeram no precificador sem cap.
-_PRECO_GIRO_FIPE_RATIO_MAX = 1.10
+# FIPE-only de 2026-05-08) começa a ficar suspeito. Max natural hoje é
+# `FIPE × _FATOR_MAX × 0.95` = `FIPE × 1.15 × 0.95 = 1.0925×FIPE` (com
+# `_FATOR_MAX=1.15` definido em `carros_sa/ajuste_km.py`).
+#
+# Threshold 1.13 deixa **margem ergonômica de ~3.5pp** sobre o max natural.
+# Antes era 1.10 — apertado demais (gap 0.75pp): qualquer aumento futuro de
+# `_FATOR_MAX` (ex.: 1.15→1.20 pra acomodar lotes super-baixa-quilometragem)
+# disparava falso positivo automático. Agora o check tolera bumps moderados
+# do fator_km sem regressão silenciosa, mantendo a função de guard contra
+# reintrodução de mediana inflada (que costuma chegar a 1.30-1.50 quando
+# similares poluídos do AA passam pelo cap n<5).
+#
+# Se o check disparar em produção saudável, é porque mexeram no precificador
+# sem cap OU `_FATOR_MAX` foi aumentado além de 1.19 (1.19 × 0.95 = 1.130).
+_PRECO_GIRO_FIPE_RATIO_MAX = 1.13
 
 
 # Validator retorna None se ok; string com motivo se suspeito.
@@ -82,10 +92,16 @@ CHECKS: Dict[str, Validator] = {
     # MESMA linha emergem juntos (antes o if/elif encadeado escondia red flags
     # atrás de yellow flags: zona apertada coexistindo com preco_max > FIPE
     # mostrava só o 1º).
+    # `v` pode ser "—" (string) quando laudo_analisado=False — display oculta
+    # Lance Máximo. Audit espelha: trata "—" como "ok" (não há número pra
+    # validar). Sem essa guarda, `v <= 0` levanta TypeError.
     "Lance Máximo (R$)": lambda v, r: (
-        "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
-        if r["situacao"] == "✓ Viável" and (v is None or v <= 0)
-        else None
+        None if not isinstance(v, (int, float))
+        else (
+            "Lance Máximo não-positivo num lote 'Viável' — precificador deveria ter produzido teto > 0"
+            if r["situacao"] == "✓ Viável" and v <= 0
+            else None
+        )
     ),
     # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
     # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
@@ -104,11 +120,12 @@ CHECKS: Dict[str, Validator] = {
         if isinstance(v, (int, float)) and v <= 0
         else (
             # Sinaliza quando preco_giro_fipe (âncora de revenda usada no
-            # precificador) está muito acima da FIPE pura. Combinação típica
-            # que dispara: webmotors_mediana=FIPE×0.97 (fallback sem live data)
-            # + f_km saturado a 1.15 (km do lote << km mediana). Não é bug
-            # matemático, é dado fraco — duas premissas otimistas combinadas.
-            f"preco_giro_fipe R$ {r.get('preco_giro_fipe')} > FIPE × {_PRECO_GIRO_FIPE_RATIO_MAX:.2f} (FIPE={v}) — checar Webmotors live e km mediana"
+            # precificador) está acima do max natural FIPE × 1.13. Antes do
+            # refactor FIPE-only servia pra detectar mediana × f_km saturando;
+            # hoje só dispara se alguém reintroduzir mediana no precificador
+            # sem cap, ou aumentar `_FATOR_MAX` (em ajuste_km.py) acima de 1.19.
+            # Mantido como guard de regressão.
+            f"preco_giro_fipe R$ {r.get('preco_giro_fipe')} > FIPE × {_PRECO_GIRO_FIPE_RATIO_MAX:.2f} (FIPE={v}) — checar mediana e _FATOR_MAX em ajuste_km.py"
             if (
                 isinstance(v, (int, float)) and v > 0
                 and r.get("preco_giro_fipe") is not None
@@ -126,7 +143,6 @@ CHECKS: Dict[str, Validator] = {
         if isinstance(v, (int, float)) and v <= 0
         else None
     ),
-    # Threshold de 500% calibrado contra benchmark real do operador (Reinaldo:
     # ROI alvo (cru, não anualizado) = score_roi × 100. Por construção do
     # precificador com cap em margem_aplicada=0.50: max teórico = margem/(1-margem)
     # = 0.50/0.50 = 100%. Threshold > 100% sinaliza bug de cálculo (cap
@@ -147,19 +163,25 @@ CHECKS: Dict[str, Validator] = {
         if isinstance(v, (int, float)) and v < 0
         else None
     ),
+    # Reforma vai pra "—" quando laudo_analisado=False (paridade display).
+    # Validators de número (negativo / R$ 0 com severidade alta) só aplicam
+    # quando há valor numérico — `isinstance` guard evita TypeError no `< 0`.
     "Reforma (R$)": lambda v, r: (
-        "Reforma negativa"
-        if v is not None and v < 0
+        None if not isinstance(v, (int, float))
         else (
-            # Cross-field: severidade média/grave/estrutural com reforma R$ 0 é
-            # contradição. Deterministico sempre soma adicional pra grave/estrutural;
-            # LLM ocasionalmente devolve 0. Indica que a estimativa não levou
-            # em conta o laudo — operador veria "✓ Viável, reforma 0" em lote
-            # estrutural, falso conforto.
-            f"Reforma R$ 0 com severidade '{r.get('severidade')}' "
-            f"(esperado >0 quando severidade ≥ média)"
-            if v == 0 and str(r.get("severidade") or "").lower() in _SEVERIDADES_QUE_EXIGEM_REFORMA
-            else None
+            "Reforma negativa"
+            if v < 0
+            else (
+                # Cross-field: severidade média/grave/estrutural com reforma R$ 0 é
+                # contradição. Deterministico sempre soma adicional pra grave/estrutural;
+                # LLM ocasionalmente devolve 0. Indica que a estimativa não levou
+                # em conta o laudo — operador veria "✓ Viável, reforma 0" em lote
+                # estrutural, falso conforto.
+                f"Reforma R$ 0 com severidade '{r.get('severidade')}' "
+                f"(esperado >0 quando severidade ≥ média)"
+                if v == 0 and str(r.get("severidade") or "").lower() in _SEVERIDADES_QUE_EXIGEM_REFORMA
+                else None
+            )
         )
     ),
     # Coluna informativa. Valores esperados: texto com emoji prefixo (🟢/🟡/🔴)
@@ -185,6 +207,14 @@ CHECKS: Dict[str, Validator] = {
 # score_efetivo < 0) que o operador NUNCA vê na planilha — alarme falso
 # que confundia debug. Padrão geral: audit deve espelhar TODAS as
 # supressões de display, não só `fim_em is None`.
+#
+# Adicionada em 2026-05-09: paridade pra `laudo_analisado=False`
+# (confidence < 0.6 ou laudo ausente). Display vai pra "⚠ LAUDO NÃO
+# CAPTURADO" e oculta Lance Máximo/Lucro/ROI/Reforma/Tese — audit espelha.
+# Antes do fix: lote com laudo fallback (confidence 0.5/0.55) que tivesse
+# `severidade=ESTRUTURAL` mas `reforma_estimada=0` disparava "Reforma R$ 0
+# com severidade estrutural" — operador olhava planilha e via "—" na
+# coluna Reforma. Falso alarme.
 COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Rank": lambda r: r["rank"],
     "Situação": lambda r: r["situacao"],
@@ -195,13 +225,19 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
     "Lance Atual (R$)": lambda r: r["lance_atual"],
-    "Lance Máximo (R$)": lambda r: r["preco_max"],
+    "Lance Máximo (R$)": lambda r: r["preco_max"] if r.get("laudo_analisado") else "—",
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
     "Mediana mercado (R$)": lambda r: r.get("webmotors_mediana") if r.get("webmotors_mediana") else "—",
-    "ROI alvo (%)": lambda r: r["roi_alvo"] if r["viavel"] else "—",
-    "Lucro (R$)": lambda r: r.get("lucro", "—") if r["viavel"] else "—",
-    "Reforma (R$)": lambda r: r["reforma_estimada"],
-    "Tese": lambda r: r.get("tese", "—") if r["viavel"] else "—",
+    "ROI alvo (%)": lambda r: (
+        r["roi_alvo"] if r["viavel"] and r.get("laudo_analisado") else "—"
+    ),
+    "Lucro (R$)": lambda r: (
+        r.get("lucro", "—") if r["viavel"] and r.get("laudo_analisado") else "—"
+    ),
+    "Reforma (R$)": lambda r: r["reforma_estimada"] if r.get("laudo_analisado") else "—",
+    "Tese": lambda r: (
+        r.get("tese", "—") if r["viavel"] and r.get("laudo_analisado") else "—"
+    ),
     "Anúncio": lambda r: r["url"],
     "Laudo": lambda r: r.get("laudo_url") or "—",
 }
@@ -274,6 +310,17 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             except Exception:
                 scraped_at_str = str(lote.scraped_at)
 
+        # Paridade audit ↔ display: `laudo_analisado` espelha o que o
+        # SheetsExporter computa via `verificar_laudo_completo` — laudo
+        # extraído com confidence ≥ LAUDO_CONFIDENCE_MIN (PDF real, não
+        # fallback `_laudo_sem_pdf`). Constante importada de `laudo_audit.py`
+        # pra single source of truth (antes era 0.6 hardcoded nos dois lados,
+        # risco de drift). Quando False, display oculta Lance Máximo / Lucro /
+        # ROI / Reforma / Tese e mostra "⚠ LAUDO NÃO CAPTURADO". Audit espelha
+        # pra evitar falsos alarmes em colunas que o operador NÃO vê.
+        # Padrão LESSONS.md/P5c.
+        laudo_analisado = laudo is not None and (laudo.confidence or 0) >= LAUDO_CONFIDENCE_MIN
+
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
         rows.append({
             "lote_id": av.lote_id,
@@ -301,6 +348,9 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "popularidade": popularidade,
             "severidade": laudo.severidade_geral if laudo else "—",
             "motor_ok": ("Sim" if laudo.motor_ok else "NÃO") if laudo else "—",
+            "motor_ok_bool": (laudo.motor_ok if laudo else None),
+            "confidence_laudo": (laudo.confidence if laudo else None),
+            "laudo_analisado": laudo_analisado,
             "reforma_estimada": av.reforma_estimada,
             "frete": av.frete_incluso,
             "justificativa": av.justificativa,
@@ -367,22 +417,25 @@ def _check_columns(row: Dict[str, Any]) -> List[CheckResult]:
 
 
 def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> List[CheckResult]:
-    """preco_giro > FIPE × 1.10 sinaliza regressão pra fórmula antiga.
+    """preco_giro > FIPE × `_PRECO_GIRO_FIPE_RATIO_MAX` (1.13) sinaliza regressão.
 
     Refactor FIPE-only de 2026-05-08: preco_giro = FIPE × f_km × 0.95, com
-    f_km ∈ [0.75, 1.15] → max ratio = 1.0925×FIPE. Em produção saudável este
-    check NUNCA dispara. Mantido como guard de regressão: se aparecer, é
-    porque alguém reintroduziu webmotors_mediana no cálculo OU bypass do
-    clamp do f_km. Antes do refactor, era detector de mediana inflada
-    (similares poluídos do Auto Avaliar saturando 1.20×FIPE).
+    f_km ∈ [0.75, 1.15] → max natural = 1.0925×FIPE. Threshold em 1.13 deixa
+    margem ergonômica de ~3.5pp. Em produção saudável este check NUNCA dispara.
+    Mantido como guard de regressão: se aparecer, é porque alguém reintroduziu
+    webmotors_mediana no cálculo OU bumpou `_FATOR_MAX` em ajuste_km.py além
+    de 1.19. Antes do refactor, era detector de mediana inflada (similares
+    poluídos do Auto Avaliar saturando 1.20×FIPE).
     """
     pg = row.get("preco_giro")
     fipe = row.get("fipe")
-    if pg and fipe and pg > fipe * 1.10:
+    if pg and fipe and pg > fipe * _PRECO_GIRO_FIPE_RATIO_MAX:
         ratio_pct = round((pg / fipe) * 100, 1)
+        threshold_pct = round(_PRECO_GIRO_FIPE_RATIO_MAX * 100, 1)
         return [(
             "Preço-Giro vs FIPE",
-            f"preco_giro {ratio_pct}% da FIPE — f_km saturando ou mediana inflada (esperado <110%)",
+            f"preco_giro {ratio_pct}% da FIPE — f_km saturando ou mediana inflada "
+            f"(esperado <{threshold_pct}%)",
             pg,
         )]
     return []
@@ -408,10 +461,17 @@ def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> List[CheckResult]:
 
 
 def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
-    """`lance_atual > preco_alvo` mas ainda `≤ preco_max` — entrada acima da
+    """`lance_atual > preco_alvo` mas ainda `< preco_max` — entrada acima da
     margem calibrada. ROI/Lucro exibidos usam `_score_roi_efetivo` (já
     descontado), mas o aviso lembra o operador de que a folga é só pra margem
     mínima absoluta — não pra a margem-alvo.
+
+    Usa `<` estrito no `preco_max` pra alinhar com o teste de viabilidade
+    (`viavel = preco_max > lance_atual` no `_build_rows`). Quando lance toca
+    o teto exatamente (`lance == preco_max`), o lote é INVIÁVEL — display
+    mostra "✗ Caro demais" e oculta ROI/Lucro/Tese. Sem `<` estrito, audit
+    reportava "zona apertada" enquanto a planilha mostrava o lote como caro
+    demais — mensagens contraditórias na mesma linha.
     """
     preco_max = row.get("preco_max")
     preco_alvo = row.get("preco_alvo")
@@ -421,7 +481,12 @@ def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
         or preco_max <= 0
     ):
         return []
-    if lance_atual > preco_alvo and lance_atual <= preco_max:
+    # Paridade display: quando laudo NÃO foi analisado, planilha mostra "⚠ LAUDO
+    # NÃO CAPTURADO" e oculta Lance Máximo. Audit não deve sinalizar zona
+    # apertada num lote cuja Lance Máximo o operador não vê (LESSONS.md/P5c).
+    if not row.get("laudo_analisado"):
+        return []
+    if lance_atual > preco_alvo and lance_atual < preco_max:
         return [(
             "Lance Máximo (R$)",
             f"Zona apertada: lance_atual R$ {lance_atual} > preco_alvo R$ {preco_alvo} "
@@ -441,6 +506,11 @@ def _check_lance_maximo_acima_fipe(row: Dict[str, Any]) -> List[CheckResult]:
     com mediana inflada legítima (Webmotors n≥5 sem cap em avaliador). É
     independente da zona apertada — pode coexistir e ambos devem aparecer.
     """
+    # Paridade display: laudo NÃO analisado → Lance Máximo vira "—" na planilha
+    # (operador não vê o valor). Audit não deve disparar red flag sobre número
+    # invisível ao operador. LESSONS.md/P5c.
+    if not row.get("laudo_analisado"):
+        return []
     preco_max = row.get("preco_max")
     fipe = row.get("fipe")
     if not preco_max or not fipe or preco_max <= 0:
@@ -463,10 +533,13 @@ def _check_reforma_pesada(row: Dict[str, Any]) -> List[CheckResult]:
     operacionalmente, gastar R$10k+ em reforma pra revender um carro de R$30k
     significa: (a) capital empatado por mais tempo, (b) risco de surpresa na
     oficina (estimativa subestima o real), (c) revenda mais difícil porque
-    histórico de avaria assusta comprador. Dispara só pra lote viável — em
-    inviáveis o display já suprime tudo, audit acompanha.
+    histórico de avaria assusta comprador. Dispara só pra lote viável + laudo
+    analisado — em inviáveis ou laudo NÃO CAPTURADO o display já suprime tudo,
+    audit acompanha (LESSONS.md/P5c).
     """
     if not row.get("viavel"):
+        return []
+    if not row.get("laudo_analisado"):
         return []
     reforma = row.get("reforma_estimada")
     preco_giro = row.get("preco_giro")
@@ -479,6 +552,100 @@ def _check_reforma_pesada(row: Dict[str, Any]) -> List[CheckResult]:
             f"Reforma R$ {reforma} é {pct:.0%} do preco_giro R$ {preco_giro} — "
             "lote economicamente questionável (capital de reforma alto vs. revenda)",
             reforma,
+        )]
+    return []
+
+
+def _check_motor_problema_em_viavel(row: Dict[str, Any]) -> List[CheckResult]:
+    """Lote viável + laudo analisado + `motor_ok=False` = red flag operacional.
+
+    Por construção o precificador penaliza motor problemático via
+    `fator_risco` (peso 0.3 em motor não-original/quebrado) → margem maior
+    → preco_alvo menor. Então um lote com motor ruim *pode* sair como viável
+    se o lance estiver bem abaixo do alvo. Mas pro operador, "✓ Viável"
+    sem warning num carro com motor com problema é falso conforto: o custo
+    de retífica não está totalmente em `reforma_estimada` (LLM pode subestimar)
+    e a revenda fica mais difícil mesmo após reparo.
+
+    Dispara só pra lote viável + laudo analisado — paridade com `_check_reforma_pesada`.
+    Quando laudo_analisado=False, o operador já vê "⚠ LAUDO NÃO CAPTURADO"
+    e a planilha oculta os números (paridade P5c).
+    """
+    if not row.get("viavel") or not row.get("laudo_analisado"):
+        return []
+    if row.get("motor_ok_bool") is False:
+        return [(
+            "Reforma (R$)",
+            "Lote viável com motor_ok=False — laudo indicou motor não-original ou "
+            "com problema. Custo de retífica pode estar subestimado em `reforma_estimada`; "
+            "revenda mais difícil mesmo após reparo. Conferir laudo antes do lance.",
+            row.get("reforma_estimada"),
+        )]
+    return []
+
+
+def _check_severidade_estrutural_em_viavel(row: Dict[str, Any]) -> List[CheckResult]:
+    """Lote viável + laudo analisado + `severidade=ESTRUTURAL` = red flag operacional.
+
+    Mesmo passando o filtro de viabilidade (lance < preco_max, com fator_risco
+    no teto reduzindo o teto), lote estrutural significa coluna B/C, longarina
+    ou monobloco reparado — operacionalmente é o tipo de carro que o operador
+    real (Reinaldo) descarta categoricamente. Dispara warning explícito mesmo
+    quando o sistema deixa passar (lance muito baixo).
+
+    Antes deste check: lote ESTRUTURAL com lance baixo (raro mas possível)
+    saía como "✓ Viável" sem qualquer alerta visual além da coluna Reforma
+    elevada. Operador focado em ROI alto podia dar lance e descobrir o
+    estrutural só ao abrir o PDF do laudo. Cross-check fecha esse vetor.
+    """
+    if not row.get("viavel") or not row.get("laudo_analisado"):
+        return []
+    severidade = str(row.get("severidade") or "").lower()
+    if severidade == "estrutural":
+        return [(
+            "Reforma (R$)",
+            "Lote viável com severidade=ESTRUTURAL — coluna/longarina/monobloco "
+            "reparados. Operador real costuma descartar categoricamente; conferir "
+            "laudo antes de qualquer lance.",
+            row.get("reforma_estimada"),
+        )]
+    return []
+
+
+def _check_mediana_distante_fipe(row: Dict[str, Any]) -> List[CheckResult]:
+    """`webmotors_mediana > FIPE × 1.20` ou `< FIPE × 0.70` = sinal informativo.
+
+    Mediana é coluna informativa (refactor FIPE-only de 2026-05-08), não entra
+    no cálculo de Lance Máximo. MAS quando muito divergente da FIPE, indica:
+    - **>1.20×FIPE**: similares poluídos do AA (Tiggo 7 listado entre Tiggo 2,
+      Airtrek vs Outlander, Ka descontinuado vs seminovos europeus). Operador
+      olha mediana alta e pode achar que é "carro premium em alta" — falso.
+    - **<0.70×FIPE**: similares vencidos (anúncios antigos com preço pré-2024)
+      ou sample muito ruidosa. Sinaliza dado fraco sem afetar cálculo.
+
+    Threshold ±20-30% deliberadamente largo: mediana é REFERÊNCIA, não cálculo;
+    sinaliza só extremos. Workstream G (Webmotors live) vai estreitar isso.
+    """
+    mediana = row.get("webmotors_mediana")
+    fipe = row.get("fipe")
+    if not mediana or not fipe or fipe <= 0:
+        return []
+    ratio = mediana / fipe
+    if ratio > 1.20:
+        return [(
+            "Mediana mercado (R$)",
+            f"Mediana de mercado R$ {mediana} é {ratio:.0%} da FIPE — provável "
+            "similares poluídos do AA (modelo errado entre similares). Coluna é "
+            "informativa, não afeta Lance Máximo (FIPE-only desde 2026-05-08), "
+            "mas vale conferir manualmente.",
+            mediana,
+        )]
+    if ratio < 0.70:
+        return [(
+            "Mediana mercado (R$)",
+            f"Mediana de mercado R$ {mediana} é {ratio:.0%} da FIPE — sample fraca "
+            "(anúncios antigos ou outliers). Não afeta cálculo (FIPE-only).",
+            mediana,
         )]
     return []
 
@@ -512,6 +679,9 @@ ALL_CHECKS: List[CheckFn] = [
     _check_zona_apertada,
     _check_lance_maximo_acima_fipe,
     _check_reforma_pesada,
+    _check_motor_problema_em_viavel,
+    _check_severidade_estrutural_em_viavel,
+    _check_mediana_distante_fipe,
     _check_margem_no_teto,
 ]
 

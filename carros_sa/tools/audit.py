@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
+from carros_sa.tools.laudo_audit import LAUDO_CONFIDENCE_MIN
 from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -310,11 +311,14 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
 
         # Paridade audit ↔ display: `laudo_analisado` espelha o que o
         # SheetsExporter computa via `verificar_laudo_completo` — laudo
-        # extraído com confidence ≥ 0.6 (PDF real, não fallback `_laudo_sem_pdf`).
-        # Quando False, display oculta Lance Máximo / Lucro / ROI / Reforma /
-        # Tese e mostra "⚠ LAUDO NÃO CAPTURADO". Audit espelha pra evitar
-        # falsos alarmes em colunas que o operador NÃO vê. Padrão LESSONS.md/P5c.
-        laudo_analisado = laudo is not None and (laudo.confidence or 0) >= 0.6
+        # extraído com confidence ≥ LAUDO_CONFIDENCE_MIN (PDF real, não
+        # fallback `_laudo_sem_pdf`). Constante importada de `laudo_audit.py`
+        # pra single source of truth (antes era 0.6 hardcoded nos dois lados,
+        # risco de drift). Quando False, display oculta Lance Máximo / Lucro /
+        # ROI / Reforma / Tese e mostra "⚠ LAUDO NÃO CAPTURADO". Audit espelha
+        # pra evitar falsos alarmes em colunas que o operador NÃO vê.
+        # Padrão LESSONS.md/P5c.
+        laudo_analisado = laudo is not None and (laudo.confidence or 0) >= LAUDO_CONFIDENCE_MIN
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
         rows.append({

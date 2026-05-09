@@ -156,8 +156,9 @@ class TestAuditDeteccao:
         Reinaldo: 60-75% ano; sistema chega a 500% só quando dias_giro<60d
         otimista colide com fatores próximos do teto).
 
-        Lote precisa ser VIÁVEL (preco_max > lance_atual) — em inviáveis o
-        ROI vai pra "—" no display e o audit espelha (suprime check).
+        Lote precisa ser VIÁVEL (preco_max > lance_atual) E ter laudo analisado
+        (confidence ≥ 0.6) — em inviáveis ou laudo NÃO CAPTURADO o ROI vai pra
+        "—" no display e o audit espelha (LESSONS.md/P5c).
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -172,6 +173,7 @@ class TestAuditDeteccao:
                 dias_giro_estimado=30,
                 score_roi=2.0,
             ))
+            session.add(_laudo("L001"))  # confidence=0.95 → laudo_analisado=True
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v for v in violacoes), f"Esperava violação de ROI em {violacoes}"
@@ -199,6 +201,8 @@ class TestAuditDeteccao:
         with Session(engine) as session:
             session.add(_lote("L001"))
             session.add(_avaliacao("L001", reforma_estimada=-100))
+            # Reforma só é validada quando laudo_analisado=True (paridade display).
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
         assert any("Reforma" in v for v in violacoes), f"Violacoes: {violacoes}"
@@ -262,7 +266,8 @@ class TestAuditCoerenciaRow:
            - similares poluídos (regex pegando R$ de outras seções)
            - cache FIPE stale ou marca/modelo errado
            - f_km saturado no teto sem motivo
-        Por construção f_km contribui no máx ±15%, gap >25% pede investigação.
+        Threshold é `_PRECO_GIRO_FIPE_RATIO_MAX = 1.13` (max natural 1.0925 +
+        margem ergonômica de 3.5pp).
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -271,9 +276,10 @@ class TestAuditCoerenciaRow:
             session.add(_avaliacao(
                 "L001", fipe=32_000, preco_giro_fipe=50_000, preco_giro=50_000,
             ))
+            session.add(_laudo("L001"))  # paridade laudo_analisado=True
             session.commit()
         violacoes = audit(engine)
-        assert any("preco_giro_fipe" in v and "FIPE × 1.10" in v for v in violacoes), (
+        assert any("preco_giro_fipe" in v and "FIPE × 1.13" in v for v in violacoes), (
             f"Esperava violação de divergência preco_giro_fipe vs FIPE: {violacoes}"
         )
 
@@ -301,10 +307,11 @@ class TestAuditCrossCheck:
     preco_giro_fipe vs FIPE, lance_atual vs preco_alvo).
     """
 
-    def test_preco_giro_fipe_acima_de_fipe_x_110_sinalizado(self):
-        """Combinação fallback FIPE×0.97 + f_km saturado a 1.15 produz
-        preco_giro_fipe ≈ 1.115 × FIPE — duas premissas otimistas em série.
-        Audit avisa pra checar Webmotors live e km mediana de mercado.
+    def test_preco_giro_fipe_acima_de_fipe_x_113_sinalizado(self):
+        """Combinação patológica de mediana inflada + f_km saturado pode
+        empurrar preco_giro_fipe acima de 1.13×FIPE. Audit avisa pra checar
+        Webmotors live e km mediana de mercado. Threshold 1.13 deixa ~3.5pp
+        de margem ergonômica sobre o max natural (1.0925).
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -312,12 +319,13 @@ class TestAuditCrossCheck:
             session.add(_avaliacao(
                 "L001",
                 fipe=70_000,
-                preco_giro_fipe=80_000,  # 80k / 70k = 1.143 > 1.10
+                preco_giro_fipe=82_000,  # 82k / 70k = 1.171 > 1.13
             ))
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
-        assert any("preco_giro_fipe" in v and "1.10" in v for v in violacoes), (
-            f"Esperava violação preco_giro_fipe > FIPE×1.10 em {violacoes}"
+        assert any("preco_giro_fipe" in v and "1.13" in v for v in violacoes), (
+            f"Esperava violação preco_giro_fipe > FIPE×1.13 em {violacoes}"
         )
 
     def test_preco_giro_fipe_dentro_da_tolerancia_nao_sinaliza(self):
@@ -327,7 +335,7 @@ class TestAuditCrossCheck:
             session.add(_avaliacao(
                 "L001",
                 fipe=70_000,
-                preco_giro_fipe=75_000,  # 75k / 70k = 1.071 < 1.10
+                preco_giro_fipe=75_000,  # 75k / 70k = 1.071 < 1.13
             ))
             session.add(_laudo("L001"))
             session.commit()
@@ -337,7 +345,7 @@ class TestAuditCrossCheck:
         )
 
     def test_zona_apertada_lance_acima_do_alvo_sinalizada(self):
-        """`lance_atual > preco_alvo` mas ainda `≤ preco_max` é zona apertada:
+        """`lance_atual > preco_alvo` mas ainda `< preco_max` é zona apertada:
         operador pode dar lance, mas o ROI exibido deve usar score_efetivo
         (não o intrinsic). Audit avisa pra confirmar que o ROI realista bate.
         """
@@ -374,6 +382,8 @@ class TestAuditAgregacao:
                 session.add(_lote(lid))
                 # 3 lotes com reforma_estimada negativa
                 session.add(_avaliacao(lid, reforma_estimada=-100))
+                # Laudo com confidence ≥ 0.6 → display mostra Reforma → audit valida.
+                session.add(_laudo(lid))
             session.commit()
         violacoes = audit(engine)
         reforma = [v for v in violacoes if "Reforma" in v]
@@ -385,10 +395,12 @@ class TestAuditAgregacao:
         with Session(engine) as session:
             session.add(_lote("L001", km=5_000_000))  # KM absurdo
             session.add(_avaliacao("L001", reforma_estimada=-50))  # Reforma negativa
+            session.add(_laudo("L001"))
 
             lote2 = _lote("L002", ano=1900)  # Ano fora da faixa
             session.add(lote2)
             session.add(_avaliacao("L002"))
+            session.add(_laudo("L002"))
             session.commit()
         violacoes = audit(engine)
         texto = "\n".join(violacoes)
@@ -568,15 +580,17 @@ class TestAuditChecksIndependentes:
         engine = _engine_mem()
         with Session(engine) as session:
             # FIPE 50k, preco_max 60k = 120% FIPE → red flag
-            # alvo 25k (default), lance_atual 30k → zona apertada (30 > 25, 30 ≤ 60)
+            # alvo 25k (default), lance_atual 30k → zona apertada (30 > 25, 30 < 60)
             session.add(_lote("L001", lance_atual=30_000))
             session.add(_avaliacao(
                 "L001",
                 preco_max=60_000,
                 fipe=50_000,
                 preco_giro=55_000,
-                preco_giro_fipe=55_000,  # mantido < FIPE×1.10 pra não duplicar com check de preco_giro
+                preco_giro_fipe=55_000,  # mantido < FIPE×1.13 pra não duplicar com check de preco_giro
             ))
+            # Laudo com confidence>=0.6 → display mostra valores → audit valida.
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
         zona = [v for v in violacoes if "Zona apertada" in v]
@@ -597,6 +611,7 @@ class TestAuditChecksIndependentes:
                 preco_giro=55_000,
                 preco_giro_fipe=55_000,
             ))
+            session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
         assert any("FIPE × 1.05" in v for v in violacoes), (
@@ -631,6 +646,7 @@ class TestAuditReformaPesada:
             session.add(_avaliacao(
                 "L001", preco_max=20_000, preco_giro=30_000, reforma_estimada=12_000,
             ))
+            session.add(_laudo("L001"))  # paridade laudo_analisado=True
             session.commit()
         violacoes = audit(engine)
         assert any("economicamente questionável" in v for v in violacoes), (
@@ -698,9 +714,9 @@ class TestAuditEspelhaDisplay:
         )
 
     def test_lote_viavel_com_roi_negativo_continua_disparando(self):
-        """Sanidade: lote VIÁVEL com score_roi forçadamente negativo
-        (cenário sintético, não deveria acontecer) ainda flag.
-        Inviabilidade é a única exclusão.
+        """Sanidade: lote VIÁVEL com laudo analisado e score_roi forçadamente
+        negativo (cenário sintético, não deveria acontecer) ainda flag.
+        Inviabilidade e laudo NÃO CAPTURADO são as únicas exclusões.
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -712,8 +728,229 @@ class TestAuditEspelhaDisplay:
                 score_roi=-0.5,
                 preco_giro=35_000,
             ))
+            session.add(_laudo("L_VIA"))  # paridade laudo_analisado=True
             session.commit()
         violacoes = audit(engine)
         assert any("ROI" in v and "negativ" in v for v in violacoes), (
             f"Lote viável com ROI negativo deve continuar disparando: {violacoes}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cross-checks novos (revisão preventiva 2026-05-09)
+# ---------------------------------------------------------------------------
+
+class TestAuditMotorProblema:
+    """`motor_ok=False` em lote viável + laudo analisado = red flag operacional.
+
+    Antes do check: lote com motor problemático passava como '✓ Viável' sem
+    qualquer alerta visual além da Reforma elevada (LLM frequentemente
+    subestima retífica). Operador focado em ROI alto podia dar lance.
+    """
+
+    def test_motor_ok_false_em_viavel_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            session.add(_avaliacao("L001", preco_max=30_000))
+            session.add(_laudo("L001", motor_ok=False))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("motor_ok=False" in v for v in violacoes), (
+            f"Esperava flag de motor com problema: {violacoes}"
+        )
+
+    def test_motor_ok_true_nao_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001", motor_ok=True))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("motor_ok=False" in v for v in violacoes), (
+            f"motor_ok=True não deveria disparar: {violacoes}"
+        )
+
+    def test_motor_ok_false_em_laudo_nao_analisado_nao_dispara(self):
+        """Paridade display: laudo NÃO CAPTURADO oculta tudo, audit acompanha."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            session.add(_avaliacao("L001", preco_max=30_000))
+            # Laudo com confidence baixa (fallback _laudo_sem_pdf) → laudo_analisado=False
+            laudo_baixo = _laudo("L001", motor_ok=False)
+            laudo_baixo.confidence = 0.5  # < 0.6 → fallback
+            session.add(laudo_baixo)
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("motor_ok=False" in v for v in violacoes), (
+            f"Laudo NÃO CAPTURADO deveria suprimir o check: {violacoes}"
+        )
+
+
+class TestAuditEstruturalEmViavel:
+    """Lote viável + laudo analisado + severidade=ESTRUTURAL = red flag explícito.
+
+    Operador real (Reinaldo) descarta lotes estruturais categoricamente. Mesmo
+    quando o sistema deixa passar (lance muito baixo + fator_risco no teto
+    diminuindo o teto), display deve sinalizar EXPLICITAMENTE. Antes do check,
+    estrutural com lance baixo aparecia como '✓ Viável' sem nada além de
+    Reforma alta.
+    """
+
+    def test_severidade_estrutural_em_viavel_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=5_000))
+            session.add(_avaliacao("L001", preco_max=20_000))
+            session.add(_laudo("L001", severidade="estrutural"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("ESTRUTURAL" in v for v in violacoes), (
+            f"Esperava flag de estrutural em lote viável: {violacoes}"
+        )
+
+    def test_severidade_leve_em_viavel_nao_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001", severidade="leve"))
+            session.commit()
+        violacoes = audit(engine)
+        # Esse motor_ok=True default + severidade leve não deveria disparar nada novo.
+        assert not any("ESTRUTURAL" in v for v in violacoes), (
+            f"Severidade leve não deveria flag estrutural: {violacoes}"
+        )
+
+
+class TestAuditMedianaDistanteFipe:
+    """Mediana de mercado muito distante da FIPE = sinal informativo de
+    similares poluídos do AA (>1.20×FIPE) ou sample fraca (<0.70×FIPE).
+    Não afeta cálculo desde refactor FIPE-only de 2026-05-08, só sinaliza.
+    """
+
+    def test_mediana_acima_de_fipe_x_120_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            # FIPE 50k, mediana 65k = 130% > 120% → similares poluídos suspeito
+            session.add(_avaliacao("L001", fipe=50_000, webmotors_mediana=65_000))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Mediana" in v and "similares poluídos" in v for v in violacoes), (
+            f"Esperava flag de mediana >120% FIPE: {violacoes}"
+        )
+
+    def test_mediana_abaixo_de_fipe_x_070_dispara(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            # FIPE 50k, mediana 30k = 60% < 70% → sample fraca
+            session.add(_avaliacao("L001", fipe=50_000, webmotors_mediana=30_000))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("Mediana" in v and "sample fraca" in v for v in violacoes), (
+            f"Esperava flag de mediana <70% FIPE: {violacoes}"
+        )
+
+    def test_mediana_proxima_da_fipe_nao_dispara(self):
+        """Caso normal: mediana = FIPE × 0.97 (fallback) — não dispara."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", fipe=50_000, webmotors_mediana=48_500))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Mediana" in v and ("similares poluídos" in v or "sample fraca" in v) for v in violacoes), (
+            f"Mediana 97% FIPE não deveria flag: {violacoes}"
+        )
+
+
+class TestAuditZonaApertadaBoundaryViabilidade:
+    """Quando `lance_atual == preco_max` (boundary), `viavel = preco_max > lance`
+    é False (estrito), mas o check antigo de zona apertada usava `<=` no max
+    e disparava 'zona apertada' ao mesmo tempo que display mostrava '✗ Caro
+    demais'. Audit agora usa `<` estrito pra alinhar com a viabilidade.
+    """
+
+    def test_lance_igual_a_preco_max_nao_dispara_zona_apertada(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # alvo=25k (default), max=30k, lance=30k → boundary inviável.
+            session.add(_lote("L001", lance_atual=30_000))
+            session.add(_avaliacao("L001", preco_max=30_000))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        zona = [v for v in violacoes if "Zona apertada" in v]
+        assert not zona, (
+            f"Lance igual ao Lance Máximo é inviável (display oculta) — "
+            f"audit não deveria reportar zona apertada: {violacoes}"
+        )
+
+
+class TestAuditLaudoNaoAnalisadoSuprime:
+    """Paridade ampla audit ↔ display pra `laudo_analisado=False`. Display
+    oculta Lance Máximo / ROI / Lucro / Reforma / Tese; audit espelha.
+    Sem essa paridade, audit dispararia falsos alarmes em lotes onde o
+    operador NÃO consegue confirmar abrindo a planilha (LESSONS.md/P5c).
+    """
+
+    def test_lance_maximo_acima_fipe_em_laudo_nao_analisado_nao_dispara(self):
+        """Sintético: preco_max > FIPE × 1.05, mas laudo_analisado=False
+        (display mostra '—' em Lance Máximo)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))
+            session.add(_avaliacao(
+                "L001",
+                preco_max=60_000,
+                fipe=50_000,
+                preco_giro=55_000,
+            ))
+            laudo_baixo = _laudo("L001")
+            laudo_baixo.confidence = 0.5  # < 0.6 → laudo_analisado=False
+            session.add(laudo_baixo)
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("FIPE × 1.05" in v for v in violacoes), (
+            f"Laudo não analisado deveria suprimir Lance Máximo > FIPE × 1.05: {violacoes}"
+        )
+
+    def test_reforma_zero_em_estrutural_com_laudo_nao_analisado_nao_dispara(self):
+        """Reforma 0 + severidade ESTRUTURAL é contradição — MAS quando o
+        laudo é fallback (confidence<0.6, _laudo_sem_pdf marca ESTRUTURAL
+        sem peça), display oculta Reforma e o check de contradição deve
+        ser silenciado."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", reforma_estimada=0))
+            laudo_fallback = _laudo("L001", severidade="estrutural")
+            laudo_fallback.confidence = 0.55  # _laudo_sem_pdf típico
+            session.add(laudo_fallback)
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Reforma R$ 0" in v for v in violacoes), (
+            f"Laudo NÃO CAPTURADO deveria suprimir contradição reforma 0: {violacoes}"
+        )
+
+    def test_lote_sem_laudo_nao_dispara_reforma_negativa(self):
+        """Reforma negativa em lote sem laudo (LaudoCache ausente) — display
+        mostra '⚠ LAUDO NÃO CAPTURADO' e oculta Reforma. Audit espelha.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001", reforma_estimada=-100))
+            # SEM _laudo() → laudo_analisado=False
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("Reforma negativa" in v for v in violacoes), (
+            f"Lote sem laudo não deveria flag reforma negativa (display oculta): {violacoes}"
         )

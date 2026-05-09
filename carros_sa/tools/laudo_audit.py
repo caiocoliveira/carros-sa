@@ -48,6 +48,13 @@ PDF_DIR_DEFAULT = Path(__file__).resolve().parent.parent.parent / "data" / "laud
 # de erro salvo, redirect interceptado).
 _PDF_MIN_BYTES = 5_000
 
+# Confidence mínima pra considerar o laudo "analisado de verdade" (extraído
+# de PDF real, não fallback `_laudo_sem_pdf` que grava 0.5/0.55). Compartilhada
+# com `tools/audit.py::_build_rows` pra paridade audit ↔ display — antes era
+# duplicada literal (0.6 hardcoded em ambos), risco de drift se um lado
+# mudasse sem o outro. Single source of truth aqui (módulo neutro do laudo).
+LAUDO_CONFIDENCE_MIN = 0.6
+
 
 @dataclass
 class StatusLaudo:
@@ -101,7 +108,7 @@ def verificar_laudo_completo(
     pdf_path = pdf_dir / f"{lote.id}.pdf"
     pdf_ok = pdf_path.exists() and pdf_path.stat().st_size > _PDF_MIN_BYTES
 
-    laudo_ok = laudo is not None and (laudo.confidence or 0) >= 0.6
+    laudo_ok = laudo is not None and (laudo.confidence or 0) >= LAUDO_CONFIDENCE_MIN
 
     detalhe = (lote.raw_json or {}).get("detalhe") if isinstance(lote.raw_json, dict) else None
     url = (detalhe or {}).get("laudo_pdf_url") if isinstance(detalhe, dict) else None

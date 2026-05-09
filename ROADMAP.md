@@ -4,9 +4,9 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 432/432 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 444/444 testes passando
 
-Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário, multi-tenancy por YAML.
+Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML.
 
 Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
 
@@ -26,6 +26,29 @@ Dependências externas conhecidas: Webmotors live (workstream G — bloqueia rea
 - **Follow-ups (não-bloqueantes, registrados no review arquitetural):**
   - **Rotação/GC de `state/db`** — cada run faz `commit-tree -p $PARENT`, então blobs antigos ficam acumulados na cadeia. Limite soft de 5GB do GitHub = ~6 meses de runway no ritmo atual. Considerar (a) `git push --force` periódico resetando histórico, ou (b) script de cleanup que reescreve sem parent quando atingir N commits. Não bloqueia agora.
   - **Re-assinatura de URL "Ver laudo" no export** — substituir as URLs assinadas expirantes (Google Cloud Storage, ~1h) por links estáveis quando o exporter rodar. Caminhos possíveis: GitHub raw URL apontando pra `state/db/laudos_pdfs/<lote>.pdf` (se repo público), ou re-assinar via service account na hora do export. Resolve a mitigação atual ("PDF salvo (link expirado)") deixando link sempre vivo.
+
+### DD — Audit cross-checks operacionais + paridade laudo_analisado (2026-05-09) ✅
+- **Branch:** `claude/sleepy-wright-Ocj2h`
+- **Motivação:** Revisão preventiva diária. Simulação algébrica de 10 cenários (gold Polo Track, f_km saturado teto/piso, ESTRUTURAL conf 0.5, mediana inflada 1.20×FIPE, zona apertada, lote inviável, dias_giro otimista, km=None) confirmou identidades MAS expôs 6 falhas residuais — todas relacionadas ao audit não cobrir contradições cross-field específicas E não espelhar todas as supressões do display.
+- **Bugs encontrados e corrigidos:**
+  1. **`_check_zona_apertada` disparava em lance == preco_max (boundary inviável)** — `viavel = preco_max > lance` é estrito, mas zona apertada usava `<=` no max. Resultado: planilha mostrava "✗ Caro demais" e audit reportava "zona apertada" simultaneamente — sinais contraditórios pro operador. Fix: `<` estrito no `preco_max`.
+  2. **Audit não espelhava `laudo_analisado=False`** — quando display oculta Lance Máximo / Lucro / ROI / Reforma / Tese (laudo extraído com confidence < 0.6 ou ausente), audit lia valores crus de `AvaliacaoLote`. Resultado: lotes "⚠ LAUDO NÃO CAPTURADO" disparavam falsos alarmes (ex.: reforma 0 + severidade ESTRUTURAL via `_laudo_sem_pdf` confidence 0.55). Fix: `_build_rows` calcula `laudo_analisado = laudo is not None and confidence ≥ 0.6` e `COLUMN_EXTRACTORS` retorna "—" pra Lance Máximo / Lucro / ROI / Reforma / Tese quando False. Cross-checks (`_check_zona_apertada`, `_check_lance_maximo_acima_fipe`, `_check_reforma_pesada`) também respeitam.
+  3. **Audit não checava `motor_ok=False` em lote viável** — laudo indica motor não-original ou com problema, mas o lote passa como "✓ Viável" (precificador penaliza via fator_risco mas o teto pode ainda ficar acima do lance). Operador focado em ROI alto podia dar lance sem ver o sinal. Fix: novo `_check_motor_problema_em_viavel` (paridade `viavel + laudo_analisado`).
+  4. **Audit não checava `severidade=ESTRUTURAL` em lote viável** — operador real (Reinaldo) descarta lotes estruturais categoricamente, mas com lance baixo + fator_risco no teto o sistema pode deixar passar. Fix: novo `_check_severidade_estrutural_em_viavel`.
+  5. **Audit não checava `Mediana mercado >> FIPE`** — desde refactor FIPE-only a coluna é informativa, mas mediana >120% FIPE indica similares poluídos do AA (Tiggo 7 entre Tiggo 2). Operador olhando "mediana alta" pode achar que é "carro premium em alta" — falso. Fix: novo `_check_mediana_distante_fipe` (>1.20 ou <0.70 dispara informativo).
+  6. **`_PRECO_GIRO_FIPE_RATIO_MAX = 1.10` apertado contra max natural 1.0925** — gap de só 0.75pp; qualquer aumento futuro de `_FATOR_MAX` em ajuste_km.py disparava falso positivo automático. Fix: 1.10 → 1.13 (margem ergonômica de ~3.5pp), comentário cruzando ref com `_FATOR_MAX`. Validators do `Lance Máximo / Reforma` também ganharam guarda `isinstance(v, (int, float))` pra tolerar "—" sem `TypeError`.
+- **Análise das colunas (resposta direta às perguntas do usuário, 10 cenários):**
+  - **Lance Máximo > FIPE?** Não em condições normais. Por construção FIPE-only, max teórico = `FIPE × 1.15 × 0.95 × 0.90 = 0.984×FIPE`. Cenário 2 (f_km saturado teto, custos zero) chega a 91.9% FIPE. Audit threshold 1.05 mantido como guard de regressão (matematicamente inviável bater FIPE no design atual).
+  - **`preco_giro_fipe` muito diferente da FIPE?** Pode em ±9% naturalmente (`f_km` ∈ [0.75, 1.15] × 0.95). Cenário 2 produz 109.2% FIPE, cenário 3 produz 71.2% FIPE. Audit threshold antigo 1.10 era apertado — agora 1.13 com ~3.5pp de margem ergonômica.
+  - **Linha-a-linha (10 cenários):** identidades algébricas confirmadas em todos. `lucro_alvo = preco_giro × score_roi / (1+score_roi)` exato; `score_efetivo ≤ score_intrinsic` sempre; `preco_alvo ≤ preco_max` sempre.
+- **Cobertura:** 12 testes guard novos (3 motor problema + 2 estrutural viável + 3 mediana distante + 1 zona apertada boundary + 3 paridade laudo_analisado). **Total: 444/444 verde** (eram 432).
+- **Limitações conhecidas:**
+  - Threshold da mediana (>1.20 ou <0.70) é heurístico — calibrar quando Webmotors live conectar (workstream G).
+  - `_check_motor_problema` e `_check_severidade_estrutural` usam `motor_ok` e `severidade` do `LaudoCache` (global). Em lotes onde o LLM categorizou errado, audit segue o LLM — não há sanity check sobre o laudo em si.
+  - Threshold 1.13 para `preco_giro_fipe` ainda dispara se alguém aumentar `_FATOR_MAX` para 1.20+ (raro, mas possível com lotes super-baixa-quilometragem). Comentário cruzado deixa explícita a relação.
+- **Updates persistentes:**
+  - `CLAUDE.md` ganhou 4 entradas em "Padrões aprendidos": (a) audit deve cruzar `laudo_analisado` em TODOS os checks dependentes do display, não só em `viavel`; (b) cross-checks operacionais (motor_ok, severidade ESTRUTURAL) que o precificador NÃO modela explicitamente; (c) thresholds com baixa margem do max natural (gap < 1pp) viram bombas-relógio quando alguém ajusta o max — sempre deixar margem ergonômica de 2-3pp; (d) validators de `CHECKS` com `v <= 0` têm que ter guarda `isinstance` pra tolerar "—" da supressão.
+  - `LESSONS.md` ganhou padrão **P5e** ("Paridade audit ↔ display: TODA dimensão de supressão, não só inviabilidade") + 4 entradas no apêndice.
 
 ### CC — Coluna "Lucro (R$)" total absoluto (sem quebra mensal) (2026-05-08) ✅
 - **Branch:** `claude/lucro-total-sem-quebra-mensal` (PR #65 mergeado em `d2906cc`)

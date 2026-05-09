@@ -50,6 +50,21 @@ Dependências externas conhecidas: Webmotors live (workstream G — bloqueia rea
   - `CLAUDE.md` ganhou 4 entradas em "Padrões aprendidos": (a) audit deve cruzar `laudo_analisado` em TODOS os checks dependentes do display, não só em `viavel`; (b) cross-checks operacionais (motor_ok, severidade ESTRUTURAL) que o precificador NÃO modela explicitamente; (c) thresholds com baixa margem do max natural (gap < 1pp) viram bombas-relógio quando alguém ajusta o max — sempre deixar margem ergonômica de 2-3pp; (d) validators de `CHECKS` com `v <= 0` têm que ter guarda `isinstance` pra tolerar "—" da supressão.
   - `LESSONS.md` ganhou padrão **P5e** ("Paridade audit ↔ display: TODA dimensão de supressão, não só inviabilidade") + 4 entradas no apêndice.
 
+### EE — Coluna "ROI alvo (%)" cru (sem anualizar) (2026-05-08) ✅
+- **Branch:** `claude/roi-intrinsic-na-planilha` (PR #72 mergeado em `be2e587`)
+- **Motivação:** Operador pediu ROI da operação no preço-alvo sem extrapolar pra ano. Anualização (`× 365 / dias_giro`) dependia de `dias_giro_estimado` calibrado, frequentemente otimista por categoria genérica (workstream DD pendente). ROI cru ("30% sobre o capital empatado") é mais legível pro operador.
+- **Mudanças:**
+  - `sheets.py`: HEADER `'ROI anualizado (%)'` → `'ROI alvo (%)'`. Valor = `score_roi × 100`. Glossário reescrito.
+  - `audit.py`: threshold `500%` → `100%` (max teórico com cap margem 50% é `0.50/0.50 = 100%`). Após merge com #69, COLUMN_EXTRACTORS combina rename + paridade `laudo_analisado`.
+  - `cli.py` (`top`): coluna `ROI%` → `ROI alvo`; coluna `ROI/ano%` removida pra paridade com a planilha.
+- **Decisão arquitetural:** ranking interno PRESERVADO por `roi_anualizado` (no `key=` do `sorted`) mas COLUNA exibe `roi_alvo`. Sem isso, Polo Track 2024 (227d, 21% intrinsic) empataria com Gol 2014 (22d, 21%) — invertido. Divergência documentada em 3 lugares (docstring `_score_roi_efetivo`, comentário `_query`, glossário).
+- **Cobertura:** 449/449 verde (subiu de 432 ao reconciliar com tests novos do #69 sobre paridade `laudo_analisado`).
+- **Review arquitetural** (Plan agent): aprovou com 3 FUs não-bloqueantes (abaixo).
+- **Follow-ups (não-bloqueantes):**
+  - **Padrão "ranking key ≠ display column"** — registrar entrada em LESSONS.md formalizando que essa divergência é OK desde que UNIVERSAL (mesmo tratamento em CLI + planilha + audit) e DOCUMENTADA. Próximo refactor pode ressuscitar a divergência sem perceber.
+  - **UX da CLI top**: operador perdeu a coluna `ROI/ano%` que ajudava a entender quando dois ROIs alvo iguais ranqueiam em ordens diferentes. Sugestão: ressuscitar atrás de flag `--anualizado` OU readicionar como coluna informativa secundária. A coluna `Dias` sozinha (já existe) ajuda mas não desambigua tudo.
+  - **Threshold do audit acoplado ao cap do precificador**: `_MARGEM_TETO=0.50` em `precificador.py` define o max teórico do `score_roi=1.0` que o threshold `>100%` no audit assume. Se cap subir pra 0.60 sem audit acompanhar, audit vira mute silencioso. Sugestão: exportar constante `MAX_SCORE_ROI` de `precificador.py` e o audit consumir.
+
 ### CC — Coluna "Lucro (R$)" total absoluto (sem quebra mensal) (2026-05-08) ✅
 - **Branch:** `claude/lucro-total-sem-quebra-mensal` (PR #65 mergeado em `d2906cc`)
 - **Motivação:** Operador pediu pra ver o lucro TOTAL projetado da revenda em vez de normalizado por mês. Divisão por `dias_giro_estimado` confundia: defaults categóricos otimistas (HATCH NOVO=25d sem floor) faziam `Lucro/mês = Lucro absoluto`, levando operador a achar que entrava aquele valor todo mês.

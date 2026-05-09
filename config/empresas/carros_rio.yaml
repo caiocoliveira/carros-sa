@@ -1,0 +1,68 @@
+empresa_id: carros_rio
+nome: "Carros SA - Rio de Janeiro"
+patio:
+  cidade: "Rio de Janeiro"
+  uf: "RJ"
+  cep: "20000-000"
+# CALIBRAÇÃO PENDENTE — sem histórico próprio de Arrematado em RJ ainda. Margens
+# e fatores herdados da operação Uberlândia (Polo Track 2024 = 21% líquido após
+# desconto VJCAR, 28% bruto). Recalibrar quando tiver ≥10 vendas reais no pátio
+# do Rio (ver workflow descrito em ROADMAP.md/Bloco A).
+margem:
+  base: 0.25                    # 25% sobre o preço de giro (venda âncora)
+  minima_absoluta: 0.10         # nunca abaixo disso
+raio_max_km: 1000
+# Raio operacional cobre a Região Metropolitana do Rio + Baixada Fluminense +
+# parte do interior do estado (Niterói, Nova Iguaçu, Duque de Caxias, Petrópolis,
+# Volta Redonda) e cidades fronteiriças de MG/SP/ES próximas (até ~150km).
+# Cada cidade gera 1 request ao Auto Avaliar na coleta de listagem.
+# Frete é 0 pra lotes na mesma cidade do pátio (o próprio comprador busca).
+raio_operacao_km: 150
+fator_risco_bounds: [1.0, 2.0]
+fator_liquidez_bounds: [1.0, 1.8]
+# CALIBRAÇÃO PENDENTE — tabela herdada de Uberlândia. RJ tem trânsito mais denso
+# e logística diferente (pedágios da Via Dutra, Linha Vermelha); recalibrar com
+# cotações reais de transportadora local.
+tabela_frete:                   # R$ por faixa_km × categoria
+  "0-300":
+    hatch: 800
+    sedan: 800
+    suv: 1200
+    utilitario: 1500
+    picape: 1500
+    outro: 1200
+  "300-600":
+    hatch: 1400
+    sedan: 1400
+    suv: 1900
+    utilitario: 2300
+    picape: 2300
+    outro: 1900
+  "600-1000":
+    hatch: 2200
+    sedan: 2200
+    suv: 2800
+    utilitario: 3400
+    picape: 3400
+    outro: 2800
+  "1000-2000":
+    hatch: 3000
+    sedan: 3000
+    suv: 3800
+    utilitario: 4500
+    picape: 4500
+    outro: 3800
+categorias_aceitas: [hatch, sedan, suv, utilitario, picape]
+# Auto Avaliar cobra R$ 999 fixos por arremate (não percentual). Para leilões
+# judiciais futuros que usam %, manter `taxa_leilao_pct > 0` que soma com fixa.
+taxa_leilao_pct: 0.0
+taxa_leilao_fixa: 999
+# CALIBRAÇÃO PENDENTE — itens herdados da operação Uberlândia. Custos em RJ
+# tendem a ser maiores (despachante, marketing, combustível). Recalibrar com
+# notas fiscais reais quando houver ≥3 carros vendidos pelo pátio do Rio.
+custos_operacionais:
+  despachante: 380
+  higienizacao: 450
+  marketing_medio: 1500
+  laudo_cautelar: 120
+  combustivel: 73

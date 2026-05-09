@@ -748,7 +748,7 @@ class SheetsExporter:
                 "Lucro (R$)",
                 "Derivado",
                 "lucro_absoluto = preco_giro × score_efetivo ÷ (1 + score_efetivo). score_efetivo = score_roi original quando lance_atual ≤ preco_alvo; reduzido proporcionalmente quando lance_atual > preco_alvo (capital efetivo cresce). Em lotes '✗ Caro demais' a célula vai pra '—': comprar pelo preço-alvo é cenário fantasioso quando o lance atual já passou do nosso teto.",
-                "Lucro TOTAL absoluto em R$ projetado pra revenda do lote (preço de venda - capital total investido). Antes era exibido como 'Lucro/mês' normalizando por `dias_giro_estimado`, mas a normalização confundia o operador (depende de calibração de giro frequentemente otimista). Agora mostra o número que efetivamente entra no caixa. Pra ritmo de operação combine com a coluna 'ROI alvo (%)' lado a lado e use o `dias_giro_estimado` da coluna interna do top CLI quando precisar do tempo.",
+                "Lucro TOTAL absoluto em R$ projetado pra revenda do lote (preço de venda - capital total investido). Antes era exibido como 'Lucro/mês' normalizando por `dias_giro_estimado`, mas a normalização confundia o operador (depende de calibração de giro frequentemente otimista). Agora mostra o número que efetivamente entra no caixa. Pra ritmo de operação combine com a coluna 'ROI alvo (%)' lado a lado.",
             ],
             [
                 "ROI alvo (%)",

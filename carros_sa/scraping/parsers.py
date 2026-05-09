@@ -90,6 +90,13 @@ def is_laudo_pdf_url(url: Optional[str]) -> bool:
         return True
     if "cdn-aav.autoavaliar.com.br" in low:
         return True
+    # ProceMax (sistema de laudos terceirizado usado pelo grupo carbel) — URL
+    # tipo https://app.sistemaprocemax.com.br/files/report/<UUID> sem .pdf.
+    # Carbel apareceu na plataforma ~2026-05 e o regex de "laudo" + ".pdf"
+    # não casa. Diagnóstico em data/scrapes/2026-05-09: 98 lotes carbel
+    # ignorados sem URL capturada (ver fixtures 22161767/22161768).
+    if "app.sistemaprocemax.com.br/files/report/" in low:
+        return True
     if low.endswith(".pdf") and "laudo" in low:
         return True
     return False

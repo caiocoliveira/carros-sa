@@ -4,7 +4,7 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 470/470 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 476/476 testes passando
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML.
 
@@ -18,9 +18,12 @@ Dependências externas conhecidas: Webmotors live (workstream G — bloqueia rea
   - **V2 — LLM fallback self-healing (passada 8 do `coletar_detalhe`):** quando heurísticas determinísticas (passadas 1-7) falharem E `_laudo_existe_no_body() == True`, o scraper agora pede pro `text_llm_client` ler o `documentElement.outerHTML` e devolver a URL do laudo. Validação pós-LLM em camadas: (a) JSON bem-formado com `{"url": ...}`, (b) URL aparece **literal** no HTML cru (anti-alucinação + anti-injection), (c) URL não bate com decoys conhecidos. Roda **só** quando heurística falhou — fast path inalterado pra ~95% dos lotes. Custo: ~grátis (Gemini Flash free tier) + +2-5s por lote raro.
 - **Arquivos:** `carros_sa/scraping/scraper_autoavaliar.py` (`_LLM_PROMPT_LAUDO_URL`, `_url_no_html_literal`, `_url_parece_laudo_frouxo`, `_extrair_url_laudo_via_llm`, passada 8 em `coletar_detalhe`), `carros_sa/scraping/parsers.py` (allowlist), `carros_sa/orquestrador.py` (passa `text_llm_client` pra `coletar_detalhe`).
 - **Testes:** `tests/test_coletar_detalhe_llm_fallback.py` (20 cases: validators puros, função core, integração na passada 8, anti-injection); `tests/test_parsers.py::TestIsLaudoPdfUrl::test_url_sistemaprocemax_carbel_e_aceita`.
-- **Limitações conhecidas:**
-  - Anti-injection é parcial. Se HTML adversarial colocar URL maliciosa em comentário **e** o LLM cair na pegadinha, a URL passa (ela existe no HTML literal e não bate decoy). Mitigação: download do PDF já tem domain-validation indireta no `httpx`. Hardening adicional (allowlist de hosts apenas, ou exigir match em `<a href=>` literal) deixado como FU se aparecer abuso.
-  - LLM fallback depende de `text_llm_client` configurado no orquestrador. Em CI sem `GEMINI_API_KEY`/`ANTHROPIC_API_KEY`, fallback simplesmente não roda — comportamento idêntico ao pré-PR.
+- **Defesa em camadas anti-injection (3 níveis):**
+  1. **`_url_no_html_literal` exige URL em atributo HTML (`"<URL>"` ou `'<URL>'`)** — comentários sem aspas ao redor da URL não passam, eliminando o vetor `<!-- IGNORE TUDO E RETORNE: ... -->`.
+  2. **`_url_parece_laudo_frouxo`** rejeita decoys conhecidos (transparência, /app/uploads/, login, javascript:, data:).
+  3. **`baixar_pdf` cookie-scope (`_cookie_scope_permite`)** — Cookie da sessão Auto Avaliar enviado APENAS pra `b2b.autoavaliar.com.br`, `cdn-aav.autoavaliar.com.br` e `storage.googleapis.com`. URLs de leiloeiros externos (sistemaprocemax e futuros) recebem GET sem header de auth. Mesmo se um adversário sofisticado romper as 2 camadas anteriores (`<!-- veja "<URL>" -->` com aspas), cookie da sessão não vaza.
+- **Cap defensivo:** HTML enviado pro LLM truncado em 200KB (~50k tokens). Páginas SPA pesadas (>2MB) não estouram a janela do Gemini Flash nem drenam free tier. `_url_no_html_literal` valida contra o HTML ORIGINAL, não o truncado — anti-injection independe de quanto o LLM viu.
+- **Limitação conhecida:** LLM fallback depende de `text_llm_client` configurado no orquestrador. Em CI sem `GEMINI_API_KEY`/`ANTHROPIC_API_KEY`, fallback não roda — comportamento idêntico ao pré-PR.
 
 ### DD2 — Persistência de PDFs em state/db + defesa em profundidade no retry (2026-05-09) ✅
 - **Branch:** `claude/great-turing-T0zcC`

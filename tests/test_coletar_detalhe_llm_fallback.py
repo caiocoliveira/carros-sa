@@ -20,6 +20,7 @@ from typing import Any, Callable, List, Optional
 import pytest
 
 from carros_sa.scraping.scraper_autoavaliar import (
+    _cookie_scope_permite,
     _extrair_url_laudo_via_llm,
     _url_no_html_literal,
     _url_parece_laudo_frouxo,
@@ -142,6 +143,33 @@ class TestUrlNoHtmlLiteral:
         assert _url_no_html_literal(_CARBEL_URL, "") is False
 
 
+class TestCookieScopePermite:
+    """`baixar_pdf` envia cookie da sessão Auto Avaliar APENAS pra hosts da
+    allowlist. URLs de leiloeiros externos (sistemaprocemax e futuros) recebem
+    GET sem auth — defesa contra cookie-leak via prompt injection no LLM."""
+
+    def test_b2b_autoavaliar_permite(self):
+        assert _cookie_scope_permite("https://b2b.autoavaliar.com.br/avaliacoes/x") is True
+
+    def test_storage_googleapis_permite(self):
+        assert _cookie_scope_permite("https://storage.googleapis.com/doc-b2b/x.pdf") is True
+
+    def test_cdn_aav_permite(self):
+        assert _cookie_scope_permite("https://cdn-aav.autoavaliar.com.br/laudos/x.pdf") is True
+
+    def test_sistemaprocemax_nao_permite(self):
+        """Carbel é externo — operador não autorizou cookie da sessão AA aqui."""
+        url = "https://app.sistemaprocemax.com.br/files/report/abc"
+        assert _cookie_scope_permite(url) is False
+
+    def test_atacante_arbitrario_nao_permite(self):
+        assert _cookie_scope_permite("https://malicioso.exemplo.com/phish.pdf") is False
+
+    def test_url_invalida_nao_permite(self):
+        assert _cookie_scope_permite("not a url") is False
+        assert _cookie_scope_permite("") is False
+
+
 class TestUrlPareceLaudoFrouxo:
     def test_carbel_aceita(self):
         assert _url_parece_laudo_frouxo(_CARBEL_URL) is True
@@ -228,10 +256,9 @@ class TestExtrairUrlLaudoViaLLM:
     async def test_injection_via_comentario_html_rejeitada(self):
         """HTML adversarial: comentário tenta induzir LLM a vazar URL maliciosa.
 
-        Mesmo que o LLM caia na pegadinha e retorne a URL injetada (ela aparece
-        no HTML, então passa o `_url_no_html_literal`), o `_url_parece_laudo_frouxo`
-        ainda barra se for decoy óbvio. Aqui testamos uma URL malicous que NÃO
-        está em decoy explícito mas TAMBÉM não está no HTML como link real.
+        Mesmo que o LLM caia na pegadinha e retorne a URL do comentário,
+        `_url_no_html_literal` exige que a URL apareça delimitada por aspa
+        (atributo HTML) — comentários sem aspas ao redor da URL são rejeitados.
         """
         html_adversarial = (
             "<html><body>"
@@ -240,18 +267,10 @@ class TestExtrairUrlLaudoViaLLM:
             "</body></html>"
         )
         page = FakePage(body_text="", body_html=html_adversarial, eval_responses=[])
-        # LLM cai na injection e retorna a URL do comentário
         llm = FakeLLMClient(responses=[{"url": "https://malicioso.exemplo.com/phish"}])
 
         url = await _extrair_url_laudo_via_llm(page, llm)
-        # _url_no_html_literal aceita (URL ESTÁ no comentário) — MAS:
-        # esse cenário é o pior caso onde anti-injection depende de hardening
-        # adicional. Documentamos: sem allowlist de host explícita, fica como
-        # "URL aceita". É melhor que perder lote, e o operador valida no
-        # download do PDF.
-        # Esse teste documenta o comportamento atual; se quisermos fortalecer,
-        # adicionamos lista de hosts permitidos OU exigir match em href= literal.
-        assert url == "https://malicioso.exemplo.com/phish"
+        assert url is None  # Bloqueado: URL não está em atributo (`"<URL>"`).
 
 
 # =============================================================================

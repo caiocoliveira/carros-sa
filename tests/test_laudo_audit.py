@@ -524,3 +524,58 @@ class TestSituacaoCarregaMotivoLaudo:
         assert "PDF ausente" in situacao
         assert "URL inválida" in situacao
         assert "LAUDO NÃO CAPTURADO" not in situacao  # cache forte separa
+
+
+# ---------------------------------------------------------------------------
+# Filtro retry pega `cache>=0.6 + PDF ausente` (defesa em profundidade CI)
+# ---------------------------------------------------------------------------
+
+class TestFiltroRetryPdfAusente:
+    """`reprocessar_lotes_do_db._filtrar_laudo_pendente` precisa pegar lotes
+    com cache forte mas PDF ausente em disco — caso clássico do CI workflow
+    quando state/db restaura DB mas a subárvore `laudos_pdfs/` falha
+    parcialmente. Antes do fix de 2026-05-09, esses lotes ficavam fora do
+    retry, o pipeline curto-circuitava e o `auditar_laudos --strict` falhava
+    cronicamente por `pdf_ausente`."""
+
+    def _importar(self):
+        # Script não está no path como módulo — adiciona scripts/ no sys.path.
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        from reprocessar_lotes_do_db import _filtrar_laudo_pendente
+        return _filtrar_laudo_pendente
+
+    def test_cache_forte_e_pdf_presente_nao_e_pendente(self, tmp_path):
+        _filtrar = self._importar()
+        _criar_pdf_fake(tmp_path, "L_OK")
+        lote = _lote("L_OK")
+        out = _filtrar([lote], {"L_OK": 0.95}, pdf_dir=tmp_path)
+        assert out == []
+
+    def test_cache_forte_mas_pdf_ausente_e_pendente(self, tmp_path):
+        """Cenário CI: DB restaurado com cache=0.95, mas state/db não trouxe
+        o PDF junto. Retry tem que pegar pra re-baixar — antes ignorava."""
+        _filtrar = self._importar()
+        # Sem _criar_pdf_fake — pdf_dir está vazio.
+        lote = _lote("L_PDF_SUMIU")
+        out = _filtrar([lote], {"L_PDF_SUMIU": 0.95}, pdf_dir=tmp_path)
+        assert len(out) == 1
+        assert out[0].id == "L_PDF_SUMIU"
+
+    def test_cache_fraco_continua_sendo_pendente(self, tmp_path):
+        """Comportamento original preservado: cache<0.6 vai pra fila."""
+        _filtrar = self._importar()
+        _criar_pdf_fake(tmp_path, "L_FRACO")  # PDF presente, mas cache fraco
+        lote = _lote("L_FRACO")
+        out = _filtrar([lote], {"L_FRACO": 0.5}, pdf_dir=tmp_path)
+        assert len(out) == 1
+
+    def test_cache_ausente_continua_sendo_pendente(self, tmp_path):
+        _filtrar = self._importar()
+        _criar_pdf_fake(tmp_path, "L_SEM_CACHE")
+        lote = _lote("L_SEM_CACHE")
+        out = _filtrar([lote], {}, pdf_dir=tmp_path)
+        assert len(out) == 1

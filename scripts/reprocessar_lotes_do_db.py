@@ -29,6 +29,36 @@ console = Console()
 app = typer.Typer(add_completion=False)
 
 
+def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Path] = None):
+    """Filtra `lotes` mantendo só os que têm laudo pendente.
+
+    "Pendente" = qualquer uma:
+      1. Sem entrada em LaudoCache
+      2. LaudoCache.confidence < 0.6 (fallback `_laudo_sem_pdf`)
+      3. PDF ausente em `pdf_dir/<lote_id>.pdf` (ou <5KB)
+
+    Extraído pra fora do CLI pra ficar coberto por teste unitário (sem
+    Playwright, sem `_run`). O `pdf_dir=None` resolve em runtime via
+    `PDF_DIR_DEFAULT` — mesma fonte do `verificar_laudo_completo`.
+    """
+    from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
+    if pdf_dir is None:
+        pdf_dir = PDF_DIR_DEFAULT
+
+    def _pdf_ausente(lote_id: str) -> bool:
+        p = pdf_dir / f"{lote_id}.pdf"
+        return not (p.exists() and p.stat().st_size > 5_000)
+
+    return [
+        l for l in lotes
+        if (
+            laudos_confidence.get(l.id) is None
+            or (laudos_confidence.get(l.id) or 0) < 0.6
+            or _pdf_ausente(l.id)
+        )
+    ]
+
+
 @app.command()
 def main(
     empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
@@ -46,9 +76,11 @@ def main(
     somente_laudo_pendente: bool = typer.Option(
         False, "--somente-laudo-pendente",
         help=(
-            "Filtra só lotes cujo LaudoCache está vazio OU veio de fallback "
-            "(confidence<0.6 = `_laudo_sem_pdf`). Ideal pra rodar após a triagem "
-            "diária e tentar destravar lotes em que o scraper não achou o PDF."
+            "Filtra só lotes cujo laudo está incompleto: LaudoCache vazio OU "
+            "fallback (confidence<0.6) OU PDF ausente em data/laudos_pdfs/. "
+            "Ideal pra rodar após a triagem diária e tentar destravar lotes em "
+            "que o scraper não achou o PDF — e pra recuperar PDFs sumidos "
+            "entre runs CI quando state/db não restaurou tudo."
         ),
     ),
 ) -> None:
@@ -131,12 +163,9 @@ async def _run(
                         select(LaudoCache.lote_id, LaudoCache.confidence)
                     ).all()
                 }
-                lotes = [
-                    l for l in lotes
-                    if laudos.get(l.id) is None or (laudos.get(l.id) or 0) < 0.6
-                ]
+                lotes = _filtrar_laudo_pendente(lotes, laudos)
                 console.print(
-                    f"[cyan]Filtro ativo: só laudo pendente (ausente ou confidence<0.6) "
+                    f"[cyan]Filtro ativo: só laudo pendente (cache<0.6 OU PDF ausente) "
                     f"→ {len(lotes)} candidatos[/cyan]"
                 )
             if max_lotes:

@@ -4,10 +4,17 @@ name: triagem-diaria
 # horários do cron local e perdendo runs. UTC-3 ano todo (Brasil sem DST):
 # 10:00 UTC = 07:00 BRT, 16:00 UTC = 13:00 BRT.
 #
-# Estado (SQLite + cookies) persiste numa branch órfã `state/db` via
-# git plumbing — sem worktree, sem checkout, só blob+tree+commit-tree+push.
-# PDFs (data/laudos_pdfs/) NÃO são persistidos: pipeline só usa cache pra UX
-# do operador (link "PDF salvo"), não pro fluxo de avaliação.
+# Estado (SQLite + cookies + PDFs de laudo) persiste numa branch órfã `state/db`
+# via git plumbing — sem worktree, sem checkout, só blob+tree+commit-tree+push.
+#
+# Por que persistir os PDFs também (ajuste 2026-05-09): a audit
+# `verificar_laudo_completo` exige PDF on-disk como uma das 3 condições de
+# "laudo completo". Em runs subsequentes ao 1º, o DB já trazia LaudoCache
+# com confidence>=0.6, mas a pasta `data/laudos_pdfs/` ressuscitava VAZIA —
+# o filtro do retry (`--somente-laudo-pendente` = confidence<0.6) ignorava
+# esses lotes e o `auditar_laudos --strict` no fim do workflow falhava
+# cronicamente com motivo `pdf_ausente`. Persistir os PDFs alinha o estado
+# operacional (auditoria estrita verde) com o estado real (laudo já analisado).
 #
 # Secrets necessários (Settings → Secrets and variables → Actions):
 #   AUTOAVALIAR_EMAIL          — login do Auto Avaliar
@@ -44,9 +51,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore SQLite + cookies from state/db branch
+      - name: Restore SQLite + cookies + PDFs from state/db branch
         run: |
-          mkdir -p .state
+          mkdir -p .state data/laudos_pdfs
           git fetch origin state/db:refs/remotes/origin/state/db 2>/dev/null || echo "state/db branch não existe ainda"
           if git show origin/state/db:carros_sa.db > /tmp/db.new 2>/dev/null; then
             mv /tmp/db.new carros_sa.db
@@ -61,6 +68,23 @@ jobs:
           else
             rm -f /tmp/ck.new
             echo "Sem cookies — vai logar com email/senha"
+          fi
+          # PDFs ficam numa subárvore `laudos_pdfs/` no commit órfão. ls-tree
+          # pode falhar quando o branch ainda não tem a subárvore (rev. 1ª
+          # passagem após o ajuste): redirecionar stderr e tratar saída vazia
+          # como "sem PDFs prévios" — falha branda, pipeline segue.
+          n_pdfs=0
+          if git ls-tree origin/state/db laudos_pdfs/ 2>/dev/null | grep -q '^'; then
+            while IFS=$'\t' read -r meta path; do
+              # meta = "<mode> <type> <sha>"; só interessa quando type=blob.
+              type=$(printf '%s' "$meta" | awk '{print $2}')
+              [ "$type" = "blob" ] || continue
+              [ -z "$path" ] && continue
+              git show "origin/state/db:$path" > "data/laudos_pdfs/$(basename "$path")" 2>/dev/null && n_pdfs=$((n_pdfs+1)) || true
+            done < <(git ls-tree origin/state/db laudos_pdfs/)
+            echo "PDFs restaurados: $n_pdfs"
+          else
+            echo "Sem PDFs prévios em state/db"
           fi
 
       # actions/setup-python pin do Python 3.12 (projeto exige). astral-sh/setup-uv@v3
@@ -109,7 +133,7 @@ jobs:
           .venv/bin/python scripts/auditar_laudos.py \
             --empresa carros_uberlandia --strict
 
-      - name: Persiste DB + cookies em state/db
+      - name: Persiste DB + cookies + PDFs em state/db
         if: always()
         run: |
           if [ ! -s carros_sa.db ]; then
@@ -120,10 +144,34 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           BLOB_DB=$(git hash-object -w carros_sa.db)
-          TREE_INPUT="$(printf '100644 blob %s\tcarros_sa.db\n' "$BLOB_DB")"
+          TREE_INPUT="$(printf '100644 blob %s\tcarros_sa.db' "$BLOB_DB")"
           if [ -s "$AUTOAVALIAR_COOKIES_PATH" ]; then
             BLOB_CK=$(git hash-object -w "$AUTOAVALIAR_COOKIES_PATH")
-            TREE_INPUT="$TREE_INPUT$(printf '\n100644 blob %s\tautoavaliar_cookies.json' "$BLOB_CK")"
+            TREE_INPUT="$TREE_INPUT"$'\n'"$(printf '100644 blob %s\tautoavaliar_cookies.json' "$BLOB_CK")"
+          fi
+
+          # Subárvore `laudos_pdfs/` com os PDFs baixados na run atual + os
+          # restaurados de state/db. Filtra >5KB (mesmo threshold do
+          # `_pdf_eh_laudo_valido` no orquestrador) pra não persistir HTML
+          # de erro salvo como .pdf por engano.
+          PDFS_TREE=""
+          if [ -d data/laudos_pdfs ]; then
+            PDFS_INPUT=$(
+              find data/laudos_pdfs -maxdepth 1 -name '*.pdf' -size +5k -print 2>/dev/null | while read -r f; do
+                BLOB=$(git hash-object -w "$f")
+                printf '100644 blob %s\t%s\n' "$BLOB" "$(basename "$f")"
+              done
+            )
+            if [ -n "$PDFS_INPUT" ]; then
+              PDFS_TREE=$(printf '%s\n' "$PDFS_INPUT" | git mktree)
+              n_pdfs=$(printf '%s\n' "$PDFS_INPUT" | wc -l | tr -d ' ')
+              echo "PDFs persistidos: $n_pdfs"
+            else
+              echo "Sem PDFs >5KB em data/laudos_pdfs/"
+            fi
+          fi
+          if [ -n "$PDFS_TREE" ]; then
+            TREE_INPUT="$TREE_INPUT"$'\n'"$(printf '040000 tree %s\tlaudos_pdfs' "$PDFS_TREE")"
           fi
           TREE=$(printf '%s\n' "$TREE_INPUT" | git mktree)
 

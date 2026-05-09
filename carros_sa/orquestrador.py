@@ -469,12 +469,19 @@ async def _pipeline_lote(
     modelo_str = f"{lote.marca} {lote.modelo} {lote.ano}"
 
     # Short-circuit: só pula o pipeline se ESTÁ realmente completo — avaliação
-    # existente E laudo com confiança ≥ 0.6. Antes, bastava ter AvaliacaoLote,
-    # o que tornava o flag `--somente-laudo-pendente` do script de retry
-    # inofensivo: ele escolhia lotes com conf<0.6, mas aqui o pipeline saía
-    # sem re-raspar detalhe nem re-extrair laudo. Resultado: 104 lotes ativos
-    # com AvaliacaoLote stale + LaudoCache placeholder (conf=0.5, detalhe
-    # ausente) nunca reprocessavam.
+    # existente E laudo com confiança ≥ 0.6 E PDF on-disk. Antes, bastava ter
+    # AvaliacaoLote, o que tornava o flag `--somente-laudo-pendente` do script
+    # de retry inofensivo: ele escolhia lotes com conf<0.6, mas aqui o pipeline
+    # saía sem re-raspar detalhe nem re-extrair laudo. Resultado: 104 lotes
+    # ativos com AvaliacaoLote stale + LaudoCache placeholder (conf=0.5,
+    # detalhe ausente) nunca reprocessavam.
+    #
+    # Adição 2026-05-09: também exige PDF on-disk. Caso de uso CI workflow —
+    # state/db agora persiste os PDFs, mas se a restauração da subárvore
+    # `laudos_pdfs/` falhar (network glitch, corrupção da branch), o lote tem
+    # cache>=0.6 no DB mas o arquivo não está em data/laudos_pdfs/. O retry
+    # script abaixo passa a incluir esse caso na fila; aqui o pipeline deixa
+    # de pulá-lo, fechando o laço da auditoria.
     ja_avaliado = session.exec(
         select(AvaliacaoLote)
         .where(AvaliacaoLote.empresa_id == empresa.empresa_id)
@@ -482,7 +489,9 @@ async def _pipeline_lote(
     ).first()
     laudo_atual = session.get(LaudoCache, lote.id)
     laudo_ok = laudo_atual is not None and (laudo_atual.confidence or 0) >= 0.6
-    if ja_avaliado and laudo_ok:
+    pdf_path = _pdf_persistente_path(lote.id)
+    pdf_ok = pdf_path.exists() and pdf_path.stat().st_size > 5_000
+    if ja_avaliado and laudo_ok and pdf_ok:
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=ja_avaliado.preco_alvo,
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))

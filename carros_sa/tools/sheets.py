@@ -72,6 +72,48 @@ COLUMN_FORMATS = {
     "ROI anualizado (%)": _NUMBER_DECIMAL_1,
 }
 
+# Thresholds de km/ano pra cor de fundo da coluna KM. Calibração:
+# - ≤15k/ano: média brasileira (~15k) ou abaixo → carro conservado.
+# - 15-25k/ano: uso típico-alto (família grande, comute longo) — sem alarme,
+#   mas operador deve dar uma olhada.
+# - >25k/ano: uso intensivo, alta probabilidade de frota/Uber/táxi —
+#   desgaste mecânico desproporcional, revenda mais difícil.
+_KM_POR_ANO_VERDE_MAX = 15_000
+_KM_POR_ANO_AMARELO_MAX = 25_000
+
+# Cores RGB (0-1) pra background de célula. Tons claros pra manter o número
+# legível por cima. Espelham a paleta default das condicionais do Sheets.
+_COR_VERDE = {"red": 0.85, "green": 0.92, "blue": 0.83}
+_COR_AMARELO = {"red": 0.99, "green": 0.91, "blue": 0.70}
+_COR_VERMELHO = {"red": 0.96, "green": 0.80, "blue": 0.80}
+_COR_BRANCO = {"red": 1.0, "green": 1.0, "blue": 1.0}
+
+_COR_POR_INDICADOR_KM = {
+    "verde": _COR_VERDE,
+    "amarelo": _COR_AMARELO,
+    "vermelho": _COR_VERMELHO,
+}
+
+
+def _km_indicator(km: Optional[int], ano: Optional[int], ano_atual: int) -> Optional[str]:
+    """Classifica o KM do lote pelo km/ano em "verde" / "amarelo" / "vermelho".
+
+    Devolve None quando faltam dados (km ou ano None) — célula fica sem cor
+    em vez de chutar uma classificação enganosa. Idade tem floor de 1 ano:
+    carro do ano-corrente com 30k km vira "uso intensivo" (~30k/ano), não
+    divide por idade=0. Carro futuro (modelo > ano_atual) também é tratado
+    como idade=1.
+    """
+    if km is None or km < 0 or ano is None:
+        return None
+    idade = max(1, ano_atual - ano)
+    km_por_ano = km / idade
+    if km_por_ano <= _KM_POR_ANO_VERDE_MAX:
+        return "verde"
+    if km_por_ano <= _KM_POR_ANO_AMARELO_MAX:
+        return "amarelo"
+    return "vermelho"
+
 
 def _col_letter(idx_0based: int) -> str:
     """Converte índice 0-based em letra de coluna estilo Sheets (A, B, ..., Z, AA, AB, ...)."""
@@ -354,6 +396,7 @@ class SheetsExporter:
                 "cidade": lote.origem_cidade or "—",
                 "fim_em": fim_em_str,
                 "km": lote.km,
+                "km_indicator": _km_indicator(lote.km, lote.ano, agora.year),
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
                 "fipe": av.fipe,
@@ -546,9 +589,41 @@ class SheetsExporter:
         ws.clear()
         self._reaplicar_formato_numerico(ws)
         ws.update(sheet_rows, value_input_option="USER_ENTERED")
+        self._aplicar_cores_km(ws, rows)
 
         # Congela banner (linha 1) + header (linha 2)
         ws.freeze(rows=2)
+
+    @staticmethod
+    def _aplicar_cores_km(ws, rows: List[dict]) -> None:
+        """Pinta o fundo da célula KM por linha conforme `km_indicator`.
+
+        Usa `batch_format` em vez de embutir emoji no texto pra manter a célula
+        numérica (sortable + format `#,##0` aplicado pela coluna). Sempre reseta
+        a coluna inteira pra branco antes de aplicar as cores — `ws.clear()`
+        preserva backgroundColor, então sem reset os lotes que perderam
+        classificação (km virou None, idade saturou) herdariam a cor do run
+        anterior.
+        """
+        km_letter = _col_letter(HEADER.index("KM"))
+        formats = [
+            # Reset prévio. `ws.batch_format` aplica entradas em ordem dentro
+            # da mesma chamada, então células coloridas abaixo sobrescrevem o
+            # branco da coluna.
+            {"range": f"{km_letter}:{km_letter}",
+             "format": {"backgroundColor": _COR_BRANCO}},
+        ]
+        for idx, r in enumerate(rows):
+            ind = r.get("km_indicator")
+            if ind is None:
+                continue
+            # banner=linha1, header=linha2, dados começam em 3 (1-indexed).
+            sheet_row = idx + 3
+            formats.append({
+                "range": f"{km_letter}{sheet_row}",
+                "format": {"backgroundColor": _COR_POR_INDICADOR_KM[ind]},
+            })
+        ws.batch_format(formats)
 
     @staticmethod
     def _reaplicar_formato_numerico(ws) -> None:
@@ -705,8 +780,8 @@ class SheetsExporter:
             [
                 "KM",
                 "Auto Avaliar",
-                "Número parseado da página de detalhe (specs)",
-                "Sanity check rápido de desgaste (KM alto = revenda mais difícil)",
+                "Número parseado da página de detalhe (specs). Cor de fundo da célula sinaliza km/ano (idade = max(1, ano_atual − ano_modelo)): 🟢 ≤15.000 km/ano (média Brasil ou abaixo, conservado), 🟡 15.001–25.000 km/ano (uso típico-alto), 🔴 >25.000 km/ano (uso intensivo, alta probabilidade de frota/Uber/táxi). Sem cor quando ano ou km estão ausentes.",
+                "Sanity check rápido de desgaste. KM absoluto sozinho engana (60k num carro 2010 é diferente de 60k num 2024); km/ano normaliza pela idade. Vermelho = revenda mais difícil + desgaste mecânico desproporcional; verde = carro pouco rodado pra idade.",
             ],
             [
                 "Lance Atual (R$)",

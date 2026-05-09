@@ -23,6 +23,9 @@ Dependências externas conhecidas: Webmotors live (workstream G — bloqueia rea
 - **Limitações conhecidas:**
   - URLs assinadas do Google Cloud Storage continuam expirando ~1h após geração; a planilha pode mostrar "Ver laudo" clicável que retorna 403 entre runs. Workaround atual: a célula degrada pra "PDF salvo (link expirado)" quando a URL ausente, e agora os PDFs persistidos em `state/db` garantem que esse fallback é honesto. Resolução plena exige servir os PDFs de fonte estável (workstream futuro — GitHub raw URL, S3 público, etc.).
   - Branch `state/db` cresce em volume (~180MB/600 lotes × 300KB cada). GitHub fará GC dos blobs não referenciados quando o tree mais recente não os listar; até lá, fica nos objects.
+- **Follow-ups (não-bloqueantes, registrados no review arquitetural):**
+  - **Rotação/GC de `state/db`** — cada run faz `commit-tree -p $PARENT`, então blobs antigos ficam acumulados na cadeia. Limite soft de 5GB do GitHub = ~6 meses de runway no ritmo atual. Considerar (a) `git push --force` periódico resetando histórico, ou (b) script de cleanup que reescreve sem parent quando atingir N commits. Não bloqueia agora.
+  - **Re-assinatura de URL "Ver laudo" no export** — substituir as URLs assinadas expirantes (Google Cloud Storage, ~1h) por links estáveis quando o exporter rodar. Caminhos possíveis: GitHub raw URL apontando pra `state/db/laudos_pdfs/<lote>.pdf` (se repo público), ou re-assinar via service account na hora do export. Resolve a mitigação atual ("PDF salvo (link expirado)") deixando link sempre vivo.
 
 ### CC — Coluna "Lucro (R$)" total absoluto (sem quebra mensal) (2026-05-08) ✅
 - **Branch:** `claude/lucro-total-sem-quebra-mensal` (PR #65 mergeado em `d2906cc`)

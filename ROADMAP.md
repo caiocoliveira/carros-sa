@@ -4,11 +4,23 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 444/444 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 470/470 testes passando
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML.
 
 Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
+
+### FF — Suporte ao grupo carbel + LLM fallback self-healing pra leiloeiros novos (2026-05-09) ✅
+- **Branch:** `claude/fix-build-scheduling-sAzQq`
+- **Motivação:** Diagnóstico em `data/scrapes/2026-05-09_uberlandia_listagem.json`: 132 lotes ativos com `⚠ LAUDO NÃO CAPTURADO`. Investigação dos HTMLs reais (lotes 22161767, 22161768): grupo `carbel` (que apareceu na plataforma Auto Avaliar ~2026-05) usa **sistema terceirizado de laudos** — `https://app.sistemaprocemax.com.br/files/report/<UUID>`. A allowlist em `is_laudo_pdf_url` + `_EXTRACT_PDF_URL_JS` cobria só `storage.googleapis.com/doc-b2b`, `cdn-aav.autoavaliar.com.br` e PDFs com "laudo" no path. Sistemaprocemax cai fora dos 3 → 98 lotes carbel ignorados. Pergunta operacional: "todo leiloeiro novo a gente vai ter que adicionar à mão?"
+- **Solução em 2 camadas:**
+  - **V1 — Fast path determinístico:** adicionado `app.sistemaprocemax.com.br/files/report/` à allowlist em 2 lugares (`parsers.is_laudo_pdf_url` + JS `pareceLaudo()`). Cobre carbel + qualquer leiloeiro futuro nessa plataforma.
+  - **V2 — LLM fallback self-healing (passada 8 do `coletar_detalhe`):** quando heurísticas determinísticas (passadas 1-7) falharem E `_laudo_existe_no_body() == True`, o scraper agora pede pro `text_llm_client` ler o `documentElement.outerHTML` e devolver a URL do laudo. Validação pós-LLM em camadas: (a) JSON bem-formado com `{"url": ...}`, (b) URL aparece **literal** no HTML cru (anti-alucinação + anti-injection), (c) URL não bate com decoys conhecidos. Roda **só** quando heurística falhou — fast path inalterado pra ~95% dos lotes. Custo: ~grátis (Gemini Flash free tier) + +2-5s por lote raro.
+- **Arquivos:** `carros_sa/scraping/scraper_autoavaliar.py` (`_LLM_PROMPT_LAUDO_URL`, `_url_no_html_literal`, `_url_parece_laudo_frouxo`, `_extrair_url_laudo_via_llm`, passada 8 em `coletar_detalhe`), `carros_sa/scraping/parsers.py` (allowlist), `carros_sa/orquestrador.py` (passa `text_llm_client` pra `coletar_detalhe`).
+- **Testes:** `tests/test_coletar_detalhe_llm_fallback.py` (20 cases: validators puros, função core, integração na passada 8, anti-injection); `tests/test_parsers.py::TestIsLaudoPdfUrl::test_url_sistemaprocemax_carbel_e_aceita`.
+- **Limitações conhecidas:**
+  - Anti-injection é parcial. Se HTML adversarial colocar URL maliciosa em comentário **e** o LLM cair na pegadinha, a URL passa (ela existe no HTML literal e não bate decoy). Mitigação: download do PDF já tem domain-validation indireta no `httpx`. Hardening adicional (allowlist de hosts apenas, ou exigir match em `<a href=>` literal) deixado como FU se aparecer abuso.
+  - LLM fallback depende de `text_llm_client` configurado no orquestrador. Em CI sem `GEMINI_API_KEY`/`ANTHROPIC_API_KEY`, fallback simplesmente não roda — comportamento idêntico ao pré-PR.
 
 ### DD2 — Persistência de PDFs em state/db + defesa em profundidade no retry (2026-05-09) ✅
 - **Branch:** `claude/great-turing-T0zcC`

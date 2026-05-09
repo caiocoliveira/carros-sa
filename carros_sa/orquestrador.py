@@ -502,7 +502,10 @@ async def _pipeline_lote(
         # HTTP 429 no baixar_pdf na triagem de 2026-04-16. Auto Avaliar tem
         # rate-limit agressivo no download de laudos.
         await asyncio.sleep(random.uniform(5.0, 8.0))
-        body_text, pdf_url = await coletar_detalhe(page, lote.url)
+        # text_llm_client é passado como fallback pra leiloeiros novos cujo
+        # layout DOM não bate com a allowlist atual — ver passada 8 em
+        # `coletar_detalhe`. Quando None, o fallback simplesmente não roda.
+        body_text, pdf_url = await coletar_detalhe(page, lote.url, llm_client=text_llm_client)
         flags = parse_detalhe(body_text, pdf_url)
 
         # 1b. Persiste flags do detalhe + preços da Tabela Auto Avaliar no Lote.

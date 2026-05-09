@@ -526,6 +526,15 @@ class TestIsLaudoPdfUrl:
         """PDF qualquer sem indício de ser laudo — rejeita."""
         assert is_laudo_pdf_url("https://exemplo.com/manual.pdf") is False
 
+    def test_url_sistemaprocemax_carbel_e_aceita(self):
+        """Grupo carbel (apareceu 2026-05) usa ProceMax como sistema de laudos.
+
+        URL real coletada dos lotes 22161767 e 22161768. Sem .pdf, sem 'laudo'
+        no path — só passa pela allowlist explícita do host.
+        """
+        ok = "https://app.sistemaprocemax.com.br/files/report/7aa5c4aa-5bf8-463e-93ac-3302876e9698"
+        assert is_laudo_pdf_url(ok) is True
+
     def test_url_vazia_ou_none(self):
         assert is_laudo_pdf_url(None) is False
         assert is_laudo_pdf_url("") is False

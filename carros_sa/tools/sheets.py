@@ -45,7 +45,7 @@ HEADER = [
     "FIPE (R$)",
     "Mediana mercado (R$)",
     "Lucro (R$)",
-    "ROI anualizado (%)",
+    "ROI alvo (%)",
     "Reforma (R$)",
     "Tese",
     "Anúncio",
@@ -69,7 +69,7 @@ COLUMN_FORMATS = {
     "Mediana mercado (R$)": _NUMBER_INTEIRO,
     "Lucro (R$)": _NUMBER_INTEIRO,
     "Reforma (R$)": _NUMBER_INTEIRO,
-    "ROI anualizado (%)": _NUMBER_DECIMAL_1,
+    "ROI alvo (%)": _NUMBER_DECIMAL_1,
 }
 
 
@@ -110,8 +110,12 @@ def _score_roi_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> float:
     """ROI honesto considerando entrada pelo `max(lance_atual, preco_alvo)`.
 
     Quando `lance_atual > preco_alvo`, o operador real entra acima do alvo:
-    capital empatado cresce, retorno cai. A coluna `ROI anualizado` e `Lucro/mês`
-    devem refletir esse cenário, NÃO o alvo intrinsic. `score_roi` persistido
+    capital empatado cresce, retorno cai. Hoje (pós refactor "ROI alvo cru" de
+    2026-05-08) só a coluna `Lucro (R$)` consome este helper — `Lucro` reflete
+    cenário real de entrada (alvo se ainda factível, lance atual em zona apertada).
+    A coluna `ROI alvo (%)` exibe o `score_roi` intrinsic puro (não usa este
+    helper). O ranking interno usa este score efetivo via `roi_anualizado` pra
+    ordenar lotes — `score_roi` persistido
     em `AvaliacaoLote` continua sendo o intrinsic (caso médio no alvo) — só o
     display da planilha vira "ROI realista".
 
@@ -281,16 +285,23 @@ class SheetsExporter:
             viavel = av.preco_max > (lote.lance_atual or 0)
 
             from carros_sa.agents.calibracao_giro import roi_anualizado
-            # ROI anualizado e Lucro — usam `score_roi_efetivo`, NÃO o
-            # `score_roi` persistido. Diferença: quando `lance_atual > preco_alvo`
-            # (zona apertada), o operador real entra acima do alvo e o ROI cai.
-            # `score_roi` no DB continua sendo o intrinsic (caso médio no alvo);
-            # display vira "ROI realista" considerando o piso de entrada do leilão.
-            # Lucro é absoluto (em R$ no fim da revenda), NÃO normalizado por mês —
-            # operador prefere ver o número total que vai entrar no caixa em vez de
-            # uma fração mensal que depende de `dias_giro_estimado` calibrado.
+            # ROI alvo (display) = `score_roi` intrinsic do precificador, sem
+            # anualizar. É o ROI cru da operação se comprar pelo preço-alvo
+            # calibrado por risco/liquidez. Operador prefere ver o número da
+            # operação direto em vez de extrapolar pra ano (`× 365 / dias_giro`)
+            # — anualização dependia de `dias_giro_estimado` calibrado, que é
+            # frequentemente otimista por categoria genérica (ver workstream DD).
+            #
+            # Lucro é absoluto (em R$ no fim da revenda), idem — não normaliza.
+            #
+            # `roi_anual` continua calculado pra uso INTERNO no ranking: ordenar
+            # por ROI cru premiaria lote lento sobre lote rápido com mesmo ROI
+            # absoluto (Polo 227d com 21% acima de Gol 22d com 21% — invertido
+            # economicamente). Então mantemos `roi_anualizado` no `key=` do
+            # `sorted` (linha ~217) mas a coluna exibida é o ROI alvo intrinsic.
             score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
             roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
+            roi_alvo = (av.score_roi or 0) * 100
             lucro = _lucro_absoluto_efetivo(av, lote.lance_atual)
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -365,6 +376,7 @@ class SheetsExporter:
                 # vs Lance Atual lado a lado pra contextualizar.
                 "webmotors_mediana": av.webmotors_mediana,
                 "roi_anualizado": round(roi_anual, 1),
+                "roi_alvo": round(roi_alvo, 1),
                 "lucro": lucro,
                 "reforma_estimada": av.reforma_estimada,
                 "tese": tese_texto,
@@ -469,7 +481,7 @@ class SheetsExporter:
             if nao_analisado:
                 preco_max_cell = "—"
                 lucro_cell = "—"
-                roi_anual_cell = "—"
+                roi_alvo_cell = "—"
                 reforma_cell = "—"
                 # Tese depende do lance_max pra detectar "ticket acima do teto";
                 # sem esse valor definido (laudo pendente), zerar a célula evita
@@ -478,19 +490,19 @@ class SheetsExporter:
             else:
                 preco_max_cell = r["preco_max"]
                 # Em lotes inviáveis (lance atual já passou do nosso teto),
-                # Lucro e ROI anualizado pressupõem comprar pelo preço-ALVO
+                # Lucro e ROI alvo pressupõem comprar pelo preço-ALVO
                 # — que é menor que o lance atual. Cenário fantasioso. Em lote
                 # estrutural inviável, o score_roi inflado pela margem alta
-                # (~1.0) produz Lucro de R$5k+ e ROI 500%/ano, induzindo o
+                # (~1.0) produz Lucro de R$5k+ e ROI alvo ~100%, induzindo o
                 # operador a achar que vale negociar. Mantemos preco_max +
                 # reforma + FIPE pra ele entender por que descartamos.
                 if r["viavel"]:
                     lucro_cell = r["lucro"]
-                    roi_anual_cell = r["roi_anualizado"]
+                    roi_alvo_cell = r["roi_alvo"]
                     tese_cell = r["tese"]
                 else:
                     lucro_cell = "—"
-                    roi_anual_cell = "—"
+                    roi_alvo_cell = "—"
                     tese_cell = "—"
                 reforma_cell = r["reforma_estimada"]
 
@@ -518,7 +530,7 @@ class SheetsExporter:
                 fipe_cell,
                 mediana_cell,
                 lucro_cell,
-                roi_anual_cell,
+                roi_alvo_cell,
                 reforma_cell,
                 tese_cell,
                 url_cell,
@@ -663,8 +675,8 @@ class SheetsExporter:
             [
                 "Rank",
                 "Derivado",
-                "Ordem: (1) lotes com laudo analisado, (2) viáveis (lance atual ≤ Lance Máximo), (3) maior ROI anualizado primeiro. Mesma métrica do CLI `carros-sa top`.",
-                "ROI anualizado normaliza retorno pelo tempo de giro — carro rápido com retorno menor pode ranquear acima de carro lento com retorno maior. Antes o desempate era 'folga absoluta', que premiava lotes baratos de ROI ruim.",
+                "Ordem: (1) lotes com laudo analisado, (2) viáveis (lance atual ≤ Lance Máximo), (3) maior ROI ANUALIZADO primeiro (interno — não exibido). A coluna 'ROI alvo (%)' mostra o ROI cru sem anualizar, mas o desempate continua usando o anualizado pra normalizar retorno pelo tempo de giro. Mesma métrica do CLI `carros-sa top`.",
+                "Carro rápido com retorno menor pode ranquear acima de carro lento com retorno maior porque o anualizado normaliza pelo `dias_giro_estimado`. Sem isso, Polo Track 2024 (227d, 21% intrinsic) ficaria empatado com Gol 2014 (22d, 21% intrinsic) — invertido economicamente. Coluna exibe ROI cru pra leitura humana mais simples; ranking usa anualizado pra justiça temporal.",
             ],
             [
                 "Situação",
@@ -736,13 +748,13 @@ class SheetsExporter:
                 "Lucro (R$)",
                 "Derivado",
                 "lucro_absoluto = preco_giro × score_efetivo ÷ (1 + score_efetivo). score_efetivo = score_roi original quando lance_atual ≤ preco_alvo; reduzido proporcionalmente quando lance_atual > preco_alvo (capital efetivo cresce). Em lotes '✗ Caro demais' a célula vai pra '—': comprar pelo preço-alvo é cenário fantasioso quando o lance atual já passou do nosso teto.",
-                "Lucro TOTAL absoluto em R$ projetado pra revenda do lote (preço de venda - capital total investido). Antes era exibido como 'Lucro/mês' normalizando por `dias_giro_estimado`, mas a normalização confundia o operador (depende de calibração de giro frequentemente otimista). Agora mostra o número que efetivamente entra no caixa. Pra ritmo de operação use ROI anualizado lado a lado.",
+                "Lucro TOTAL absoluto em R$ projetado pra revenda do lote (preço de venda - capital total investido). Antes era exibido como 'Lucro/mês' normalizando por `dias_giro_estimado`, mas a normalização confundia o operador (depende de calibração de giro frequentemente otimista). Agora mostra o número que efetivamente entra no caixa. Pra ritmo de operação combine com a coluna 'ROI alvo (%)' lado a lado.",
             ],
             [
-                "ROI anualizado (%)",
+                "ROI alvo (%)",
                 "Derivado",
-                "score_efetivo × 365 ÷ dias_giro (floor 60d; fallback 90d quando dias_giro=NULL). score_efetivo é igual ao score_roi (caso médio no preço-ALVO, calibrado por risco/liquidez) quando o lance atual ainda está abaixo do alvo. Quando lance_atual > preco_alvo, recalcula com o capital ajustado pra cima — o operador entra acima do alvo e o ROI cai proporcionalmente. margem_aplicada (componente do score_roi) é capada em 50% pra evitar que lotes com fatores no teto (laudo estrutural + mercado ilíquido) inflem o ROI artificialmente. Em lotes '✗ Caro demais' a célula vai pra '—'.",
-                "Normaliza retorno pelo tempo de giro E pelo cenário REAL de entrada. Coluna reflete o que o operador realmente ganha se der lance hoje. Valores >500% sinalizados pelo audit como provável otimismo (benchmark operacional real ~60-75% ao ano).",
+                "ROI cru no preço-ALVO = `score_roi × 100`, sem anualização. score_roi = (preco_giro - capital_alvo) / capital_alvo onde `capital_alvo = preco_alvo + reforma + frete + taxas + custo_op`. Calibrado por risco/liquidez via `margem_aplicada` (capada em 50% pra evitar que fatores no teto inflem artificialmente). Em lotes '✗ Caro demais' a célula vai pra '—' (cenário fantasioso: comprar pelo alvo quando o lance atual já passou do teto).",
+                "Mostra o retorno % esperado da OPERAÇÃO (compra → revenda → caixa) sem extrapolar pra horizonte anual. Antes a coluna era 'ROI anualizado (%)' = `score_roi × 365 / dias_giro` com floor 60d — útil pra normalização temporal mas dependia de calibração de giro frequentemente otimista (HATCH NOVO=25d sem floor → ROI inflado). Decisão de UX: ROI cru é mais legível pra leitura humana ('30% sobre o capital empatado'), e o ranking interno continua usando o anualizado pra desempate temporal (lote rápido > lote lento com mesmo ROI cru). Threshold do audit: > 100% sinalizado como provável bug (margem cap em 50% deveria limitar a ~100%).",
             ],
             [
                 "Reforma (R$)",

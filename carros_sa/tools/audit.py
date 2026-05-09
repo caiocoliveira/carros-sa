@@ -8,7 +8,7 @@ resultado reportado é:
 
 A função `audit(engine, sample_size=20)` lê as últimas N avaliações
 (JOIN Lote LEFT JOIN LaudoCache), monta um dict enriched com situação/viável/
-encerrado/ROI anualizado e aplica os validators. Silencioso quando tudo ok.
+encerrado/ROI alvo e aplica os validators. Silencioso quando tudo ok.
 
 Mantida como módulo (não script) pra ser importável nos testes sem path munging.
 A CLI fica em `scripts/audit_columns.py`.
@@ -143,17 +143,17 @@ CHECKS: Dict[str, Validator] = {
         if isinstance(v, (int, float)) and v <= 0
         else None
     ),
-    # Threshold de 500% calibrado contra benchmark real do operador (Reinaldo:
-    # 21 carros, ~60-75% anual; Polo Track: 21% em 7m). ROI > 500% num negócio
-    # de leilão de carros é matematicamente possível mas operacionalmente irreal
-    # — quando aparece, geralmente significa `dias_giro_estimado` otimista
-    # (default 25d HATCH NOVO sem calibração via Arrematado), score_roi
-    # inflado por margem×fator alto, ou floor não aplicado. Sinaliza como suspeito.
-    "ROI anualizado (%)": lambda v, r: (
-        "ROI anualizado >500% — provável dias_giro otimista ou margem×fator inflado (benchmark operacional ~60-75%/ano)"
-        if isinstance(v, (int, float)) and v > 500
+    # ROI alvo (cru, não anualizado) = score_roi × 100. Por construção do
+    # precificador com cap em margem_aplicada=0.50: max teórico = margem/(1-margem)
+    # = 0.50/0.50 = 100%. Threshold > 100% sinaliza bug de cálculo (cap
+    # quebrado ou capital_alvo absurdamente baixo). ROI alvo negativo: custos >
+    # preco_giro, lote deveria ter sido descartado a montante. Antes do refactor
+    # de 2026-05-08 a coluna era ROI anualizado com threshold 500%.
+    "ROI alvo (%)": lambda v, r: (
+        "ROI alvo >100% — provável bug (margem cap em 50% deveria limitar score_roi a ≤100%)"
+        if isinstance(v, (int, float)) and v > 100
         else (
-            "ROI anualizado negativo — score_roi negativo (custos > preco_giro) deveria ter sido descartado"
+            "ROI alvo negativo — score_roi negativo (custos > preco_giro) deveria ter sido descartado"
             if isinstance(v, (int, float)) and v < 0
             else None
         )
@@ -199,7 +199,7 @@ CHECKS: Dict[str, Validator] = {
 
 # Extrai o valor de cada coluna a partir do dict interno enriquecido.
 #
-# IMPORTANTE: ROI anualizado e Lucro são suprimidos ("—") em lotes
+# IMPORTANTE: ROI alvo e Lucro são suprimidos ("—") em lotes
 # inviáveis pra ESPELHAR o que `SheetsExporter._write_sheet` exibe (linhas
 # 422-429): comprar pelo preço-alvo é cenário fantasioso quando lance_atual
 # já passou do nosso teto. Sem essa paridade, o audit reportava "ROI
@@ -228,8 +228,8 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Lance Máximo (R$)": lambda r: r["preco_max"] if r.get("laudo_analisado") else "—",
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
     "Mediana mercado (R$)": lambda r: r.get("webmotors_mediana") if r.get("webmotors_mediana") else "—",
-    "ROI anualizado (%)": lambda r: (
-        r["roi_anualizado"] if r["viavel"] and r.get("laudo_analisado") else "—"
+    "ROI alvo (%)": lambda r: (
+        r["roi_alvo"] if r["viavel"] and r.get("laudo_analisado") else "—"
     ),
     "Lucro (R$)": lambda r: (
         r.get("lucro", "—") if r["viavel"] and r.get("laudo_analisado") else "—"
@@ -275,14 +275,15 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        # ROI anualizado HONESTO: usa `score_roi_efetivo` que considera entrada
-        # por max(lance_atual, preco_alvo). Bate com o que o SheetsExporter
-        # exibe na planilha — auditoria não deve "ver" um ROI diferente do
-        # operador. Quando lance_atual ≤ preco_alvo, equivale a `score_roi`
-        # original (entrada pelo alvo é factível).
+        # Dois valores derivados:
+        # - `roi_anual` (interno) usa `score_roi_efetivo` + anualização. Continua
+        #   sendo a chave de DESEMPATE pra ranking (espelha SheetsExporter).
+        # - `roi_alvo` (display) é o `score_roi` intrinsic puro do precificador.
+        #   Bate com a coluna 'ROI alvo (%)' que o operador vê na planilha.
         from carros_sa.tools.sheets import _score_roi_efetivo
         score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
         roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
+        roi_alvo = (av.score_roi or 0) * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -342,6 +343,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "score_roi": av.score_roi,
             "dias_giro": av.dias_giro_estimado,
             "roi_anualizado": round(roi_anual, 1),
+            "roi_alvo": round(roi_alvo, 1),
             "fator_risco": round(av.fator_risco, 3),
             "popularidade": popularidade,
             "severidade": laudo.severidade_geral if laudo else "—",
@@ -361,7 +363,8 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         })
 
     # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
-    # primeiro, desempate por ROI anualizado desc (mesma métrica do CLI top).
+    # primeiro, desempate por ROI anualizado desc INTERNO (chave de ranking; a
+    # coluna exibida ao operador é 'ROI alvo (%)' = score_roi cru, sem anualizar).
     rows = [r for r in rows if not r["encerrado"]]
     rows.sort(key=lambda r: (
         0 if r["viavel"] else 1,

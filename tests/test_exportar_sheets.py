@@ -886,14 +886,15 @@ class TestSheetsExporterQuery:
         for col_name in COLUMN_FORMATS:
             assert col_name in HEADER, f"{col_name!r} não está em HEADER"
 
-    def test_exportar_roi_alvo_eh_score_roi_intrinsic(self):
-        """ROI alvo = score_roi × 100 (cru, sem anualizar).
+    def test_exportar_roi_alvo_eh_score_efetivo_quando_lance_abaixo_alvo(self):
+        """Lance abaixo do preco_alvo ⇒ ROI alvo (display) = score_roi × 100.
 
-        Antes (até 2026-05-08) era 'ROI anualizado (%)' = score_roi × 365 / dias_giro
-        com floor 60d. Operador pediu pra ver o ROI cru da operação no preço-alvo —
-        anualizar dependia de calibração de giro frequentemente otimista. Ranking
-        interno continua usando o anualizado (key do sorted), mas a coluna exibe
-        o intrinsic puro.
+        Quando `lance_atual ≤ preco_alvo`, score_efetivo = score_roi por
+        construção, então ROI alvo do display continua sendo a métrica
+        intrinsic. Esse caso cobre 100% dos lotes que o operador pode comprar
+        pelo alvo — sem zona apertada não há divergência entre intrinsic e
+        efetivo. Coluna chamada "ROI alvo (%)" historicamente; pós fix P5b
+        de 2026-05-10 a base é score_efetivo (ver test_coerencia_roi_lucro_zona_apertada).
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -918,8 +919,64 @@ class TestSheetsExporterQuery:
         rows = mock_ws.update.call_args_list[0][0][0]
         idx_roi = HEADER.index("ROI alvo (%)")
         roi_val = rows[2][idx_roi]
-        # 0.3 × 100 = 30.0% (ROI cru intrinsic, não anualizado)
+        # 0.3 × 100 = 30.0% (lance < alvo → score_efetivo = score_roi)
         assert roi_val == pytest.approx(30.0, abs=0.1)
+
+    def test_coerencia_roi_lucro_zona_apertada(self):
+        """Mental math do operador `capital × ROI ≈ Lucro` deve bater na
+        planilha — fix P5b 2026-05-10. Antes, ROI alvo era intrinsic e Lucro
+        era efetivo; em zona apertada (lance_atual > preco_alvo), os números
+        divergiam: capital implícito do Lucro/(ROI/100) não correspondia a
+        nada na linha. Agora ambas as colunas usam `score_efetivo` como base.
+
+        Cenário: lance acima do alvo mas abaixo do preco_max — zona apertada
+        clássica. Verifica que `Lucro × (1 + ROI/100) / (ROI/100) ≈ capital_efetivo`
+        (capital + lucro = preco_giro, dentro de tolerância de arredondamento).
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            # alvo=25000, max=30000, lance=27500 → zona apertada (alvo < lance < max)
+            session.add(_lote("L001", lance_atual=27500))
+            av = _avaliacao(
+                "L001",
+                score_roi=0.5,        # intrinsic 50%
+                preco_giro=40000,
+                preco_max=30000,
+            )
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        idx_roi = HEADER.index("ROI alvo (%)")
+        idx_lucro = HEADER.index("Lucro (R$)")
+        roi_pct = rows[2][idx_roi]
+        lucro = rows[2][idx_lucro]
+        # Em zona apertada o ROI exibido cai abaixo do intrinsic 50%:
+        # capital_alvo = 40000/1.5 ≈ 26667; capital_ef = 26667 + (27500-25000) = 29167;
+        # score_ef = (40000-29167)/29167 ≈ 0.371 → ROI ≈ 37.1%; lucro ≈ 40000-29167 = 10833.
+        assert roi_pct < 50.0, f"ROI alvo deveria refletir zona apertada, obtido {roi_pct}"
+        assert roi_pct == pytest.approx(37.1, abs=0.5)
+        assert lucro == pytest.approx(10833, abs=2)
+        # Coerência core: capital implícito = lucro / (roi/100); preco_giro = capital + lucro.
+        roi_frac = roi_pct / 100.0
+        capital_implícito = lucro / roi_frac
+        preco_giro_implicito = capital_implícito + lucro
+        assert preco_giro_implicito == pytest.approx(40000, rel=0.005), (
+            f"preco_giro reconstruído de Lucro+ROI ({preco_giro_implicito:.0f}) "
+            f"não bate com preco_giro persistido (40000) — colunas incoerentes."
+        )
 
 
 class TestSheetsExporterFimEmObrigatorio:

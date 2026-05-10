@@ -143,17 +143,21 @@ CHECKS: Dict[str, Validator] = {
         if isinstance(v, (int, float)) and v <= 0
         else None
     ),
-    # ROI alvo (cru, não anualizado) = score_roi × 100. Por construção do
-    # precificador com cap em margem_aplicada=0.50: max teórico = margem/(1-margem)
-    # = 0.50/0.50 = 100%. Threshold > 100% sinaliza bug de cálculo (cap
-    # quebrado ou capital_alvo absurdamente baixo). ROI alvo negativo: custos >
-    # preco_giro, lote deveria ter sido descartado a montante. Antes do refactor
-    # de 2026-05-08 a coluna era ROI anualizado com threshold 500%.
+    # ROI alvo (cru, efetivo, não anualizado) = score_efetivo × 100. Por
+    # construção: score_efetivo ≤ score_roi (igual quando lance ≤ alvo,
+    # menor em zona apertada). score_roi capa em margem/(1-margem) = 100%
+    # (margem máxima 50% por `_MARGEM_TETO`). Logo score_efetivo nunca passa
+    # de 100%. Threshold > 100% sinaliza bug de cálculo (cap quebrado ou
+    # capital absurdamente baixo). ROI alvo negativo: capital_efetivo >
+    # preco_giro — display deveria ter suprimido (lote inviável já vira
+    # "—" via `viavel=False` em COLUMN_EXTRACTORS), então só dispara aqui se
+    # algo escapar a paridade. Antes do refactor de 2026-05-10 era score_roi
+    # intrinsic, mensagem mencionava "score_roi"; o teto continua o mesmo.
     "ROI alvo (%)": lambda v, r: (
-        "ROI alvo >100% — provável bug (margem cap em 50% deveria limitar score_roi a ≤100%)"
+        "ROI alvo >100% — provável bug (margem cap em 50% deveria limitar score_efetivo a ≤100%)"
         if isinstance(v, (int, float)) and v > 100
         else (
-            "ROI alvo negativo — score_roi negativo (custos > preco_giro) deveria ter sido descartado"
+            "ROI alvo negativo — capital_efetivo > preco_giro deveria ter sido suprimido pelo display (paridade P5c)"
             if isinstance(v, (int, float)) and v < 0
             else None
         )
@@ -278,12 +282,16 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         # Dois valores derivados:
         # - `roi_anual` (interno) usa `score_roi_efetivo` + anualização. Continua
         #   sendo a chave de DESEMPATE pra ranking (espelha SheetsExporter).
-        # - `roi_alvo` (display) é o `score_roi` intrinsic puro do precificador.
-        #   Bate com a coluna 'ROI alvo (%)' que o operador vê na planilha.
+        # - `roi_alvo` (display) usa `score_efetivo` × 100 — paridade audit ↔
+        #   display (fix P5b 2026-05-10). Antes era `score_roi` intrinsic; o
+        #   sheets.py mostrava efetivo no Lucro mas intrinsic no ROI alvo —
+        #   audit replicava o intrinsic, então em zona apertada um lote que
+        #   passava no audit pelo intrinsic poderia exibir Lucro irrealmente
+        #   pequeno na planilha sem audit chamar atenção. Alinhar agora.
         from carros_sa.tools.sheets import _score_roi_efetivo
         score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
         roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
-        roi_alvo = (av.score_roi or 0) * 100
+        roi_alvo = score_efetivo * 100
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -462,9 +470,11 @@ def _check_preco_alvo_gt_preco_max(row: Dict[str, Any]) -> List[CheckResult]:
 
 def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
     """`lance_atual > preco_alvo` mas ainda `< preco_max` — entrada acima da
-    margem calibrada. ROI/Lucro exibidos usam `_score_roi_efetivo` (já
-    descontado), mas o aviso lembra o operador de que a folga é só pra margem
-    mínima absoluta — não pra a margem-alvo.
+    margem calibrada. ROI alvo e Lucro exibidos JÁ usam `_score_roi_efetivo`
+    (paridade pós-fix P5b 2026-05-10), mas o aviso lembra o operador de que
+    a folga é só pra margem mínima absoluta — não pra a margem-alvo
+    calibrada por risco/liquidez. Sinaliza pra ele revisar se a redução de
+    margem aplicada é aceitável vs. o conforto do alvo.
 
     Usa `<` estrito no `preco_max` pra alinhar com o teste de viabilidade
     (`viavel = preco_max > lance_atual` no `_build_rows`). Quando lance toca
@@ -490,7 +500,7 @@ def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
         return [(
             "Lance Máximo (R$)",
             f"Zona apertada: lance_atual R$ {lance_atual} > preco_alvo R$ {preco_alvo} "
-            f"(Lance Máximo R$ {preco_max}) — ROI realista < ROI alvo",
+            f"(Lance Máximo R$ {preco_max}) — margem aplicada < margem-alvo (ROI exibido já reflete redução)",
             preco_max,
         )]
     return []

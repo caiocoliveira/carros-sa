@@ -182,6 +182,35 @@ simultaneamente. Padrão genérico: **se um check tem 3+ ramos, separar em
 funções independentes — encadeamento vira ponto cego garantido em casos
 patológicos**.
 
+### P5f. Colunas derivadas dimensionalmente acopladas precisam do mesmo basis
+
+Sintoma: duas colunas exibidas refletem dimensões da MESMA decisão econômica
+(ex.: `Lucro = capital × ROI`), mas são calculadas com bases diferentes —
+operador faz a aritmética mentalmente, não bate, e suspeita do sistema. Caso
+simétrico ao P5b (mesma métrica em dois lugares diverge), mas aqui são
+DUAS métricas que **deveriam** se compor.
+
+Caso de referência (2026-05-10, revisão preventiva):
+- **`ROI alvo (%)` × `Lucro (R$)` em zona apertada** — `Lucro (R$)` usava
+  `score_efetivo` (realista, reduzido em zona apertada onde `lance_atual >
+  preco_alvo`) enquanto `ROI alvo (%)` usava `score_roi` intrinsic. Em
+  Cenário 6 (Gol em zona apertada): ROI exibido 64.3%, Lucro R$ 7,167.
+  Capital implícito = 7167 / 0.643 = R$ 11,148 — sem correspondência em
+  nenhuma coluna da linha (preco_alvo R$ 19,721, lance R$ 27,500). Mental
+  math do operador `capital × ROI = Lucro` falhava. Detectado por simulação
+  canônica + leitura cruzada das colunas, não por reclamação.
+
+**Antídoto operacional:** quando duas colunas derivadas formam relação
+algébrica explícita (`Lucro = capital × ROI`), adicionar teste de coerência
+do tipo `assert lucro / (roi/100) + lucro ≈ preco_giro` — mental math do
+operador passa. Esse teste flagra mudança de basis em qualquer das colunas.
+
+**Antídoto estrutural:** documentar a INTENÇÃO de basis (intrinsic vs.
+efetivo) tanto no validator do audit quanto no glossário. Se uma coluna
+muda de basis, automaticamente revisar TODAS as colunas dimensionalmente
+acopladas a ela. Lista canônica em sheets.py: `Lucro` ↔ `ROI alvo` ↔
+`Lance Máximo` ↔ `FIPE` (todos R$ ou % e correlatos).
+
 ### P6. Audit por coluna isolada não pega contradição cross-field
 
 Sintoma: cada célula passa no validador individual, mas a combinação é
@@ -280,6 +309,38 @@ fix commit acrescenta 2-3 linhas aqui no padrão correspondente, referenciando
 o hash. E em casos de quirk específico de fornecedor, entrada em
 `~/.claude/projects/.../memory/` com tag `quirk_fornecedor`.
 
+### RC8. Tests de comportamento de flag são âncoras de intenção semântica
+
+Sintoma: ao "alinhar" duas peças do código (ex.: ranking de CLI vs. display
+de planilha), eu mudo a base de ranking de um flag (ex.: `--absoluto`)
+sem perguntar se aquele flag tinha intenção semântica DIFERENTE. Teste
+falha. Em vez de tratar a falha como sinal, tendência é "atualizar o teste
+pra refletir o novo comportamento" — que destrói a intenção codificada.
+
+Caso de referência (2026-05-10):
+- **`--absoluto` no `carros-sa top`** — calibrado pra ranquear por
+  `score_roi` intrinsic ("sniff-test de potencial econômico no alvo
+  teórico"). Quando mudei display de intrinsic pra efetivo (fix P5f), tentei
+  alinhar `--absoluto` também → `test_top_ranqueia_por_roi_anualizado_default`
+  quebrou (fixture inviável em zona apertada flipa ranking entre intrinsic
+  e efetivo). Tive a tentação de "atualizar o teste". Errado: o teste
+  estava me dizendo que `--absoluto` tem semântica DIFERENTE do default.
+  Reverter mantém ambos sensatos: default = realista (efetivo), `--absoluto`
+  = potencial alvo (intrinsic).
+
+**Antídoto operacional:** quando um teste falha por mudança comportamental,
+ler a docstring/nome do teste antes de "atualizar pra passar". Se o teste
+ancora intenção semântica explícita ("--flag X faz Y"), ele está
+documentando uma decisão de produto — perguntar se você está REVERTENDO
+a decisão de propósito ou só por descuido. "Atualizar o teste" é o erro
+default; ler o teste primeiro é a defesa.
+
+**Antídoto estrutural:** flags com semântica não-óbvia (que diferem do
+comportamento default em casos sutis) precisam de teste-âncora dedicado +
+docstring que vincule "este flag responde a pergunta X, default responde
+a pergunta Y". Tests-âncora são MAIS valiosos que tests de "happy path"
+porque restringem o que você pode mudar sem pensar.
+
 ### RC7. Pressa em fechar o workstream
 
 ROADMAP trata `✅` como métrica de sucesso visível. Isso cria incentivo
@@ -367,3 +428,5 @@ Adicionar ao critério atual em `CLAUDE.md`:
 | (revisão preventiva 2026-05-09) | P5/RC2 | `_check_mediana_distante_fipe` em audit — flag informativo quando webmotors_mediana > FIPE × 1.20 (similares poluídos do AA: Tiggo 7 entre Tiggo 2) ou < FIPE × 0.70 (sample fraca). Refactor FIPE-only de 2026-05-08 tornou a coluna "Mediana mercado" puramente informativa, mas operador olhando "mediana 130% FIPE" pode achar que é "carro premium em alta" — falso. Audit fecha o vetor sem afetar cálculo. |
 | (revisão preventiva 2026-05-09) | RC4 | `_PRECO_GIRO_FIPE_RATIO_MAX` 1.10 → 1.13. Threshold antigo tinha gap de só 0.75pp do max natural (1.0925 = `_FATOR_MAX × 0.95`); qualquer aumento futuro de `_FATOR_MAX` em ajuste_km.py disparava falso positivo automático. Padrão: threshold de "guard de regressão" calibrado pelo max teórico de constante em outro arquivo precisa de **margem ≥ 2-3pp** + comentário cruzado referenciando a constante. Quem altera a constante futuramente vê a referência — caso contrário o gap silenciosamente fecha. |
 | (revisão preventiva 2026-05-09) | RC3 | Validators de `CHECKS` com `v <= 0` precisam de guarda `isinstance(v, (int, float))` quando o coluna pode receber `"—"` da supressão do display. Sem guarda, `"—" <= 0` levanta TypeError em runtime — só dispara quando o caminho da supressão é exercitado em produção (laudo NÃO CAPTURADO num lote real). Audit silenciosamente quebrava na linha em vez de pular o validator. |
+| (revisão preventiva 2026-05-10) | P5f | **Coerência aritmética entre colunas dimensionalmente acopladas** — `Lucro (R$)` usava `score_efetivo` mas `ROI alvo (%)` usava `score_roi` intrinsic. Em zona apertada (Cenário 6 simulação: Gol 64% / R$ 7k), capital implícito do operator math `lucro/(roi/100)` não correspondia a nada na linha. Fix: `roi_alvo = score_efetivo × 100` em sheets.py + cli.py + audit.py (paridade) + glossário + teste guard `test_coerencia_roi_lucro_zona_apertada`. Padrão genérico: quando duas colunas formam relação algébrica explícita, adicionar teste `lucro/(roi/100) + lucro ≈ preco_giro` impede regressão. |
+| (revisão preventiva 2026-05-10) | RC8 | **`--absoluto` no CLI top mantido em score_roi intrinsic** mesmo após display passar a usar score_efetivo. Tentativa de "alinhar" o flag quebrou test-âncora (`test_top_ranqueia_por_roi_anualizado_default`) que codifica intenção semântica diferente: `--absoluto` responde "qual o potencial econômico no alvo teórico?" enquanto default responde "qual o ROI realista dado lance atual?". Lição: tests de comportamento de flag são **âncoras de intenção semântica** — quando falham por mudança comportamental, ler docstring antes de "atualizar pra passar". |

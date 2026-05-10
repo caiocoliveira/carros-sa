@@ -4,11 +4,22 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito** — 476/476 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro** — 477/477 testes passando
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML.
 
 Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
+
+### GG — Coerência aritmética entre `ROI alvo (%)` e `Lucro (R$)` em zona apertada (2026-05-10) ✅
+- **Branch:** `claude/sleepy-wright-tFNNb`
+- **Motivação:** Revisão preventiva pediu "verifique se a lógica está fazendo sentido considerando a relação entre os valores das colunas". Simulação canônica em `/tmp/sim.py` com 11 cenários expôs incoerência aritmética: em zona apertada (lance_atual entre preco_alvo e preco_max), `Lucro (R$)` usava `score_efetivo` (realista, reduzido) enquanto `ROI alvo (%)` usava `score_roi` intrinsic (alvo teórico). Cenário 6 (Gol em zona apertada): ROI exibido 64.3% e Lucro R$ 7,167 — capital implícito do mental math `lucro/(roi/100)` = R$ 11,148, sem correspondência em nenhum campo da linha. Operador suspeitava do sistema sem conseguir nomear o porquê.
+- **Solução em 3 pontos:**
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — `roi_alvo = score_efetivo * 100` (era `score_roi or 0`). Coluna agora reflete o ROI EFETIVO (mesma base do Lucro). Quando `lance_atual ≤ preco_alvo`, score_efetivo == score_roi → display inalterado pra 100% dos lotes que o operador pode comprar pelo alvo. Apenas zona apertada e inviáveis ficam diferentes — e inviáveis já são suprimidos pra "—".
+  - [`carros_sa/cli.py`](carros_sa/cli.py) — `top` exibe `score_efetivo × 100` na coluna ROI alvo (paridade com planilha). Ranking `--absoluto` MANTIDO em `score_roi` intrinsic (test-âncora `test_top_ranqueia_por_roi_anualizado_default` documenta: flag responde "potencial econômico no alvo teórico", default responde "ROI realista"; semânticas diferentes não devem ser "alinhadas").
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — `roi_alvo = score_efetivo * 100` (paridade audit ↔ display, P5e). Mensagem do `_check_zona_apertada` reescrita: era "ROI realista < ROI alvo" (sugeria que display era otimista), virou "margem aplicada < margem-alvo (ROI exibido já reflete redução)" (alinhado com nova realidade).
+- **Teste guard:** `tests/test_exportar_sheets.py::test_coerencia_roi_lucro_zona_apertada` — fixture com lance > alvo < max, valida que `Lucro / (ROI/100) + Lucro ≈ preco_giro` (mental math do operador passa). Impede regressão.
+- **Glossário atualizado:** entrada de `ROI alvo (%)` agora descreve `score_efetivo × 100` + por que columns são coerentes; entrada de `Lucro (R$)` reforça "coerente com ROI alvo (%): `Lucro = capital_efetivo × ROI/100` bate por construção".
+- **Limitações conhecidas:** quando workstream G ligar Webmotors live e f_km começar a saturar em lotes baixa-km, preco_giro pode passar 100% FIPE (já documentado em CLAUDE.md — design FIPE-only com ajuste por km). Não afeta a coerência ROI×Lucro.
 
 ### FF — Suporte ao grupo carbel + LLM fallback self-healing pra leiloeiros novos (2026-05-09) ✅
 - **Branch:** `claude/fix-build-scheduling-sAzQq`

@@ -81,13 +81,19 @@ def top(
 ) -> None:
     """Lista as top N avaliações da empresa já persistidas no SQLite.
 
-    Coluna principal de retorno: 'ROI alvo (%)' = `score_roi × 100` (cru, sem
-    anualizar). Bate com a coluna 'ROI alvo (%)' da planilha — paridade explícita.
+    Coluna principal de retorno: 'ROI alvo (%)' = `score_efetivo × 100` (cru,
+    sem anualizar, base efetiva que reflete o lance atual real). Coerente com
+    a coluna 'ROI alvo (%)' da planilha — paridade explícita. score_efetivo =
+    score_roi original quando lance_atual ≤ preco_alvo; reduzido em zona
+    apertada (capital efetivo cresce). Por construção `capital × ROI ≈ Lucro`
+    bate (operator mental math passa).
 
-    Ordenação default: ROI ANUALIZADO interno (`score_roi × 365 / dias_giro`).
+    Ordenação default: ROI ANUALIZADO interno (`score_efetivo × 365 / dias_giro`).
     Premia carros de giro rápido — duas linhas com ROI alvo igual podem aparecer
     em ordens diferentes porque o desempate usa o tempo de giro. `--absoluto`
-    força ranking pelo `score_roi` cru (lote lento empata com lote rápido).
+    força ranking pelo `score_roi` INTRINSIC (alvo teórico) — útil pra sniff-test
+    de oportunidade independente do lance atual; difere de score_efetivo apenas
+    em zona apertada e lotes inviáveis.
 
     Filtro default: oculta lotes inviáveis (lance atual já passou do nosso teto).
     Use `--incluir-inviaveis` pra ver tudo (útil pra calibrar fórmula).
@@ -145,6 +151,13 @@ def top(
         for av, lote in todas
     ]
     if por_absoluto:
+        # `--absoluto` = ranking pelo ROI INTRINSIC (score_roi cru, sem
+        # anualização). Mantido propositalmente intrinsic mesmo após o fix
+        # de display efetivo de 2026-05-10 — esse flag responde a "quais
+        # lotes têm POTENCIAL econômico se eu conseguir entrar pelo alvo
+        # calibrado", útil pra sniff-test de oportunidade. Default (sem
+        # `--absoluto`) usa anualizado sobre score_efetivo, que é a métrica
+        # realista do que o operador vai ganhar dado o lance atual real.
         enriquecidas.sort(key=lambda x: x[0].score_roi, reverse=True)
     else:
         enriquecidas.sort(key=lambda x: x[2], reverse=True)
@@ -177,13 +190,17 @@ def top(
         # pra refletir o capital empatado real (no alvo se leilão ainda permite,
         # acima do alvo se já passou). Bate com a coluna "Lucro (R$)" da planilha.
         lucro_esperado = _lucro_absoluto_efetivo(av, lote.lance_atual)
+        # ROI exibido = score_efetivo (mesmo basis do Lucro) — fix P5b 2026-05-10.
+        # Antes era `score_roi` intrinsic, divergindo do Lucro exibido em zona
+        # apertada (operator math `capital × ROI ≈ Lucro` não batia).
+        score_ef = _score_roi_efetivo(av, lote.lance_atual)
         tbl.add_row(
             lote.id,
             f"{lote.marca} {lote.modelo[:30]}",
             str(lote.ano),
             f"R$ {lote.lance_atual:,}",
             f"R$ {av.preco_alvo:,}",
-            f"{av.score_roi * 100:.1f}%",
+            f"{score_ef * 100:.1f}%",
             str(av.dias_giro_estimado) if av.dias_giro_estimado else "—",
             f"R$ {lucro_esperado:,}",
             bucket.value,

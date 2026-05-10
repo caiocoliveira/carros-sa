@@ -110,14 +110,15 @@ def _score_roi_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> float:
     """ROI honesto considerando entrada pelo `max(lance_atual, preco_alvo)`.
 
     Quando `lance_atual > preco_alvo`, o operador real entra acima do alvo:
-    capital empatado cresce, retorno cai. Hoje (pós refactor "ROI alvo cru" de
-    2026-05-08) só a coluna `Lucro (R$)` consome este helper — `Lucro` reflete
-    cenário real de entrada (alvo se ainda factível, lance atual em zona apertada).
-    A coluna `ROI alvo (%)` exibe o `score_roi` intrinsic puro (não usa este
-    helper). O ranking interno usa este score efetivo via `roi_anualizado` pra
-    ordenar lotes — `score_roi` persistido
-    em `AvaliacaoLote` continua sendo o intrinsic (caso médio no alvo) — só o
-    display da planilha vira "ROI realista".
+    capital empatado cresce, retorno cai. **AMBAS** as colunas `ROI alvo (%)`
+    e `Lucro (R$)` da planilha consomem este helper — display coerente: o
+    operador faz a conta `capital × ROI ≈ Lucro` e bate (correção P5b de
+    2026-05-10). Antes (até 2026-05-09), `Lucro` era efetivo e `ROI alvo`
+    era intrinsic — em zona apertada o ROI ficava 64% mas o Lucro mostrava
+    R$ 7k, capital implícito ~R$ 11k, conflitante com qualquer linha real.
+    O ranking interno (sheets `_query` + cli `top`) também usa este score
+    efetivo via `roi_anualizado`. `score_roi` persistido em `AvaliacaoLote`
+    continua sendo o intrinsic (caso médio no alvo) pra rastreabilidade.
 
     Aproximação: ignora a parcela `taxa_leilao_pct × delta_lance` no capital
     incremental (≈zero em Auto Avaliar com taxa fixa; até 8% num leilão judicial,
@@ -301,7 +302,15 @@ class SheetsExporter:
             # `sorted` (linha ~217) mas a coluna exibida é o ROI alvo intrinsic.
             score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
             roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
-            roi_alvo = (av.score_roi or 0) * 100
+            # ROI alvo agora EFETIVO (mesma base do Lucro abaixo) — fix P5b 2026-05-10.
+            # Antes era `(av.score_roi or 0) * 100` (intrinsic) enquanto Lucro usava
+            # score_efetivo. Em zona apertada operador via ROI 64% e Lucro R$7k mas
+            # `capital × ROI ≈ Lucro` não batia (capital implícito ~R$11k, sem
+            # correspondência na linha). Ambos efetivos = mental math do operador
+            # bate. Quando `lance_atual ≤ preco_alvo`, score_efetivo == score_roi
+            # (sem mudança visível); só zona apertada e inviáveis ficam diferentes
+            # — e inviáveis já viram "—" no display abaixo.
+            roi_alvo = score_efetivo * 100
             lucro = _lucro_absoluto_efetivo(av, lote.lance_atual)
 
             # Encerrado = badge "ARREMATADO" visto no detalhe OU timer já passou.
@@ -748,13 +757,13 @@ class SheetsExporter:
                 "Lucro (R$)",
                 "Derivado",
                 "lucro_absoluto = preco_giro × score_efetivo ÷ (1 + score_efetivo). score_efetivo = score_roi original quando lance_atual ≤ preco_alvo; reduzido proporcionalmente quando lance_atual > preco_alvo (capital efetivo cresce). Em lotes '✗ Caro demais' a célula vai pra '—': comprar pelo preço-alvo é cenário fantasioso quando o lance atual já passou do nosso teto.",
-                "Lucro TOTAL absoluto em R$ projetado pra revenda do lote (preço de venda - capital total investido). Antes era exibido como 'Lucro/mês' normalizando por `dias_giro_estimado`, mas a normalização confundia o operador (depende de calibração de giro frequentemente otimista). Agora mostra o número que efetivamente entra no caixa. Pra ritmo de operação combine com a coluna 'ROI alvo (%)' lado a lado.",
+                "Lucro TOTAL absoluto em R$ projetado pra revenda do lote (preço de venda - capital total investido). Antes era exibido como 'Lucro/mês' normalizando por `dias_giro_estimado`, mas a normalização confundia o operador (depende de calibração de giro frequentemente otimista). Agora mostra o número que efetivamente entra no caixa. Coerente com 'ROI alvo (%)': `Lucro = capital_efetivo × ROI/100` bate por construção (operator mental math passa).",
             ],
             [
                 "ROI alvo (%)",
                 "Derivado",
-                "ROI cru no preço-ALVO = `score_roi × 100`, sem anualização. score_roi = (preco_giro - capital_alvo) / capital_alvo onde `capital_alvo = preco_alvo + reforma + frete + taxas + custo_op`. Calibrado por risco/liquidez via `margem_aplicada` (capada em 50% pra evitar que fatores no teto inflem artificialmente). Em lotes '✗ Caro demais' a célula vai pra '—' (cenário fantasioso: comprar pelo alvo quando o lance atual já passou do teto).",
-                "Mostra o retorno % esperado da OPERAÇÃO (compra → revenda → caixa) sem extrapolar pra horizonte anual. Antes a coluna era 'ROI anualizado (%)' = `score_roi × 365 / dias_giro` com floor 60d — útil pra normalização temporal mas dependia de calibração de giro frequentemente otimista (HATCH NOVO=25d sem floor → ROI inflado). Decisão de UX: ROI cru é mais legível pra leitura humana ('30% sobre o capital empatado'), e o ranking interno continua usando o anualizado pra desempate temporal (lote rápido > lote lento com mesmo ROI cru). Threshold do audit: > 100% sinalizado como provável bug (margem cap em 50% deveria limitar a ~100%).",
+                "ROI realista = `score_efetivo × 100`, sem anualização. score_efetivo = score_roi original quando lance_atual ≤ preco_alvo (entrada pelo alvo factível); reduzido proporcionalmente quando lance_atual > preco_alvo (zona apertada — capital efetivo cresce). Em lotes '✗ Caro demais' a célula vai pra '—'. Calibrado por risco/liquidez via `margem_aplicada` (capada em 50% pra evitar que fatores no teto inflem artificialmente).",
+                "Mostra o retorno % ESPERADO da OPERAÇÃO (compra → revenda → caixa) sem extrapolar pra horizonte anual, considerando o lance atual real. Em zona apertada (lance_atual entre preco_alvo e preco_max), o ROI exibido cai automaticamente pra refletir o capital extra empatado — antes (até 2026-05-09) a coluna mostrava o ROI alvo intrinsic enquanto Lucro mostrava o efetivo, então `capital × ROI ≈ Lucro` não batia (mental math do operador falhava). Agora ambas usam a mesma base. Audit avisa 'zona apertada' quando lance > alvo. Threshold do audit: > 100% sinaliza provável bug (margem cap em 50% limita score_roi a ~100%, e score_efetivo nunca passa do intrinsic).",
             ],
             [
                 "Reforma (R$)",

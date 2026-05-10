@@ -281,18 +281,27 @@ class TestPipelineLote:
 
     def test_lote_ja_avaliado_com_laudo_ok_nao_reavalia(self, tmp_path, monkeypatch):
         """Short-circuit: avaliação existente + laudo com conf≥0.6 + PDF on-disk
-        → retorna sem rodar pipeline.
+        + URL válida em raw_json → retorna sem rodar pipeline.
 
         Requer PDF on-disk desde 2026-05-09 — antes bastavam (avaliação + cache),
         mas em CI a pasta `data/laudos_pdfs/` ressuscita vazia entre runs e a
         auditoria estrita falhava por `pdf_ausente`. Agora `pdf_ok` é parte do
         critério de short-circuit pra alinhar com a invariante da auditoria.
+
+        2026-05-10: também exige `raw_json.detalhe.laudo_pdf_url` válida — o
+        bug DD3 zerava essa URL em todo re-scrape da listagem e o pipeline
+        ficava preso pulando reprocessamento.
         """
         engine, session, lote = self._setup()
         empresa = _empresa()
 
         self._inserir_avaliacao_existente(session)
         self._inserir_laudo(session, "L001", confidence=0.9)
+        # Persiste detalhe.laudo_pdf_url válido (host na allowlist do
+        # `is_laudo_pdf_url`) — ó cobrir as 4 condições do short-circuit.
+        atual = session.get(Lote, "L001")
+        atual.raw_json = {"detalhe": {"laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/laudo.pdf"}}
+        session.add(atual)
         session.commit()
 
         # PDF on-disk mockado em tmp_path — `_pdf_persistente_path` é resolvido
@@ -353,6 +362,53 @@ class TestPipelineLote:
                 )
                 # coletar_detalhe DEVE ter sido chamado — o pipeline precisa
                 # voltar pra re-baixar o PDF que sumiu.
+                mock_det.assert_called_once()
+        finally:
+            loop.close()
+
+    def test_lote_ja_avaliado_com_pdf_e_cache_mas_url_ausente_reavalia(self, tmp_path, monkeypatch):
+        """Short-circuit NÃO dispara quando `raw_json.detalhe.laudo_pdf_url`
+        está ausente/inválido — mesmo com avaliação + laudo cache + PDF on-disk.
+
+        Cenário do bug DD3 (2026-05-10): 95 lotes ativos no DB tinham PDF
+        baixado e cache forte, mas `_upsert_lote` zerava `detalhe` em todo
+        re-scrape da listagem. Sem este check, o pipeline pulava `coletar_detalhe`
+        e a URL nunca voltava — coluna "Ver laudo" da planilha sumia. Defesa
+        em profundidade: pipeline re-roda pra repopular a URL via
+        `_persistir_flags_no_lote`.
+        """
+        engine, session, lote = self._setup()
+        empresa = _empresa()
+
+        self._inserir_avaliacao_existente(session)
+        self._inserir_laudo(session, "L001", confidence=0.9)
+
+        # Simula o estado pós-bug: PDF on-disk + cache forte, mas raw_json
+        # SEM detalhe (zerado por re-scrape da listagem antes do fix DD3).
+        atual = session.get(Lote, "L001")
+        atual.raw_json = {"loja": "carbel", "detalhe": None}
+        session.add(atual)
+        session.commit()
+
+        monkeypatch.setattr("carros_sa.orquestrador._PDF_STORAGE_DIR", tmp_path)
+        (tmp_path / "L001.pdf").write_bytes(b"%PDF-1.4\n" + b"x" * 200_000)
+
+        mock_page = AsyncMock()
+        vision_client = MagicMock()
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            with patch(
+                "carros_sa.orquestrador.coletar_detalhe",
+                new_callable=AsyncMock,
+                return_value=("", None),
+            ) as mock_det:
+                loop.run_until_complete(
+                    _pipeline_lote(lote, mock_page, vision_client, empresa, session, __import__("pathlib").Path("/tmp"))
+                )
+                # coletar_detalhe DEVE ter sido chamado — pipeline precisa
+                # voltar pra repopular a URL.
                 mock_det.assert_called_once()
         finally:
             loop.close()
@@ -491,6 +547,56 @@ class TestPersistencia:
             persistido = session.get(Lote, "L999")
             assert persistido is not None
             assert persistido.marca == "Ford"
+
+    def test_upsert_lote_preserva_detalhe_em_re_scrape(self):
+        """Re-scrape de listagem NÃO pode zerar `raw_json.detalhe` da coleta anterior.
+
+        Bug raiz que escondia 95/187 lotes ativos com URL inválida em 2026-05-10:
+        `_upsert_lote` reconstruía `raw_json` a partir do LoteRaw da listagem
+        (sem `detalhe`) e sobrescrevia o existente — só `loja` era preservada.
+        Combinado com o short-circuit do `_pipeline_lote` (que pulava
+        `coletar_detalhe` quando avaliação + cache + PDF existiam), a URL do
+        laudo persistida em `raw_json.detalhe.laudo_pdf_url` ficava None pra
+        sempre e a planilha perdia o link "Ver laudo".
+        """
+        from carros_sa.models import LoteRaw
+        engine = _engine()
+        with Session(engine) as session:
+            # 1ª passagem: ingest da listagem
+            lote_raw = LoteRaw(
+                lote_id="L_PRES",
+                leilao="autoavaliar",
+                url="https://b2b.autoavaliar.com.br/avaliacoes/g/L_PRES/honda-fit",
+                marca="Honda",
+                modelo="Fit",
+                ano=2018,
+                km=50000,
+                lance_atual=30000,
+                origem_cidade="Uberlândia",
+                origem_uf="MG",
+            )
+            _upsert_lote(lote_raw, session)
+            session.commit()
+
+            # 2ª etapa: pipeline coleta detalhe + persiste a URL no raw_json
+            persistido = session.get(Lote, "L_PRES")
+            raw = dict(persistido.raw_json or {})
+            raw["detalhe"] = {"laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/laudo-honda.pdf"}
+            raw["body_text_sample"] = "TEXTO DO DETALHE..."
+            persistido.raw_json = raw
+            session.add(persistido)
+            session.commit()
+
+            # 3ª passagem: re-scrape da listagem (cron diário). Antes do fix,
+            # esse upsert ZERAVA o detalhe.
+            _upsert_lote(lote_raw, session)
+            session.commit()
+
+            atual = session.get(Lote, "L_PRES")
+            assert atual.raw_json.get("detalhe") == {
+                "laudo_pdf_url": "https://storage.googleapis.com/doc-b2b/laudo-honda.pdf"
+            }, "Re-scrape de listagem zerou detalhe.laudo_pdf_url — bug DD3"
+            assert atual.raw_json.get("body_text_sample") == "TEXTO DO DETALHE..."
 
     def test_upsert_avaliacao_nova(self):
         engine = _engine()

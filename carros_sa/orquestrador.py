@@ -331,6 +331,16 @@ def _upsert_lote(
 
     `loja` é mergeado em `raw_json["loja"]` quando informado — não faz parte do
     contrato LoteRaw, fica como campo adicional pra sobreviver em reprocessos.
+
+    Preserva também `detalhe` e `body_text_sample` da coleta anterior — esses
+    campos são populados por `_persistir_flags_no_lote` (após `coletar_detalhe`)
+    e o LoteRaw da listagem não os carrega. Sem esta preservação, todo
+    re-scrape da listagem ZERAVA `detalhe.laudo_pdf_url` (e o resto do detalhe)
+    e, junto com o short-circuit `ja_avaliado AND laudo_ok AND pdf_ok` em
+    `_pipeline_lote`, o pipeline NÃO re-coletava detalhe — então a URL ficava
+    None até o lote encerrar. Sintoma: 95/187 lotes ativos com
+    `url_invalida_ou_ausente` em `auditar_laudos` (cache + PDF presentes,
+    URL=None) — coluna "Ver laudo" da planilha sumia silenciosamente.
     """
     existente = session.get(Lote, lote_raw.lote_id)
     raw_json = lote_raw.model_dump(mode="json")
@@ -339,6 +349,11 @@ def _upsert_lote(
     elif existente and isinstance(existente.raw_json, dict) and existente.raw_json.get("loja"):
         # Preserva loja de coleta anterior quando a atual não trouxe o dado.
         raw_json["loja"] = existente.raw_json["loja"]
+    if existente and isinstance(existente.raw_json, dict):
+        for k in ("detalhe", "body_text_sample"):
+            v = existente.raw_json.get(k)
+            if v is not None:
+                raw_json[k] = v
     row = Lote(
         id=lote_raw.lote_id,
         leilao=lote_raw.leilao,
@@ -482,6 +497,14 @@ async def _pipeline_lote(
     # cache>=0.6 no DB mas o arquivo não está em data/laudos_pdfs/. O retry
     # script abaixo passa a incluir esse caso na fila; aqui o pipeline deixa
     # de pulá-lo, fechando o laço da auditoria.
+    #
+    # Adição 2026-05-10: também exige `detalhe.laudo_pdf_url` válido em
+    # raw_json. O bug raiz (`_upsert_lote` zerando `detalhe` em todo re-scrape
+    # da listagem) foi corrigido, mas o short-circuit precisa cobrir TODAS as
+    # 3 condições da auditoria — caso contrário lotes com URL faltante (por
+    # qualquer motivo: bug futuro, decoy limpado, raw_json corrompido) ficam
+    # presos sem reprocessar. Defesa em profundidade: pipeline re-roda pra
+    # re-popular a URL.
     ja_avaliado = session.exec(
         select(AvaliacaoLote)
         .where(AvaliacaoLote.empresa_id == empresa.empresa_id)
@@ -491,7 +514,11 @@ async def _pipeline_lote(
     laudo_ok = laudo_atual is not None and (laudo_atual.confidence or 0) >= 0.6
     pdf_path = _pdf_persistente_path(lote.id)
     pdf_ok = pdf_path.exists() and pdf_path.stat().st_size > 5_000
-    if ja_avaliado and laudo_ok and pdf_ok:
+    detalhe_atual = (lote.raw_json or {}).get("detalhe") if isinstance(lote.raw_json, dict) else None
+    url_atual = detalhe_atual.get("laudo_pdf_url") if isinstance(detalhe_atual, dict) else None
+    from carros_sa.scraping.parsers import is_laudo_pdf_url
+    url_ok = is_laudo_pdf_url(url_atual)
+    if ja_avaliado and laudo_ok and pdf_ok and url_ok:
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=ja_avaliado.preco_alvo,
                              roi_pct=round(ja_avaliado.score_roi * 100, 1))

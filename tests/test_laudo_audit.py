@@ -579,3 +579,28 @@ class TestFiltroRetryPdfAusente:
         lote = _lote("L_SEM_CACHE")
         out = _filtrar([lote], {}, pdf_dir=tmp_path)
         assert len(out) == 1
+
+    def test_cache_forte_e_pdf_presente_mas_url_ausente_e_pendente(self, tmp_path):
+        """Cenário do bug DD3 (2026-05-10): listagem re-scrape zerou
+        `detalhe.laudo_pdf_url` e a planilha perdeu o link "Ver laudo". Mesmo
+        com cache forte + PDF on-disk, o retry tem que pegar pra repopular a
+        URL via `coletar_detalhe`. Antes desta dimensão no filtro, esses 95
+        lotes ativos ficavam fora da fila."""
+        _filtrar = self._importar()
+        _criar_pdf_fake(tmp_path, "L_URL_NONE")
+        lote = _lote("L_URL_NONE", laudo_pdf_url=None)
+        out = _filtrar([lote], {"L_URL_NONE": 0.95}, pdf_dir=tmp_path)
+        assert len(out) == 1
+        assert out[0].id == "L_URL_NONE"
+
+    def test_cache_forte_e_pdf_presente_com_url_decoy_e_pendente(self, tmp_path):
+        """URL fora da allowlist (decoy/host desconhecido) também precisa
+        re-rodar — `is_laudo_pdf_url` é a fonte de verdade do filtro."""
+        _filtrar = self._importar()
+        _criar_pdf_fake(tmp_path, "L_URL_DECOY")
+        lote = _lote(
+            "L_URL_DECOY",
+            laudo_pdf_url="https://example.com/relatorio-de-transparencia.pdf",
+        )
+        out = _filtrar([lote], {"L_URL_DECOY": 0.95}, pdf_dir=tmp_path)
+        assert len(out) == 1

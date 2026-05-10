@@ -159,6 +159,47 @@ algumas dimensões e gera falsos alarmes silenciosos no resto.
 5. validators de `CHECKS` que comparam `v <= 0` precisam guarda `isinstance(v, (int, float))` pra tolerar `"—"` sem `TypeError`
 6. teste guard do tipo `test_FOO_em_X_falsa_nao_dispara` pra cada cross-check.
 
+### P5f. Upsert que reconstrói "container" parcial perde subkeys de outras camadas
+
+Sintoma: operação de upsert (UPDATE/INSERT idempotente) recebe um payload
+parcial e reconstrói o campo "container" (`raw_json` dict, JSONB, etc.) a
+partir desse payload. Subkeys escritas por OUTROS passos do pipeline somem
+silenciosamente. O bug é latente: só aparece quando outro mecanismo (cache,
+short-circuit) começa a depender dessas subkeys.
+
+Caso de referência (2026-05-10, `_upsert_lote`):
+- `_upsert_lote(lote_raw, ...)` reconstruía `raw_json` a partir do
+  `LoteRaw.model_dump()` (listagem — sem `detalhe`). Apenas `loja` era
+  preservada da `raw_json` existente. `detalhe.laudo_pdf_url` e
+  `body_text_sample` (escritos por `_persistir_flags_no_lote` após o
+  scraper de detalhe) eram ZERADOS em todo cron diário.
+- Por meses ninguém percebeu: o pipeline rodava completo a cada run e
+  `coletar_detalhe` repopulava a URL. Bug latente.
+- Após DD2 (2026-05-09) — state/db persistiu PDFs e o short-circuit ficou
+  estrito (`ja_avaliado AND laudo_ok AND pdf_ok`) — o pipeline passou a
+  PULAR esses lotes (cache + PDF OK). A URL nunca mais voltava. **Bug
+  latente virou ativo em 95/187 lotes ativos** = 51% de perda da coluna
+  "Ver laudo" em produção.
+
+**Antídoto:**
+1. Quando uma operação de upsert recebe payload parcial, **enumere todas
+   as subkeys que outras camadas do pipeline escrevem nesse container** e
+   preserve uma a uma — não confie em "lembrar" das que existem agora.
+2. Teste guard explícito: simular o ciclo (camada A escreve subkey X →
+   camada B faz upsert com payload sem X → assert subkey X ainda lá).
+3. Defesa em profundidade: critério de short-circuit / "já feito" do
+   pipeline deve cobrir TODAS as condições que a auditoria valida — não
+   um subset. Caso contrário, qualquer regressão futura no upsert volta
+   a virar bug latente sem detecção.
+4. Filtros de retry também precisam de paridade total com a auditoria
+   (mesmas condições, mesma fonte de verdade). Auditoria reportar X mas
+   retry não pegar X = laço aberto, lotes presos.
+
+Padrão genérico: **upsert idempotente + payload parcial = lista explícita
+de subkeys preservadas, idealmente com teste guard por subkey**. Se o
+container tem N subkeys e o upsert preserva K<N, é bug em estado
+"esperando alguma camada começar a depender da N-K-ésima".
+
 ### P5d. If/elif encadeado num check esconde red flags atrás de yellow flags
 
 Sintoma: validador de coluna usa `if cond_A else (if cond_B else (if cond_C ...))`

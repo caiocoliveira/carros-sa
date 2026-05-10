@@ -4,11 +4,24 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro** — 477/477 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape** — 481/481 testes passando
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML.
 
 Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
+
+### DD3 — Preserva `detalhe.laudo_pdf_url` em re-scrape de listagem + paridade total no short-circuit/retry (2026-05-10) ✅
+- **Branch:** `claude/great-turing-DYVvY`
+- **Motivação:** Operador pediu (3ª vez) garantia de que TODO carro na planilha tem laudo baixado, revisado E **link clicável** — e a causa de não estar acontecendo, "pra nunca mais acontecer". Diagnóstico contra DB do `state/db` em produção (236 PDFs, 187 lotes ativos): `auditar_laudos --strict` reportava **124 incompletos**, dos quais **95 com motivo `url_invalida_ou_ausente`** — PDF baixado, cache ≥0.6, mas `raw_json.detalhe.laudo_pdf_url=None`. Coluna "Ver laudo" da planilha sumia silenciosamente em 51% dos lotes ativos.
+- **Causa raiz:** `_upsert_lote` reconstruía `raw_json` a partir do `LoteRaw.model_dump()` (que NÃO carrega `detalhe`) e sobrescrevia o existente — só `loja` era preservada. Em todo cron diário, o re-scrape da listagem ZERAVA `detalhe.laudo_pdf_url` (e `body_text_sample`). Antes do DD2 (2026-05-09), o short-circuit `ja_avaliado AND laudo_ok` falhava sempre porque PDFs sumiam entre runs CI — pipeline rodava completo, `coletar_detalhe` repopulava a URL, ninguém percebia. Após DD2 (state/db persiste PDFs + `pdf_ok` adicionado ao short-circuit), o short-circuit começou a disparar pra esses lotes — e a URL nunca mais voltava.
+- **Mudanças (defesa em 3 camadas):**
+  - **Causa raiz** [`carros_sa/orquestrador.py::_upsert_lote`](carros_sa/orquestrador.py): preserva `detalhe` e `body_text_sample` da `lote.raw_json` existente quando o LoteRaw novo (listagem) não os carrega — espelha a lógica que já preservava `loja`.
+  - **Defesa #1** [`carros_sa/orquestrador.py::_pipeline_lote`](carros_sa/orquestrador.py): short-circuit agora exige `url_ok` (i.e. `is_laudo_pdf_url(detalhe.laudo_pdf_url)` passa) ALÉM de `ja_avaliado + laudo_ok + pdf_ok`. Se algum bug futuro nullificar a URL, pipeline re-roda e `_persistir_flags_no_lote` repopula via `coletar_detalhe`.
+  - **Defesa #2** [`scripts/reprocessar_lotes_do_db.py::_filtrar_laudo_pendente`](scripts/reprocessar_lotes_do_db.py): filtro de retry agora também flagga lotes com URL inválida/ausente — mesmo com cache forte + PDF on-disk. Paridade total com `verificar_laudo_completo` (auditoria).
+- **Cobertura:** 5 testes guard novos: `test_upsert_lote_preserva_detalhe_em_re_scrape` (orquestrador), `test_lote_ja_avaliado_com_pdf_e_cache_mas_url_ausente_reavalia` (short-circuit), `test_cache_forte_e_pdf_presente_mas_url_ausente_e_pendente` + `test_cache_forte_e_pdf_presente_com_url_decoy_e_pendente` (filtro retry). Total: 481/481 verde.
+- **Recuperação dos 95 lotes em produção:** próximo cron run vai detectá-los via `_filtrar_laudo_pendente` e re-coletar detalhe — `_persistir_flags_no_lote` repopula a URL. ~5-8s sleep × 95 = ~10min extras na 1ª passagem após o merge, depois steady-state.
+- **Padrão genérico (LESSONS.md/P5f):** Quando uma operação de upsert reconstrói um campo "container" (raw_json dict, JSONB, etc.) a partir de uma fonte parcial, **enumere TODAS as subkeys que outras camadas escrevem nele** e preserve uma a uma. Listar só as que você lembra é convite a esse tipo de bug latente — campos novos adicionados por outros workflows somem silenciosamente. No nosso caso o LoteRaw é a listagem (sempre crua), mas detalhe/body_text/loja são adicionados depois por outros passos do pipeline. Cada um precisa de preservação explícita.
+- **Limitação conhecida:** as URLs assinadas de Google Cloud Storage continuam expirando ~1h após geração — ortogonal a este fix. Workaround atual já existente: célula degrada pra "PDF salvo (link expirado)" quando URL ausente. Resolução plena é o follow-up do DD2 (servir de fonte estável: GitHub raw URL ou re-assinar no export).
 
 ### GG — Coerência aritmética entre `ROI alvo (%)` e `Lucro (R$)` em zona apertada (2026-05-10) ✅
 - **Branch:** `claude/sleepy-wright-tFNNb`

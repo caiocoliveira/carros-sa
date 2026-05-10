@@ -43,9 +43,11 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          # Token OAuth da assinatura (não API key). Aceita pelo input
-          # `anthropic_api_key` por design da action.
-          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Token OAuth da assinatura — input dedicado, NÃO `anthropic_api_key`.
+          # OAuth (`sk-ant-oat01-...`) e API key (`sk-ant-api03-...`) têm fluxos
+          # de auth distintos no SDK; passar OAuth pelo slot de api_key faz o
+          # Claude Code recusar com "Invalid API key".
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--max-turns 8"
           prompt: |
             Você é reviewer técnico do projeto Carros SA — PoC multi-agente que

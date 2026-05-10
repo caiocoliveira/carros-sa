@@ -47,6 +47,7 @@ HEADER = [
     "Lucro (R$)",
     "ROI alvo (%)",
     "Reforma (R$)",
+    "Racional Reforma",
     "Tese",
     "Anúncio",
     "Laudo",
@@ -431,6 +432,7 @@ class SheetsExporter:
                 "roi_alvo": round(roi_alvo, 1),
                 "lucro": lucro,
                 "reforma_estimada": av.reforma_estimada,
+                "reforma_racional": av.reforma_racional,
                 "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
@@ -535,6 +537,9 @@ class SheetsExporter:
                 lucro_cell = "—"
                 roi_alvo_cell = "—"
                 reforma_cell = "—"
+                # Sem laudo o estimador não rodou — racional viraria fallback
+                # vazio "—" e poluiria a coluna. Aborta junto com Reforma (R$).
+                racional_cell = "—"
                 # Tese depende do lance_max pra detectar "ticket acima do teto";
                 # sem esse valor definido (laudo pendente), zerar a célula evita
                 # sinalização enganosa.
@@ -557,6 +562,7 @@ class SheetsExporter:
                     roi_alvo_cell = "—"
                     tese_cell = "—"
                 reforma_cell = r["reforma_estimada"]
+                racional_cell = r["reforma_racional"] or "—"
 
             # FIPE é referência de mercado, NÃO depende do laudo — sempre mostra
             # quando a avaliação tem o valor (registros pré-workstream K podem
@@ -584,6 +590,7 @@ class SheetsExporter:
                 lucro_cell,
                 roi_alvo_cell,
                 reforma_cell,
+                racional_cell,
                 tese_cell,
                 url_cell,
                 laudo_cell,
@@ -845,6 +852,12 @@ class SheetsExporter:
                 "EstimadorReformaLLM (fallback: tabela YAML)",
                 "Custo total dos itens retornados pelo LLM a partir do laudo; se LLM falhar, soma da tabela (família_peça × severidade) + adicional estrutural quando aplicável. Já descontado do Lance Máximo. Audit sinaliza Reforma > 30% do preco_giro como 'lote economicamente questionável' (mesmo viável: capital empatado em reforma é alto vs. revenda) e Reforma R$ 0 com severidade ≥ média como contradição (LLM ignorou laudo).",
                 "Custo ANTES de vender. Números grandes aqui = lote com dano material relevante; confirmar no PDF do laudo antes do lance. Operador deve abrir o laudo quando Reforma se aproxima de 30% do preco_giro — surpresa na oficina pode tornar o investimento inviável post-hoc.",
+            ],
+            [
+                "Racional Reforma",
+                "EstimadorReformaLLM.justificativa (fallback: sumário do precificador)",
+                "Texto descrevendo por que a reforma custou R$X — quais peças/avarias entraram no orçamento. Quando o LLM rodou: justificativa do estimador (ex.: 'Coluna B reparada → solda + pintura; capô amassado'). Quando caiu pro fallback determinístico: sumário gerado pelo precificador a partir dos itens da tabela YAML. '—' em '⚠ LAUDO NÃO CAPTURADO' (estimador não rodou) e em registros pré-workstream O (campo NULL no DB).",
+                "Audita o valor da Reforma sem precisar abrir o PDF do laudo — operador lê a justificativa e confere se o LLM/fallback enxergou o que devia. Texto pode ocupar 3-5 linhas wrapped no Sheets; preferimos preservar a info completa a truncar.",
             ],
             [
                 "Tese",

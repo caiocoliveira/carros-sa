@@ -19,6 +19,7 @@ from carros_sa.tools.sheets import (
     HEADER,
     SheetsExporter,
     _col_letter,
+    _km_indicator,
     _lucro_absoluto_efetivo,
     _lucro_absoluto_no_alvo,
     _score_roi_efetivo,
@@ -977,6 +978,152 @@ class TestSheetsExporterQuery:
             f"preco_giro reconstruído de Lucro+ROI ({preco_giro_implicito:.0f}) "
             f"não bate com preco_giro persistido (40000) — colunas incoerentes."
         )
+
+
+class TestKmIndicator:
+    """Classifica km/ano em verde/amarelo/vermelho.
+
+    Thresholds calibrados pra média brasileira (~15k/ano):
+      - ≤15k/ano: conservado
+      - 15k-25k/ano: uso típico-alto
+      - >25k/ano: uso intensivo (provável frota/Uber)
+    """
+
+    def test_verde_quando_km_por_ano_baixo(self):
+        # 2024 com 20k km, ano_atual=2026 → idade=2 → 10k/ano → verde
+        assert _km_indicator(20_000, 2024, 2026) == "verde"
+
+    def test_amarelo_quando_km_por_ano_medio(self):
+        # 2024 com 40k km → 20k/ano → amarelo
+        assert _km_indicator(40_000, 2024, 2026) == "amarelo"
+
+    def test_vermelho_quando_km_por_ano_alto(self):
+        # 2024 com 60k km → 30k/ano → vermelho
+        assert _km_indicator(60_000, 2024, 2026) == "vermelho"
+
+    def test_borda_15k_por_ano_e_verde(self):
+        # Limite superior do verde inclusivo
+        assert _km_indicator(30_000, 2024, 2026) == "verde"  # 15k/ano
+
+    def test_borda_25k_por_ano_e_amarelo(self):
+        # Limite superior do amarelo inclusivo
+        assert _km_indicator(50_000, 2024, 2026) == "amarelo"  # 25k/ano
+
+    def test_carro_do_ano_corrente_usa_idade_floor_1(self):
+        # Sem floor, dividiria por 0. Floor=1 → 30k/ano → vermelho
+        assert _km_indicator(30_000, 2026, 2026) == "vermelho"
+        assert _km_indicator(10_000, 2026, 2026) == "verde"
+
+    def test_carro_futuro_tratado_como_idade_1(self):
+        assert _km_indicator(5_000, 2027, 2026) == "verde"
+        assert _km_indicator(40_000, 2027, 2026) == "vermelho"
+
+    def test_km_none_devolve_none(self):
+        assert _km_indicator(None, 2024, 2026) is None
+
+    def test_ano_none_devolve_none(self):
+        # Defensivo — schema atual tem ano non-nullable, mas não custa
+        assert _km_indicator(40_000, None, 2026) is None
+
+    def test_km_negativo_devolve_none(self):
+        assert _km_indicator(-1, 2020, 2026) is None
+
+
+class TestAplicaCoresKm:
+    """`_aplicar_cores_km` pinta a coluna H (KM) por linha conforme indicador."""
+
+    def test_aplica_cor_de_fundo_e_reseta_coluna_pra_branco(self):
+        engine = _engine_mem()
+        # Idades relativas pro teste ser estável independente do ano corrente.
+        ano_atual = datetime.now().year
+        ano_2_atras = ano_atual - 2
+
+        with Session(engine) as session:
+            # km/ano: 5k → verde; 20k → amarelo; 30k → vermelho.
+            # score_roi decrescente garante ordem de ranking determinística:
+            # bucket sort (laudo+viavel) idêntico → desempate por -roi_anualizado.
+            session.add(_lote("L_verde", ano=ano_2_atras, km=10_000, lance_atual=15_000))
+            session.add(_avaliacao("L_verde", score_roi=0.5))
+            session.add(_lote("L_amarelo", ano=ano_2_atras, km=40_000, lance_atual=15_000))
+            session.add(_avaliacao("L_amarelo", score_roi=0.4))
+            session.add(_lote("L_vermelho", ano=ano_2_atras, km=60_000, lance_atual=15_000))
+            session.add(_avaliacao("L_vermelho", score_roi=0.3))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        # 2 chamadas de batch_format esperadas:
+        #   [0] formato numérico (NUMBER) — testado em outro teste
+        #   [1] cores da coluna KM (este teste)
+        assert mock_ws.batch_format.call_count == 2, (
+            f"esperava 2 chamadas a batch_format, foram {mock_ws.batch_format.call_count}"
+        )
+        formatos_km = mock_ws.batch_format.call_args_list[1][0][0]
+
+        km_letter = _col_letter(HEADER.index("KM"))
+
+        # Primeira entrada: reset da coluna inteira pra branco. Sem isso,
+        # rerodar o exporter herda cor de runs anteriores (ws.clear preserva
+        # backgroundColor).
+        assert formatos_km[0]["range"] == f"{km_letter}:{km_letter}"
+        assert formatos_km[0]["format"]["backgroundColor"] == {
+            "red": 1.0, "green": 1.0, "blue": 1.0,
+        }
+
+        # 1 reset + 3 cells coloridas
+        assert len(formatos_km) == 4
+
+        # Mapa range→cor pra checar cada lote sem depender da ordem de iteração.
+        cor_por_celula = {
+            f["range"]: f["format"]["backgroundColor"]
+            for f in formatos_km[1:]
+        }
+        # Banner=1, header=2, dados começam em 3. Ordem do ranking
+        # (score_roi desc): L_verde (3), L_amarelo (4), L_vermelho (5).
+        assert cor_por_celula[f"{km_letter}3"] == {
+            "red": 0.85, "green": 0.92, "blue": 0.83,
+        }
+        assert cor_por_celula[f"{km_letter}4"] == {
+            "red": 0.99, "green": 0.91, "blue": 0.70,
+        }
+        assert cor_por_celula[f"{km_letter}5"] == {
+            "red": 0.96, "green": 0.80, "blue": 0.80,
+        }
+
+    def test_lote_sem_km_nao_recebe_cor(self):
+        """km=None → célula fica sem cor (só o reset pra branco entra na lista)."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", km=None))
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        formatos_km = mock_ws.batch_format.call_args_list[1][0][0]
+        # Só o reset, nenhuma célula colorida.
+        assert len(formatos_km) == 1
+        assert formatos_km[0]["format"]["backgroundColor"] == {
+            "red": 1.0, "green": 1.0, "blue": 1.0,
+        }
 
 
 class TestSheetsExporterFimEmObrigatorio:

@@ -36,12 +36,20 @@ def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Pa
       1. Sem entrada em LaudoCache
       2. LaudoCache.confidence < 0.6 (fallback `_laudo_sem_pdf`)
       3. PDF ausente em `pdf_dir/<lote_id>.pdf` (ou <5KB)
+      4. `raw_json.detalhe.laudo_pdf_url` ausente ou inválido — caso introduzido
+         em 2026-05-10 (DD3): `_upsert_lote` antes zerava `detalhe` em todo
+         re-scrape da listagem; com PDF + cache OK no DB, short-circuit pulava
+         o pipeline e a URL nunca voltava. Coluna "Ver laudo" da planilha
+         sumia. Bug raiz corrigido (preservação em `_upsert_lote`), mas o
+         filtro precisa cobrir essa dimensão também — paridade total com
+         `verificar_laudo_completo`.
 
     Extraído pra fora do CLI pra ficar coberto por teste unitário (sem
     Playwright, sem `_run`). O `pdf_dir=None` resolve em runtime via
     `PDF_DIR_DEFAULT` — mesma fonte do `verificar_laudo_completo`.
     """
     from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT
+    from carros_sa.scraping.parsers import is_laudo_pdf_url
     if pdf_dir is None:
         pdf_dir = PDF_DIR_DEFAULT
 
@@ -49,12 +57,18 @@ def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Pa
         p = pdf_dir / f"{lote_id}.pdf"
         return not (p.exists() and p.stat().st_size > 5_000)
 
+    def _url_invalida(lote) -> bool:
+        det = (lote.raw_json or {}).get("detalhe") if isinstance(lote.raw_json, dict) else None
+        url = det.get("laudo_pdf_url") if isinstance(det, dict) else None
+        return not is_laudo_pdf_url(url)
+
     return [
         l for l in lotes
         if (
             laudos_confidence.get(l.id) is None
             or (laudos_confidence.get(l.id) or 0) < 0.6
             or _pdf_ausente(l.id)
+            or _url_invalida(l)
         )
     ]
 

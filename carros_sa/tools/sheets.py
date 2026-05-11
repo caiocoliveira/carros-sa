@@ -123,6 +123,32 @@ def _km_indicator(km: Optional[int], ano: Optional[int], ano_atual: int) -> Opti
     return "vermelho"
 
 
+def _git_short_hash() -> str:
+    """Short hash do HEAD do checkout que está rodando este export.
+
+    Estampar no banner deixa óbvio QUAL versão do código produziu a Sheet
+    atual — se aparecer um hash diferente do HEAD de `main` no GitHub, é
+    sinal de que um cron antigo (laptop, worktree esquecido) rodou em
+    código stale e sobrescreveu o output do CI. Sem o stamp, o operador
+    precisava deduzir isso pelo layout das colunas, o que só funciona
+    quando a diferença é visível.
+
+    Lê `.git/HEAD` direto (sem invocar `git` no PATH) — funciona em
+    qualquer ambiente que tenha o repo checked out, mesmo onde o binário
+    `git` não está instalado. Fail-soft pra "?" quando `.git` não existe
+    (deploy isolado, container minimal, copy do código sem versionamento).
+    """
+    try:
+        import pathlib
+        head = pathlib.Path(".git/HEAD").read_text().strip()
+        if head.startswith("ref: "):
+            ref_path = pathlib.Path(".git") / head[5:]
+            return ref_path.read_text().strip()[:7]
+        return head[:7]
+    except Exception:
+        return "?"
+
+
 def _col_letter(idx_0based: int) -> str:
     """Converte índice 0-based em letra de coluna estilo Sheets (A, B, ..., Z, AA, AB, ...)."""
     letters = ""
@@ -451,8 +477,12 @@ class SheetsExporter:
         # Linha 1: banner global "Última atualização" — deixa óbvio o quão fresco
         # está o snapshot. Preenche a primeira célula e mantém o resto vazio pra
         # não poluir o layout; o freeze(rows=2) congela tanto o banner quanto o
-        # header de colunas.
-        banner = [f"Última atualização da planilha: {ts}"] + [""] * (len(HEADER) - 1)
+        # header de colunas. O short hash do commit identifica QUAL checkout
+        # produziu esta Sheet — quando aparecer hash ≠ HEAD do main no GitHub
+        # é sinal de cron antigo (laptop/worktree esquecido) sobrescrevendo o
+        # output do CI; sem o stamp, só dava pra inferir pelo layout das colunas.
+        commit = _git_short_hash()
+        banner = [f"Última atualização da planilha: {ts} (commit {commit})"] + [""] * (len(HEADER) - 1)
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):

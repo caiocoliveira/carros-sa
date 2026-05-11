@@ -1469,6 +1469,47 @@ class TestSheetsExporterTimestamp:
         mock_ws.freeze.assert_any_call(rows=2)
 
 
+class TestBannerStampCommit:
+    """Banner exibe `(commit <hash>)` pra rastrear QUAL checkout gerou a Sheet.
+    Sem isso, cron antigo (laptop/worktree esquecido) sobrescrevia o output do
+    CI com layout velho e o operador só notava pelas colunas faltando.
+    """
+
+    def test_banner_inclui_commit_hash(self):
+        from carros_sa.tools.sheets import _git_short_hash
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        banner = rows[0][0]
+        # No working tree real, _git_short_hash devolve o hash do HEAD;
+        # qualquer valor não-vazio é aceito — o teste valida que o stamp
+        # foi incluído, não qual hash específico.
+        assert "(commit " in banner
+        commit = _git_short_hash()
+        assert f"(commit {commit})" in banner
+
+    def test_git_short_hash_fail_soft_sem_dot_git(self, tmp_path, monkeypatch):
+        """Sem `.git/` (container minimal, deploy isolado) devolve '?' sem crash."""
+        from carros_sa.tools.sheets import _git_short_hash
+        monkeypatch.chdir(tmp_path)  # cwd sem .git
+        assert _git_short_hash() == "?"
+
+
 class TestCidadesFreteSheet:
     """Aba de cidades do raio operacional + frete por categoria por cidade."""
 

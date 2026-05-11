@@ -42,6 +42,22 @@ class HistoricoRow(BaseModel):
 
     `data_venda` opcional: vazio = "no pátio, ainda não vendido". Nesses casos
     `valor_venda` é o preço sugerido de anúncio, não realizado.
+
+    **Formato de custos pós-compra (dois caminhos):**
+    - LEGACY (linhas anteriores a 2026-05-11): `custos_extras` agregado contém
+      taxa de leilão + frete + transferência + higienização + reforma somados.
+      `Arrematado.gastos_reforma_real` herda o valor cheio — calibrador de
+      reforma usa um número poluído (limitação inerente ao formato antigo,
+      irrecuperável retroativamente).
+    - DECOMPOSTO (workstream HH-2, 2026-05-11+): colunas separadas
+      `taxa_leilao_real / frete_real / transferencia_real / higienizacao_real
+      / outros_extras_real / gastos_reforma_real`. `Arrematado.gastos_reforma_real`
+      recebe APENAS a coluna de reforma — calibrador finalmente vê o número limpo.
+
+    Detecção do formato é por linha: se QUALQUER decomposta está preenchida,
+    a linha é tratada como decomposto e `custos_extras` é ignorado (mesmo
+    que esteja preenchido — operador pode estar migrando). Se nenhuma
+    decomposta tem valor, fallback pro legacy.
     """
 
     marca: str
@@ -50,9 +66,16 @@ class HistoricoRow(BaseModel):
     km: Optional[int] = None
     valor_compra: int = Field(gt=0)
     data_compra: Optional[datetime] = None
-    custos_extras: Optional[int] = None
+    custos_extras: Optional[int] = None        # LEGACY: agregado (taxa+frete+...+reforma)
     valor_venda: Optional[int] = None
     data_venda: Optional[datetime] = None
+    # Decomposto (HH-2, 2026-05-11): cada bucket separado. Opcional pra retrocompat.
+    taxa_leilao_real: Optional[int] = None
+    frete_real: Optional[int] = None
+    transferencia_real: Optional[int] = None
+    higienizacao_real: Optional[int] = None
+    outros_extras_real: Optional[int] = None
+    gastos_reforma_real: Optional[int] = None  # NOVA: só reforma, separada do agregado
     observacoes: str = ""
 
     @field_validator("marca", "modelo")
@@ -62,6 +85,58 @@ class HistoricoRow(BaseModel):
         if not v:
             raise ValueError("marca/modelo não pode ser vazio")
         return v
+
+    @property
+    def extras_decompostos(self) -> bool:
+        """True se a linha veio em formato decomposto (qualquer bucket preenchido).
+
+        Operador pode migrar uma linha por vez — basta preencher 1+ coluna nova
+        que o sistema deixa de usar o `custos_extras` agregado pra essa linha.
+        """
+        return any(
+            v is not None for v in (
+                self.taxa_leilao_real,
+                self.frete_real,
+                self.transferencia_real,
+                self.higienizacao_real,
+                self.outros_extras_real,
+                self.gastos_reforma_real,
+            )
+        )
+
+    @property
+    def total_extras(self) -> Optional[int]:
+        """Soma dos custos pós-arremate (taxa+frete+transf+higi+outros+reforma).
+
+        Decomposto: soma das colunas (None tratados como 0).
+        Legacy: devolve `custos_extras` direto.
+        Linha sem extras de qualquer formato: None (compra "no pátio" sem despesa
+        capturada — comum em snapshot inicial PR #84).
+        """
+        if self.extras_decompostos:
+            return (
+                (self.taxa_leilao_real or 0)
+                + (self.frete_real or 0)
+                + (self.transferencia_real or 0)
+                + (self.higienizacao_real or 0)
+                + (self.outros_extras_real or 0)
+                + (self.gastos_reforma_real or 0)
+            )
+        return self.custos_extras
+
+    @property
+    def reforma_real_efetiva(self) -> Optional[int]:
+        """Valor de reforma usado pra calibrar EstimadorReforma.
+
+        Decomposto: APENAS `gastos_reforma_real` (limpo, calibração honesta).
+        Legacy: `custos_extras` agregado (POLUÍDO — inclui taxa/frete/higi).
+        Fallback necessário pra não perder o sinal de linhas antigas, mas o
+        calibrador deve idealmente filtrar `extras_decompostos=True` pra
+        baseline limpo quando houver dado decomposto suficiente.
+        """
+        if self.extras_decompostos:
+            return self.gastos_reforma_real
+        return self.custos_extras
 
 
 # =============================================================================
@@ -152,6 +227,14 @@ def parse_csv(path: Path) -> Tuple[List[HistoricoRow], List[Tuple[int, str]]]:
                     custos_extras=_parse_int_opcional(raw.get("custos_extras")),
                     valor_venda=_parse_int_opcional(raw.get("valor_venda")),
                     data_venda=_parse_data(raw.get("data_venda")),
+                    # Decomposto (HH-2). raw.get devolve None se coluna não existe
+                    # no CSV (compat com fixtures antigas que só têm 10 colunas).
+                    taxa_leilao_real=_parse_int_opcional(raw.get("taxa_leilao_real")),
+                    frete_real=_parse_int_opcional(raw.get("frete_real")),
+                    transferencia_real=_parse_int_opcional(raw.get("transferencia_real")),
+                    higienizacao_real=_parse_int_opcional(raw.get("higienizacao_real")),
+                    outros_extras_real=_parse_int_opcional(raw.get("outros_extras_real")),
+                    gastos_reforma_real=_parse_int_opcional(raw.get("gastos_reforma_real")),
                     observacoes=(raw.get("observacoes") or "").strip(),
                 )
                 rows.append(row)
@@ -264,10 +347,16 @@ def importar_historico(
 
             data_compra = row.data_compra or datetime(2026, 1, 1)  # placeholder se vazio
 
+            # `reforma_real_efetiva` resolve decomposto vs legacy. Quando linha
+            # tem colunas decompostas (HH-2+), usa só `gastos_reforma_real` (limpo).
+            # Quando legacy, fallback pro `custos_extras` agregado (poluído, mas é
+            # o que temos pra linhas pré-2026-05-11).
+            reforma_real = row.reforma_real_efetiva
+
             if arr_existente:
                 arr_existente.preco_real = row.valor_compra
                 arr_existente.data = data_compra
-                arr_existente.gastos_reforma_real = row.custos_extras
+                arr_existente.gastos_reforma_real = reforma_real
                 arr_existente.vendido_por = row.valor_venda if row.data_venda else None
                 arr_existente.vendido_em = row.data_venda
                 result.atualizados += 1
@@ -277,7 +366,7 @@ def importar_historico(
                     lote_id=lote_id,
                     preco_real=row.valor_compra,
                     data=data_compra,
-                    gastos_reforma_real=row.custos_extras,
+                    gastos_reforma_real=reforma_real,
                     # vendido_por só preenche se a venda já aconteceu (data_venda real)
                     vendido_por=row.valor_venda if row.data_venda else None,
                     vendido_em=row.data_venda,

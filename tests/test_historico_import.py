@@ -200,3 +200,171 @@ def test_idempotencia_nao_duplica(csv_polo_track, session_isolada):
     # Total no DB continua 1 Lote + 1 Arrematado
     assert len(session_isolada.exec(select(Lote)).all()) == 1
     assert len(session_isolada.exec(select(Arrematado)).all()) == 1
+
+
+# =============================================================================
+# Cenário 4 — Formato decomposto (workstream HH-2, 2026-05-11+)
+# =============================================================================
+# CSV agora suporta 6 colunas decompostas pra custos pós-arremate:
+# taxa_leilao_real, frete_real, transferencia_real, higienizacao_real,
+# outros_extras_real, gastos_reforma_real. Permite calibrar cada bucket
+# separadamente (HH-4, HH-5) em vez de usar o agregado `custos_extras` poluído.
+
+@pytest.fixture
+def csv_decomposto() -> Iterator[Path]:
+    """CSV com 1 linha em formato decomposto (Fusion real, PR HH-2).
+
+    Soma das decompostas = 4.397 (mesmo total do legacy `custos_extras`, mas
+    agora separado: taxa AA 867 + frete 1200 + transf 580 + higi 550 + outros 0
+    + reforma 1200).
+    """
+    content = (
+        "marca,modelo,ano,km,valor_compra,data_compra,custos_extras,valor_venda,data_venda,"
+        "taxa_leilao_real,frete_real,transferencia_real,higienizacao_real,outros_extras_real,gastos_reforma_real,observacoes\n"
+        "Ford,Fusion 2.0 GTDI AWD,2014,,55500,2026-05-11,,,,"
+        "867,1200,580,550,0,1200,Auto Arremate decomposto\n"
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8") as f:
+        f.write(content)
+        path = Path(f.name)
+    yield path
+    path.unlink()
+
+
+@pytest.fixture
+def csv_misto_decomposto_e_legacy() -> Iterator[Path]:
+    """CSV com 2 linhas: 1 legacy (Polo) + 1 decomposta (Fusion).
+
+    Garante que ambos os formatos coexistem na mesma importação — operador
+    pode migrar linha por linha sem precisar refazer tudo de uma vez.
+    """
+    content = (
+        "marca,modelo,ano,km,valor_compra,data_compra,custos_extras,valor_venda,data_venda,"
+        "taxa_leilao_real,frete_real,transferencia_real,higienizacao_real,outros_extras_real,gastos_reforma_real,observacoes\n"
+        "VW,Polo Track 1.0,2024,80000,52200,2025-11-13,4735,69400,2026-03-31,,,,,,,legacy\n"
+        "Ford,Fusion 2.0 GTDI AWD,2014,,55500,2026-05-11,,,,867,1200,580,550,0,1200,decomposto\n"
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8") as f:
+        f.write(content)
+        path = Path(f.name)
+    yield path
+    path.unlink()
+
+
+class TestFormatoDecomposto:
+    """Cobre o caminho novo de decomposição (HH-2)."""
+
+    def test_extras_decompostos_property_true_quando_qualquer_bucket_preenchido(self):
+        """Property `extras_decompostos` detecta migração parcial."""
+        # Só reforma preenchida → ainda é decomposto
+        r = HistoricoRow(marca="X", modelo="Y", ano=2020, valor_compra=10_000,
+                          gastos_reforma_real=1_500)
+        assert r.extras_decompostos is True
+
+        # Nada decomposto, só legacy → não é decomposto
+        r2 = HistoricoRow(marca="X", modelo="Y", ano=2020, valor_compra=10_000,
+                           custos_extras=2_000)
+        assert r2.extras_decompostos is False
+
+        # Tudo zero/None → não é decomposto
+        r3 = HistoricoRow(marca="X", modelo="Y", ano=2020, valor_compra=10_000)
+        assert r3.extras_decompostos is False
+
+    def test_total_extras_soma_decompostos(self):
+        """`total_extras` soma os buckets quando decomposto, ignora custos_extras."""
+        r = HistoricoRow(
+            marca="Ford", modelo="Fusion", ano=2014, valor_compra=55_500,
+            custos_extras=9_999,  # deveria ser IGNORADO (decomposto vence)
+            taxa_leilao_real=867, frete_real=1_200, transferencia_real=580,
+            higienizacao_real=550, outros_extras_real=0, gastos_reforma_real=1_200,
+        )
+        assert r.total_extras == 4_397  # 867+1200+580+550+0+1200
+
+    def test_total_extras_fallback_legacy_quando_nada_decomposto(self):
+        """Linha legacy: `total_extras` devolve `custos_extras` direto."""
+        r = HistoricoRow(marca="VW", modelo="Polo", ano=2024,
+                          valor_compra=52_200, custos_extras=4_735)
+        assert r.total_extras == 4_735
+
+    def test_total_extras_none_quando_compra_sem_despesa(self):
+        """Snapshot do pátio (PR #84): sem custos_extras nem decomposto → None."""
+        r = HistoricoRow(marca="BMW", modelo="750i", ano=2015, valor_compra=114_890)
+        assert r.total_extras is None
+
+    def test_reforma_real_efetiva_isola_reforma_quando_decomposto(self):
+        """O ponto crítico do HH-2: calibrador de reforma deixa de receber
+        número poluído (taxa+frete+higi+...) e passa a receber só reforma."""
+        r_decomposto = HistoricoRow(
+            marca="Ford", modelo="Fusion", ano=2014, valor_compra=55_500,
+            taxa_leilao_real=867, frete_real=1_200, transferencia_real=580,
+            higienizacao_real=550, gastos_reforma_real=1_200,
+        )
+        assert r_decomposto.reforma_real_efetiva == 1_200
+
+        # Legacy: continua com o agregado (back-compat — irrecuperável retroativo)
+        r_legacy = HistoricoRow(marca="VW", modelo="Polo", ano=2024,
+                                 valor_compra=52_200, custos_extras=4_735)
+        assert r_legacy.reforma_real_efetiva == 4_735
+
+    def test_parse_csv_decomposto_popula_buckets(self, csv_decomposto):
+        """parse_csv lê as 6 novas colunas e popula o HistoricoRow correto."""
+        rows, erros = parse_csv(csv_decomposto)
+        assert erros == []
+        assert len(rows) == 1
+
+        f = rows[0]
+        assert f.marca == "Ford"
+        assert f.valor_compra == 55_500
+        assert f.taxa_leilao_real == 867
+        assert f.frete_real == 1_200
+        assert f.transferencia_real == 580
+        assert f.higienizacao_real == 550
+        assert f.outros_extras_real == 0
+        assert f.gastos_reforma_real == 1_200
+        assert f.custos_extras is None  # vazio no decomposto
+        assert f.extras_decompostos is True
+
+    def test_importar_decomposto_popula_arrematado_so_com_reforma(
+        self, csv_decomposto, session_isolada
+    ):
+        """Linha decomposta: Arrematado.gastos_reforma_real recebe APENAS 1200
+        (a coluna `gastos_reforma_real`), não 4397 (soma poluída)."""
+        rows, _ = parse_csv(csv_decomposto)
+        session_isolada.add(Empresa(id="carros_uberlandia", nome="Test", config_yaml_path="x"))
+        session_isolada.commit()
+        from carros_sa.tools import historico_import
+        historico_import._garantir_empresa = lambda *a, **k: None
+
+        importar_historico(rows, "carros_uberlandia", session_isolada)
+
+        arrs = session_isolada.exec(select(Arrematado)).all()
+        assert len(arrs) == 1
+        assert arrs[0].gastos_reforma_real == 1_200  # SÓ reforma, não 4397
+
+    def test_importar_csv_misto_legacy_e_decomposto_funcionam_juntos(
+        self, csv_misto_decomposto_e_legacy, session_isolada
+    ):
+        """Operador pode migrar 1 linha por vez — ambos formatos coexistem."""
+        rows, erros = parse_csv(csv_misto_decomposto_e_legacy)
+        assert erros == []
+        assert len(rows) == 2
+
+        polo, fusion = rows
+        assert polo.extras_decompostos is False
+        assert polo.reforma_real_efetiva == 4_735  # legacy agregado
+        assert fusion.extras_decompostos is True
+        assert fusion.reforma_real_efetiva == 1_200  # só reforma
+
+        session_isolada.add(Empresa(id="carros_uberlandia", nome="Test", config_yaml_path="x"))
+        session_isolada.commit()
+        from carros_sa.tools import historico_import
+        historico_import._garantir_empresa = lambda *a, **k: None
+
+        importar_historico(rows, "carros_uberlandia", session_isolada)
+
+        arrs = sorted(
+            session_isolada.exec(select(Arrematado)).all(),
+            key=lambda a: a.preco_real,
+        )
+        assert arrs[0].gastos_reforma_real == 4_735  # Polo legacy (poluído, irrecuperável)
+        assert arrs[1].gastos_reforma_real == 1_200  # Fusion decomposto (limpo)

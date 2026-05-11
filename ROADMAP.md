@@ -34,7 +34,15 @@ Dependências externas conhecidas: Webmotors live (workstream G — bloqueia rea
   - Novo método `EmpresaConfig.custo_op_para_lote(lote)` que devolve `custo_op_fixo + (transferencia_interestadual se lote.origem_uf != patio.uf else 0)`.
   - Precificador troca `empresa.custo_op_fixo` → `empresa.custo_op_para_lote(lote)` na linha 167.
   - YAMLs `carros_uberlandia.yaml` e `carros_rio.yaml` ganham `transferencia_interestadual: 580` (calibrado em 1 compra real Fusion SP→MG; recalibrar com #2 quando tiver ≥5 transferências interestaduais no CSV).
-- **Follow-ups (não-bloqueantes):** #2, #3, #4, #5 acima. Não entram neste PR pra manter escopo isolado e testável.
+- **HH-2 entregue (2026-05-11):** ✅ Decomposição do CSV em colunas por bucket — destrava HH-4 e HH-5.
+  - 6 colunas novas no `data/historico/uberlandia_arrematado.csv`: `taxa_leilao_real`, `frete_real`, `transferencia_real`, `higienizacao_real`, `outros_extras_real`, `gastos_reforma_real`. Inseridas ANTES de `observacoes` pra manter convenção (texto livre no fim). Migração programática preservou capital total (R$ 5.220.887 antes/depois bate).
+  - `HistoricoRow` ganhou os 6 campos opcionais + 3 properties: `extras_decompostos` (detecta formato), `total_extras` (soma decomposto OU devolve `custos_extras` legacy), `reforma_real_efetiva` (isola SÓ a reforma quando decomposto).
+  - `parse_csv` lê as 6 novas colunas via `raw.get()` (compat com fixtures antigas de 10 colunas).
+  - `importar_historico` usa `reforma_real_efetiva` em vez de `custos_extras` ao popular `Arrematado.gastos_reforma_real` — calibrador de reforma finalmente vê número limpo nos lotes pós-2026-05-11.
+  - Linha do Fusion (única adicionada em PR #83) migrada: R$ 4.397 agregado → 867 + 1200 + 580 + 550 + 0 + 1200 decomposto.
+  - 8 testes novos em `TestFormatoDecomposto` cobrindo: detecção de formato (parcial/legacy/vazio), `total_extras` (soma vs fallback vs None), isolamento de reforma decomposto vs legacy, parse_csv populando buckets, import end-to-end com csv puro decomposto e csv misto (legacy + decomposto coexistem). 536/536 verde.
+  - **Limitação irrecuperável:** linhas anteriores a 2026-05-11 (95 do CSV) continuam com `custos_extras` agregado poluído alimentando `gastos_reforma_real`. Não dá pra desagregar retroativamente. Solução: quando HH-2 tiver ≥5 linhas decompostas, calibrador filtra `extras_decompostos=True` pra baseline limpo e usa legacy só como prior.
+- **Follow-ups (não-bloqueantes):** #3, #4, #5 acima.
 - **Limitações conhecidas:**
   - Valor R$ 580 é N=1 (só o Fusion). Variação por UF de origem desconhecida (SP→MG pode ser diferente de RJ→MG, GO→MG). Aceitável como ponto de partida — `transferencia_interestadual` é uniforme por empresa, não tabela.
   - Custo é aplicado por igual a TODA UF ≠ pátio. Não trata caso de UF adjacente com convênio (raro no Brasil; DETRAN é estadual).

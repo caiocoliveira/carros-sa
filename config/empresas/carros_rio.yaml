@@ -8,6 +8,12 @@ patio:
 # e fatores herdados da operação Uberlândia (Polo Track 2024 = 21% líquido após
 # desconto VJCAR, 28% bruto). Recalibrar quando tiver ≥10 vendas reais no pátio
 # do Rio (ver workflow descrito em ROADMAP.md/Bloco A).
+#
+# VJCAR = parceiro operacional que cobra 30% do LUCRO LÍQUIDO da operação. Esse
+# desconto já está embutido em `margem.base = 0.25` (calibração herdada da
+# operação UDI). Se a parceria com VJCAR mudar pra esta empresa, recalibrar
+# margem.base OU adicionar `comissoes.vjcar_pct: 0.30` explícito + ler em
+# precificador.py. Ver `carros_uberlandia.yaml` pro racional completo.
 margem:
   base: 0.25                    # 25% sobre o preço de giro (venda âncora)
   minima_absoluta: 0.10         # nunca abaixo disso

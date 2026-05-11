@@ -156,7 +156,7 @@ def test_gol_2015_em_uberlandia_sem_frete(
     """Mesmo lote, mas simulando que o leilão é em Uberlândia (frete 0).
 
     Após calibração (Bloco A): margem.base 0.25, custo_op_fixo 2523 (decomposto),
-    taxa_leilao_pct 0.0 + taxa_leilao_fixa 999 (Auto Avaliar).
+    taxa_leilao_pct 0.0156 (HH-4: calibrado em N=1 Fusion R$867/R$55.500).
     """
     empresa = carregar_empresa("carros_uberlandia")
     lote_local = gol_2015_lote.model_copy(update={
@@ -173,10 +173,10 @@ def test_gol_2015_em_uberlandia_sem_frete(
     assert av.frete_incluso == 0
     assert av.reforma_estimada == 3_500
 
-    # Auto Avaliar = R$ 999 fixo, independente do lance vencedor (não 8%)
-    assert av.taxas_leilao == 999
-    assert empresa.taxa_leilao_fixa == 999
-    assert empresa.taxa_leilao_pct == 0.0
+    # HH-4: taxa percentual de 1.56% sobre o lance (N=1 Fusion, recalibrar c/ mais dados)
+    assert av.taxas_leilao == 275   # int(preco_max * 0.0156) = int(17641 * 0.0156)
+    assert empresa.taxa_leilao_fixa == 0
+    assert empresa.taxa_leilao_pct == 0.0156
 
     # Custo op decomposto soma R$ 2.523 (380+450+1500+120+73)
     assert empresa.custo_op_fixo == 2_523
@@ -185,8 +185,8 @@ def test_gol_2015_em_uberlandia_sem_frete(
     # margem_aplicada ≈ 0.25 * 1.295 * 1.431 ≈ 0.4632
     # margem_reais = int(26600 * 0.4632) = 12321
     # bruto_alvo = 26600 - 3500 - 0 - 2523 - 12321 = 8256
-    # preco_alvo = (8256 - 999) / 1 = 7257
-    assert 6_900 < av.preco_alvo < 7_500
+    # preco_alvo = 8256 / 1.0156 = 8126 (taxa menor q 999 → preco_alvo sobe vs modelo antigo)
+    assert 7_800 < av.preco_alvo < 8_400
     assert av.preco_max > av.preco_alvo           # margem mínima é menos restritiva
 
 
@@ -197,7 +197,7 @@ def test_gol_2015_em_uberlandia_sem_frete(
 def test_gol_2015_em_goiania_com_frete(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
 ):
-    """Frete R$ 1400 + transferência interestadual R$ 580 derrubam preco_alvo (taxa pct = 0)."""
+    """Frete R$ 1400 + transferência interestadual R$ 580 derrubam preco_alvo (taxa pct 1.56%)."""
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
 
@@ -206,17 +206,17 @@ def test_gol_2015_em_goiania_com_frete(
     # Lote vem de GO (origem_uf="GO") no pátio MG → custo_op_para_lote soma
     # transferencia_interestadual=580 sobre o agregado de 2523. Workstream HH (2026-05-11).
     # preco_giro = FIPE × 0.95 = 26600 (refactor FIPE-only)
-    # bruto_alvo = 26600 - 3500 - 1400 - 3103 - 12321 = 6276
-    # preco_alvo = (6276 - 999) / 1 = 5277
+    # HH-4: taxa 1.56% (pct, N=1 Fusion). bruto_alvo = 26600 - 3500 - 1400 - 3103 - 12321 = 6276
+    # preco_alvo = 6276 / 1.0156 = 6176 (taxa <999 em lotes baratos → preco_alvo sobe)
     assert av.frete_incluso == 1_400
-    assert 4_900 < av.preco_alvo < 5_700
+    assert 5_800 < av.preco_alvo < 6_500
 
-    # preco_max = (26600 - 3500 - 1400 - 3103 - 2660 - 999) / 1 = 14938
-    # Lance atual R$ 15k está R$ 62 ACIMA do preco_max → lote inviável após HH.
-    # Antes do workstream HH (sem transferência), preco_max era 15518 e cabia.
-    # Operacionalmente correto: lote vindo de GO custa mais R$ 580 que o orçamento
-    # antigo permitia, então 15k não cabe mais.
-    assert gol_2015_lote.lance_atual > av.preco_max
+    # preco_max = (26600 - 3500 - 1400 - 3103 - 2660) / 1.0156 = 15692
+    # Lance atual R$ 15k está DENTRO do preco_max agora (15000 < 15692).
+    # HH-4 inverte o resultado vs taxa fixa: pct=1.56% sobre preco_max=15692
+    # é R$245, muito menos que os R$999 fixos que tornavam o lote inviável.
+    # Com taxa menor, preco_max sobe e o lance de R$15k volta a caber.
+    assert gol_2015_lote.lance_atual < av.preco_max
 
 
 # =============================================================================
@@ -237,7 +237,7 @@ def test_multi_empresa_mesmo_lote_rankings_divergem(
     - Margem base 30% (vs 25% de Uberlândia)
     - minima_absoluta 0.18 (vs 0.10) → preco_max mais baixo em SP
     - Pátio em SP está mais longe de Goiânia que Uberlândia (frete maior)
-    - taxa_leilao_pct 8% (vs 0% de Uberlândia, que usa fixa de 999)
+    - taxa_leilao_pct 8% (vs 1.56% de Uberlândia após HH-4)
     - bounds de risco/liquidez mais largos (operação mais exigente)
 
     Usa laudo/mercado SUAVIZADOS (severidade leve, mercado normal) pra que
@@ -439,8 +439,9 @@ def test_taxa_leilao_fixa_auto_avaliar_polo_track_real():
 
     av = precificar(lote_polo, laudo_polo, mercado_polo, reforma_zero, frete_zero, empresa)
 
-    # Taxa Auto Avaliar é R$ 999 fixos, não percentual
-    assert av.taxas_leilao == 999
+    # HH-4: taxa 1.56% sobre preco_max (N=1 Fusion; era R$999 fixo antes)
+    # int(55941 * 0.0156) = 872
+    assert av.taxas_leilao == 872
     # Preço de giro: FIPE × f_km × 0.95 = 69400 × 1.0 × 0.95 = 65_930 (refactor
     # FIPE-only de 2026-05-08; antes era webmotors_mediana=68_000).
     assert av.preco_giro == 65_930
@@ -910,12 +911,15 @@ class TestTransferenciaInterestadual:
         av_local = precificar(lote_local, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
         av_inter = precificar(lote_interestadual, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
-        # Tudo idêntico exceto custo_op (interestadual +580 → preco_alvo -580 antes da
-        # divisão pela taxa de leilão). Em Uberlândia taxa_pct=0, taxa_fixa=999 →
-        # divisão por 1+0=1, então diferença bruta = 580.
-        assert av_local.preco_alvo - av_inter.preco_alvo == 580, (
+        # Tudo idêntico exceto custo_op (interestadual +580 → bruto -580).
+        # HH-4: taxa_pct=0.0156 → divisão por 1.0156, então diferença
+        # no lance = 580 / 1.0156 ≈ 571 (não mais 580 como na taxa fixa).
+        diff_alvo = av_local.preco_alvo - av_inter.preco_alvo
+        diff_max  = av_local.preco_max  - av_inter.preco_max
+        assert 560 < diff_alvo < 580, (
             f"local R${av_local.preco_alvo} vs interestadual R${av_inter.preco_alvo} — "
-            f"esperava diferença de R$ 580 (transferencia_interestadual)"
+            f"esperava ≈571 (580/1.0156), obtido {diff_alvo}"
         )
-        # preco_max idem — mesma estrutura algébrica
-        assert av_local.preco_max - av_inter.preco_max == 580
+        assert 560 < diff_max < 580, (
+            f"esperava ≈571 no preco_max, obtido {diff_max}"
+        )

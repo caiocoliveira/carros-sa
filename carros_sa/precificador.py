@@ -163,8 +163,12 @@ def precificar(
     )
 
     # 4. Custos fixos (exceto taxas, calculadas abaixo sobre o lance vencedor)
+    #    `custo_op_para_lote` soma o adicional de transferência interestadual
+    #    quando origem.uf != patio.uf (taxa DETRAN mudança de estado). Pra lotes
+    #    locais (mesma UF) e configs sem `custos_operacionais` decompostos,
+    #    devolve `custo_op_fixo` puro — compat total com YAML legacy.
     frete_incluso = frete.frete_estimado
-    custo_op = empresa.custo_op_fixo
+    custo_op = empresa.custo_op_para_lote(lote)
     taxa_leilao_pct = empresa.taxa_leilao_pct
     taxa_leilao_fixa = empresa.taxa_leilao_fixa
 

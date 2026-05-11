@@ -54,9 +54,18 @@ class CustosOperacionais(BaseModel):
     laudo_cautelar: int = 0        # laudo de pré-venda (ANFAVEA)
     combustivel: int = 0           # média por carro (ida/teste/entrega)
     outros: int = 0                # catch-all configurável por tenant
+    # Adicional cobrado pelo DETRAN quando o carro arrematado está registrado em
+    # outra UF e precisa ser transferido pro estado do pátio (taxa de mudança de
+    # estado, segundo emplacamento). Aplicado CONDICIONALMENTE em
+    # `EmpresaConfig.custo_op_para_lote()` quando `lote.origem_uf != patio.uf` —
+    # NÃO entra em `total` porque não é recorrente, depende da origem do lote.
+    transferencia_interestadual: int = 0
 
     @property
     def total(self) -> int:
+        # `transferencia_interestadual` deliberadamente FORA — soma só itens
+        # recorrentes por carro. O extra interestadual é somado por-lote via
+        # `EmpresaConfig.custo_op_para_lote()`.
         return (
             self.despachante
             + self.higienizacao
@@ -104,6 +113,29 @@ class EmpresaConfig(BaseModel):
             # Decomposto venceu — sobrescreve o int agregado pra refletir a soma
             object.__setattr__(self, "custo_op_fixo", self.custos_operacionais.total)
         return self
+
+    def custo_op_para_lote(self, lote) -> int:
+        """custo_op total considerando origem do lote.
+
+        `custo_op_fixo` cobre os itens recorrentes (despachante, higienização,
+        marketing, laudo, combustível). Quando o lote vem de outra UF, soma
+        `custos_operacionais.transferencia_interestadual` (taxa DETRAN de
+        mudança de estado, segundo emplacamento). Calibrado em N=1 com a
+        compra real Fusion SP→MG = R$ 580 (HH/2026-05-11).
+
+        Aceita qualquer objeto com `origem_uf` (LoteRaw, Lote SQLModel) —
+        duck-typed pra evitar dependência circular com `models`. Quando
+        `origem_uf` ausente ou string vazia, retorna o fixo (não penaliza
+        lotes mal-cadastrados; melhor sub-estimar 580 do que assumir
+        transferência fantasma).
+        """
+        base = self.custo_op_fixo
+        if self.custos_operacionais is None:
+            return base
+        origem_uf = (getattr(lote, "origem_uf", None) or "").upper()
+        if origem_uf and origem_uf != self.patio.uf.upper():
+            return base + self.custos_operacionais.transferencia_interestadual
+        return base
 
     def frete_para(self, distancia_km: int, categoria: CategoriaVeiculo) -> int:
         """Lookup na tabela de frete. Além do último range → retorna maior + 30% extra.

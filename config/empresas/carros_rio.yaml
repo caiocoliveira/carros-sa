@@ -60,9 +60,12 @@ taxa_leilao_fixa: 999
 # CALIBRAÇÃO PENDENTE — itens herdados da operação Uberlândia. Custos em RJ
 # tendem a ser maiores (despachante, marketing, combustível). Recalibrar com
 # notas fiscais reais quando houver ≥3 carros vendidos pelo pátio do Rio.
+# `transferencia_interestadual` herdado de Uberlândia (N=1 Fusion SP→MG, 2026-05-11).
+# DETRAN-RJ pode cobrar diferente; recalibrar com 1ª compra interestadual do pátio Rio.
 custos_operacionais:
   despachante: 380
   higienizacao: 450
   marketing_medio: 1500
   laudo_cautelar: 120
   combustivel: 73
+  transferencia_interestadual: 580

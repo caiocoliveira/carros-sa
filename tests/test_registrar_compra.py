@@ -278,8 +278,23 @@ def test_data_invalida_falha(db_tmp, csv_tmp):
     assert "data" in result.output.lower()
 
 
+def test_empresa_inexistente_falha_com_mensagem_util(db_tmp, csv_tmp):
+    """Empresa sem YAML → mensagem legível + exit 1 (não stacktrace crua)."""
+    result = runner.invoke(app, [
+        "registrar-compra",
+        "--empresa", "empresa_que_nao_existe",
+        "--marca", "Ford", "--modelo", "Ka", "--ano", "2020",
+        "--valor", "20000",
+        "--csv", str(csv_tmp),
+    ])
+    assert result.exit_code == 1
+    # Mensagem orienta o operador — sem traceback cru
+    assert "empresa_que_nao_existe" in result.output
+    assert "carros-sa empresas" in result.output
+
+
 # =============================================================================
-# 7. --help lista registrar-compra
+# 9. --help lista registrar-compra
 # =============================================================================
 
 def test_help_inclui_registrar_compra():

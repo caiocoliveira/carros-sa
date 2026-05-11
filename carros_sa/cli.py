@@ -743,7 +743,18 @@ def registrar_compra(
     from datetime import datetime as dt
 
     from carros_sa.db import get_session, init_db
+    from carros_sa.tenancy import carregar_empresa
     from carros_sa.tools.historico_import import HistoricoRow, _parse_data, importar_historico
+
+    # Valida empresa antes de qualquer escrita — falha rápido com mensagem útil.
+    try:
+        carregar_empresa(empresa)
+    except (FileNotFoundError, Exception) as exc:
+        console.print(
+            f"[red]Empresa '{empresa}' não encontrada: {exc}\n"
+            "Rode [bold]carros-sa empresas[/bold] pra ver as disponíveis.[/red]"
+        )
+        raise typer.Exit(1)
 
     ano_atual = dt.now().year
 

@@ -10,6 +10,35 @@ Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator
 
 Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
 
+### HH — Calibração de custos pós-compra real Fusion (2026-05-11) 🔄
+
+- **Branch (em curso):** `claude/analyze-recent-purchase-wgpkZ`
+- **Motivação:** Operador compartilhou a "Planilha de Compra" da compra mais recente — Fusion Titanium 2.0 GTDI 14/14 AWD via Auto Arremate. Comparativo orçado×realizado expôs **5 gaps independentes** entre o modelo de custos e a realidade operacional, todos visíveis numa única compra:
+  | Item | Realizado | Modelo (YAML Uberlândia) | Δ |
+  |---|---|---|---|
+  | Valor lote | R$ 55.500 | — | — |
+  | TX Auto Arremate | R$ 866,80 | `taxa_leilao_fixa: 999` (R$ fixos) | sobre +R$ 132 (1.56% do lote ≠ R$ 999 fixos) |
+  | Frete São Paulo→Uberlândia (~580 km, sedan) | R$ 1.200 | faixa `300-600` × sedan = R$ 1.400 | sobre +R$ 200 (conservador, OK) |
+  | 3 peças pra pintar (reforma) | R$ 1.200 | `EstimadorReforma` (sem lote no DB) | n/a (lote não foi triagado pelo pipeline) |
+  | Higienização e polimento | R$ 550 | `higienizacao: 450` | sub –R$ 100 (+22% desatualizado) |
+  | Transf. interestadual DETRAN | R$ 580 | **nada** — só `despachante: 380` (registro local) | **gap total** (1.04% do valor) |
+  | Total despesas | R$ 4.396,80 | ≈ R$ 4.149 | sub ≈ R$ 248 |
+- **Gaps em ordem de prioridade:**
+  1. **Transferência interestadual não modelada** (`origem_uf ≠ patio_uf` → custo extra de R$ 580 zerado no orçado) → **escopo deste PR**.
+  2. **Decompor CSV de Arrematado** — hoje `data/historico/uberlandia_arrematado.csv` agrega tudo em `custos_extras`. Pra calibrar diferenciado (taxa AA, frete, transferência, higienização) precisa quebrar em colunas separadas. Bloqueia #4 e #5.
+  3. **CLI `registrar-compra` on-the-fly** — `arrematado-import` é batch CSV; operador mantém planilha Excel paralela e "esquece" de sincronizar. Subcomando interativo (`carros-sa registrar-compra <lote_id> --preco N --taxa N --frete N --transf N --higi N --reforma N`) fecha o loop.
+  4. **Calibrar taxa Auto Arremate (fixa→variável)** — esta cobrança foi 1.56% do lote, não R$ 999. Precisa 3-5 notas adicionais pra triangular fórmula (piso + %? faixa por valor?). Depende de #2 (coluna `taxa_leilao_real` no CSV).
+  5. **Calibrar higienização (defasagem +22%)** — depende de #2 (coluna `higienizacao_real`). Sem dado decomposto, é chute.
+- **Entregue neste PR (#1 apenas):**
+  - Novo campo `transferencia_interestadual: int = 0` em `CustosOperacionais` (`carros_sa/tenancy.py`) — fica DE FORA do `total` (porque é condicional ao lote, não recorrente).
+  - Novo método `EmpresaConfig.custo_op_para_lote(lote)` que devolve `custo_op_fixo + (transferencia_interestadual se lote.origem_uf != patio.uf else 0)`.
+  - Precificador troca `empresa.custo_op_fixo` → `empresa.custo_op_para_lote(lote)` na linha 167.
+  - YAMLs `carros_uberlandia.yaml` e `carros_rio.yaml` ganham `transferencia_interestadual: 580` (calibrado em 1 compra real Fusion SP→MG; recalibrar com #2 quando tiver ≥5 transferências interestaduais no CSV).
+- **Follow-ups (não-bloqueantes):** #2, #3, #4, #5 acima. Não entram neste PR pra manter escopo isolado e testável.
+- **Limitações conhecidas:**
+  - Valor R$ 580 é N=1 (só o Fusion). Variação por UF de origem desconhecida (SP→MG pode ser diferente de RJ→MG, GO→MG). Aceitável como ponto de partida — `transferencia_interestadual` é uniforme por empresa, não tabela.
+  - Custo é aplicado por igual a TODA UF ≠ pátio. Não trata caso de UF adjacente com convênio (raro no Brasil; DETRAN é estadual).
+
 ### DD3 — Preserva `detalhe.laudo_pdf_url` em re-scrape de listagem + paridade total no short-circuit/retry (2026-05-10) ✅
 - **Branch:** `claude/great-turing-DYVvY`
 - **Motivação:** Operador pediu (3ª vez) garantia de que TODO carro na planilha tem laudo baixado, revisado E **link clicável** — e a causa de não estar acontecendo, "pra nunca mais acontecer". Diagnóstico contra DB do `state/db` em produção (236 PDFs, 187 lotes ativos): `auditar_laudos --strict` reportava **124 incompletos**, dos quais **95 com motivo `url_invalida_ou_ausente`** — PDF baixado, cache ≥0.6, mas `raw_json.detalhe.laudo_pdf_url=None`. Coluna "Ver laudo" da planilha sumia silenciosamente em 51% dos lotes ativos.

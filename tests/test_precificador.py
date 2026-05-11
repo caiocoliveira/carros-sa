@@ -197,25 +197,26 @@ def test_gol_2015_em_uberlandia_sem_frete(
 def test_gol_2015_em_goiania_com_frete(
     gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
 ):
-    """Após calibração: frete R$ 1400 derruba preco_alvo em ~1400 (taxa pct = 0)."""
+    """Frete R$ 1400 + transferência interestadual R$ 580 derrubam preco_alvo (taxa pct = 0)."""
     empresa = carregar_empresa("carros_uberlandia")
     frete = _frete("Goiânia", "GO", "Uberlândia", "MG", 400, 1_400)
 
     av = precificar(gol_2015_lote, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
 
-    # Comparado com Uberlândia (~7257), preco_alvo cai em exatamente R$ 1400 (frete)
-    # pois taxa_pct=0 → não há divisor amplificando o desconto
+    # Lote vem de GO (origem_uf="GO") no pátio MG → custo_op_para_lote soma
+    # transferencia_interestadual=580 sobre o agregado de 2523. Workstream HH (2026-05-11).
     # preco_giro = FIPE × 0.95 = 26600 (refactor FIPE-only)
-    # bruto_alvo = 26600 - 3500 - 1400 - 2523 - 12321 = 6856
-    # preco_alvo = (6856 - 999) / 1 = 5857
+    # bruto_alvo = 26600 - 3500 - 1400 - 3103 - 12321 = 6276
+    # preco_alvo = (6276 - 999) / 1 = 5277
     assert av.frete_incluso == 1_400
-    assert 5_500 < av.preco_alvo < 6_200
+    assert 4_900 < av.preco_alvo < 5_700
 
-    # Lance atual (R$ 15k) ficou JUST abaixo do preco_max — pré-refactor
-    # FIPE-only (preco_giro 25k) o lote era inviável; com FIPE 28k × 0.95 =
-    # preco_giro 26600, o teto subiu pra 15518 e cabe lance 15k por margem mínima.
-    # preco_max = (26600 - 3500 - 1400 - 2523 - 2660 - 999) / 1 = 15518
-    assert gol_2015_lote.lance_atual < av.preco_max
+    # preco_max = (26600 - 3500 - 1400 - 3103 - 2660 - 999) / 1 = 14938
+    # Lance atual R$ 15k está R$ 62 ACIMA do preco_max → lote inviável após HH.
+    # Antes do workstream HH (sem transferência), preco_max era 15518 e cabia.
+    # Operacionalmente correto: lote vindo de GO custa mais R$ 580 que o orçamento
+    # antigo permitia, então 15k não cabe mais.
+    assert gol_2015_lote.lance_atual > av.preco_max
 
 
 # =============================================================================
@@ -275,10 +276,18 @@ def test_multi_empresa_mesmo_lote_rankings_divergem(
     # SP é mais exigente: margem base 0.30 vs 0.25 → margem aplicada maior
     # (com brando, fatores são similares e a base é o que diferencia).
     assert av_sp.margem_aplicada > av_uber.margem_aplicada
-    # SP oferece MENOS pelo mesmo lote: minima_absoluta 0.18 vs 0.10 + frete maior
-    # + taxa percentual sobre lance, todos puxam preco_max e preco_alvo pra baixo.
+    # SP oferece MENOS pelo mesmo lote no preco_max: minima_absoluta 0.18 vs 0.10
+    # + frete maior + taxa percentual sobre lance, todos puxam o teto pra baixo.
     assert av_sp.preco_max < av_uber.preco_max
-    assert av_sp.preco_alvo < av_uber.preco_alvo
+    # Nota: preco_alvo deixou de ser eixo monotônico de "exigência" após o workstream HH
+    # (2026-05-11) — empresa_fake_sp usa YAML legacy sem `custos_operacionais` decomposto,
+    # então não aplica transferencia_interestadual (custo_op_para_lote devolve fixo).
+    # Em Uberlândia (decomposto + transferencia=580), lote vindo de GO ganha R$ 580
+    # extra no custo_op → preco_alvo cai. Resultado: Uber preco_alvo (~9.9k) fica
+    # ABAIXO do SP (~10k) mesmo com Uber sendo "menos exigente" pelos demais eixos.
+    # `preco_max` e `margem_aplicada` continuam refletindo o ranking de exigência
+    # corretamente porque a transferência é diluída no teto (mais lance permitido =
+    # mesma margem mínima absoluta). Mantemos assertivas sobre esses dois eixos.
     # Consistência do empresa_id
     assert av_uber.empresa_id == "carros_uberlandia"
     assert av_sp.empresa_id == "empresa_fake_sp"
@@ -798,3 +807,115 @@ def test_lance_maximo_nunca_excede_fipe_em_uberlandia_sem_dano(
     assert av.preco_max < int(fipe * 1.00), (
         f"{label}: preco_max R${av.preco_max} >= FIPE R${fipe} — refactor FIPE-only deve bloquear"
     )
+
+
+# =============================================================================
+# Transferência interestadual — workstream HH (2026-05-11)
+# =============================================================================
+# Calibração derivada da compra real Fusion Titanium 2.0 GTDI 14/14 AWD: lote
+# arrematado em São Paulo, pátio em Uberlândia/MG. DETRAN-MG cobrou R$ 580 de
+# segundo emplacamento (mudança de estado) — custo não modelado antes deste
+# workstream. Aplicado por-lote em `EmpresaConfig.custo_op_para_lote` quando
+# `lote.origem_uf != patio.uf`.
+
+class TestTransferenciaInterestadual:
+    """Cobertura do custo extra de DETRAN quando origem.uf != patio.uf."""
+
+    def test_total_recorrente_nao_inclui_transferencia(self):
+        """`CustosOperacionais.total` continua somando só itens recorrentes.
+
+        Transferência é condicional ao lote; entra via `custo_op_para_lote`,
+        não no agregado da empresa. Sem essa separação, o `custo_op_fixo`
+        passaria a contar o extra DETRAN como recorrente — superestimando
+        capital em 100% dos lotes locais (origem.uf == patio.uf).
+        """
+        from carros_sa.tenancy import CustosOperacionais
+
+        c = CustosOperacionais(
+            despachante=380, higienizacao=450, marketing_medio=1500,
+            laudo_cautelar=120, combustivel=73,
+            transferencia_interestadual=580,
+        )
+        assert c.total == 2_523  # 380+450+1500+120+73, SEM os 580
+
+    def test_custo_op_para_lote_acrescenta_em_origem_diferente_uf(self, gol_2015_lote):
+        """Lote vindo de GO no pátio MG (Uberlândia) ganha R$ 580 extra.
+
+        Cenário concreto: replica a compra Fusion SP→MG (mesma estrutura).
+        gol_2015_lote tem origem_uf="GO", patio é Uberlândia/MG.
+        """
+        empresa = carregar_empresa("carros_uberlandia")
+        custo = empresa.custo_op_para_lote(gol_2015_lote)
+        # custo_op_fixo = 2_523 (recorrentes) + 580 (transferência) = 3_103
+        assert custo == 2_523 + 580 == 3_103
+
+    def test_custo_op_para_lote_nao_acrescenta_em_mesma_uf(self, gol_2015_lote):
+        """Lote MG no pátio MG não soma transferência — pátio local."""
+        empresa = carregar_empresa("carros_uberlandia")
+        lote_mg = gol_2015_lote.model_copy(update={"origem_uf": "MG"})
+        assert empresa.custo_op_para_lote(lote_mg) == 2_523
+
+    def test_custo_op_para_lote_origem_uf_none_devolve_fixo(self, gol_2015_lote):
+        """Lote com origem_uf=None (cadastro incompleto) não é penalizado.
+
+        Defensivo: melhor sub-estimar do que cobrar transferência fantasma
+        em lote mal-cadastrado. Operador vê o lote passar pelo modelo
+        normal e decide manualmente se vai transferir.
+        """
+        empresa = carregar_empresa("carros_uberlandia")
+        lote_sem_uf = gol_2015_lote.model_copy(update={"origem_uf": None})
+        assert empresa.custo_op_para_lote(lote_sem_uf) == 2_523
+
+        lote_uf_vazio = gol_2015_lote.model_copy(update={"origem_uf": ""})
+        assert empresa.custo_op_para_lote(lote_uf_vazio) == 2_523
+
+    def test_yaml_legado_sem_custos_operacionais_funciona(self, gol_2015_lote):
+        """empresa_fake_sp usa formato antigo (`custo_op_fixo` int puro).
+
+        Sem `custos_operacionais` decomposto, `custo_op_para_lote` devolve
+        sempre o int legado — independente da origem do lote. Retrocompat
+        total: configs antigas não exigem migração pra continuar rodando.
+        """
+        empresa_sp = carregar_empresa("empresa_fake_sp")
+        assert empresa_sp.custos_operacionais is None
+        # Mesmo lote com origem fora de SP — sem campo decomposto, retorna fixo
+        assert empresa_sp.custo_op_para_lote(gol_2015_lote) == empresa_sp.custo_op_fixo
+
+    def test_precificador_aplica_transferencia_no_capital_alvo(
+        self, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma
+    ):
+        """End-to-end: 2 lotes idênticos exceto pela UF de origem.
+
+        Lote MG (local) vs lote SP (interestadual). Capital do segundo é
+        R$ 580 maior → preço-alvo do segundo é R$ 580 menor (espaço pra
+        margem encolhe). Garante que o custo extra é propagado pela
+        equação do precificador, não só pelo método de tenancy.
+        """
+        empresa = carregar_empresa("carros_uberlandia")
+        frete = _frete("Uberlândia", "MG", "Uberlândia", "MG", 0, 0)
+
+        lote_local = LoteRaw(
+            lote_id="AA-MG-1", leilao="auto_arremate",
+            url="https://autoarremate.com.br/lotes/MG-1",
+            marca="Volkswagen", modelo="Gol", ano=2015, km=95_000,
+            lance_atual=15_000,
+            fim_em=datetime(2026, 5, 1, 14, 0),
+            fotos_urls=[], laudo_texto="",
+            origem_cidade="Uberlândia", origem_uf="MG",
+        )
+        lote_interestadual = lote_local.model_copy(update={
+            "lote_id": "AA-SP-1", "origem_cidade": "São Paulo", "origem_uf": "SP",
+        })
+
+        av_local = precificar(lote_local, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+        av_inter = precificar(lote_interestadual, gol_2015_laudo, gol_2015_mercado, gol_2015_reforma, frete, empresa)
+
+        # Tudo idêntico exceto custo_op (interestadual +580 → preco_alvo -580 antes da
+        # divisão pela taxa de leilão). Em Uberlândia taxa_pct=0, taxa_fixa=999 →
+        # divisão por 1+0=1, então diferença bruta = 580.
+        assert av_local.preco_alvo - av_inter.preco_alvo == 580, (
+            f"local R${av_local.preco_alvo} vs interestadual R${av_inter.preco_alvo} — "
+            f"esperava diferença de R$ 580 (transferencia_interestadual)"
+        )
+        # preco_max idem — mesma estrutura algébrica
+        assert av_local.preco_max - av_inter.preco_max == 580

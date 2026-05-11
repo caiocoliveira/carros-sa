@@ -55,9 +55,15 @@ taxa_leilao_fixa: 999
 # Custos operacionais não-veículo decompostos — calibrados com a operação real
 # do Polo Track 2024 (despachante R$380, polimento R$450, marketing IG/FB/portais
 # R$1500 médio, laudo cautelar pré-venda R$120, combustível R$73). Total = R$2523.
+# `transferencia_interestadual` é CONDICIONAL ao lote (origem.uf != patio.uf) e
+# NÃO entra na soma recorrente — somado por-lote em `custo_op_para_lote`. Valor
+# calibrado em N=1 com a compra real Fusion 2014 SP→MG (DETRAN-MG mudança de
+# estado, segundo emplacamento). Recalibrar quando tiver ≥5 transferências
+# interestaduais decompostas no CSV (ver follow-up #2 do workstream HH).
 custos_operacionais:
   despachante: 380
   higienizacao: 450
   marketing_medio: 1500
   laudo_cautelar: 120
   combustivel: 73
+  transferencia_interestadual: 580

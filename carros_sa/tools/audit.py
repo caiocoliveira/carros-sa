@@ -92,9 +92,28 @@ CHECKS: Dict[str, Validator] = {
         else None
     ),
     "Cidade": lambda v, r: None,  # "—" é legítimo (lote sem origem_cidade declarada)
+    # Loja é string opcional ("FILIAL · GRUPO" ou "—"). Cards atípicos / coletas
+    # antigas saem com "—" — ambos legítimos. Flaga só string vazia ou whitespace,
+    # que indicaria bug no `extrair_loja_do_card`.
+    "Loja": lambda v, r: (
+        "Loja string vazia — extrair_loja_do_card devolveu valor sem conteúdo"
+        if isinstance(v, str) and v != "—" and not v.strip()
+        else None
+    ),
     "Fim do Leilão": lambda v, r: None,  # pode ser "—" para lotes showroom
     "KM": lambda v, r: (
         "KM absurdo (>800k ou <0)" if v is not None and (v > 800_000 or v < 0) else None
+    ),
+    # KM/ano é km dividido por idade (floor 1). Aceita "—" (km ou ano ausentes).
+    # >100k/ano indica bug de parsing (carro 2024 com 200.000 km vira 200k/ano);
+    # operador real raramente passa de 80k/ano. Negativo é impossível por construção.
+    "KM/ano": lambda v, r: (
+        None if not isinstance(v, (int, float))
+        else (
+            "KM/ano absurdo (>100k ou <0) — provável bug de parsing de KM ou Ano"
+            if v > 100_000 or v < 0
+            else None
+        )
     ),
     "Lance Atual (R$)": lambda v, r: (
         "Lance atual negativo" if v is not None and v < 0 else None
@@ -214,14 +233,6 @@ CHECKS: Dict[str, Validator] = {
         and r.get("laudo_analisado")
         else None
     ),
-    # Coluna informativa. Valores esperados: texto com emoji prefixo (🟢/🟡/🔴)
-    # ou "—" quando config/tese.yaml não carrega ou laudo pendente. String vazia
-    # seria bug (calcular_tese deveria sempre produzir algo).
-    "Tese": lambda v, r: (
-        "Tese string vazia — calcular_tese ou fallback '—' não produziu valor"
-        if v is None or (isinstance(v, str) and not v.strip())
-        else None
-    ),
     "Anúncio": lambda v, r: None,  # pode ser "—" ou fórmula HYPERLINK; ambos aceitáveis
     "Laudo": lambda v, r: None,    # "—" (sem URL ou decoy filtrado) ou HYPERLINK — ambos aceitáveis
 }
@@ -240,7 +251,7 @@ CHECKS: Dict[str, Validator] = {
 #
 # Adicionada em 2026-05-09: paridade pra `laudo_analisado=False`
 # (confidence < 0.6 ou laudo ausente). Display vai pra "⚠ LAUDO NÃO
-# CAPTURADO" e oculta Lance Máximo/Lucro/ROI/Reforma/Tese — audit espelha.
+# CAPTURADO" e oculta Lance Máximo/Lucro/ROI/Reforma — audit espelha.
 # Antes do fix: lote com laudo fallback (confidence 0.5/0.55) que tivesse
 # `severidade=ESTRUTURAL` mas `reforma_estimada=0` disparava "Reforma R$ 0
 # com severidade estrutural" — operador olhava planilha e via "—" na
@@ -252,8 +263,10 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Modelo": lambda r: r["modelo_raw"],
     "Ano": lambda r: r["ano"],
     "Cidade": lambda r: r["cidade"],
+    "Loja": lambda r: r.get("loja") or "—",
     "Fim do Leilão": lambda r: r["fim_em"],
     "KM": lambda r: r["km"],
+    "KM/ano": lambda r: r["km_por_ano"] if r.get("km_por_ano") is not None else "—",
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"] if r.get("laudo_analisado") else "—",
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
@@ -266,9 +279,6 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     ),
     "Reforma (R$)": lambda r: r["reforma_estimada"] if r.get("laudo_analisado") else "—",
     "Racional Reforma": lambda r: r.get("reforma_racional") or "—",
-    "Tese": lambda r: (
-        r.get("tese", "—") if r["viavel"] and r.get("laudo_analisado") else "—"
-    ),
     "Anúncio": lambda r: r["url"],
     "Laudo": lambda r: r.get("laudo_url") or "—",
 }
@@ -349,7 +359,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         # SheetsExporter computa via `verificar_laudo_completo` — laudo
         # extraído com confidence ≥ LAUDO_CONFIDENCE_MIN (PDF real, não
         # fallback `_laudo_sem_pdf`). Quando False, display oculta Lance
-        # Máximo / Lucro / ROI / Reforma / Tese e mostra "⚠ LAUDO NÃO
+        # Máximo / Lucro / ROI / Reforma e mostra "⚠ LAUDO NÃO
         # CAPTURADO". Audit espelha pra evitar falsos alarmes em colunas
         # que o operador NÃO vê. Lotes sem laudo válido têm
         # `reforma_estimada=0` por construção (estimador não rodou), então
@@ -359,6 +369,9 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         laudo_analisado = laudo_status.laudo_cache_ok
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
+
+        from carros_sa.tools.sheets import _km_por_ano
+        km_por_ano = _km_por_ano(lote.km, lote.ano, agora.year)
 
         rows.append({
             "lote_id": av.lote_id,
@@ -370,6 +383,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "modelo_raw": lote.modelo,
             "fim_em": fim_em_str,
             "km": lote.km,
+            "km_por_ano": km_por_ano,
             "lance_atual": lote.lance_atual or 0,
             "preco_alvo": av.preco_alvo,
             "preco_max": av.preco_max,
@@ -510,7 +524,7 @@ def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
     Usa `<` estrito no `preco_max` pra alinhar com o teste de viabilidade
     (`viavel = preco_max > lance_atual` no `_build_rows`). Quando lance toca
     o teto exatamente (`lance == preco_max`), o lote é INVIÁVEL — display
-    mostra "✗ Caro demais" e oculta ROI/Lucro/Tese. Sem `<` estrito, audit
+    mostra "✗ Caro demais" e oculta ROI/Lucro. Sem `<` estrito, audit
     reportava "zona apertada" enquanto a planilha mostrava o lote como caro
     demais — mensagens contraditórias na mesma linha.
     """

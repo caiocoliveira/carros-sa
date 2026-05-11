@@ -7,6 +7,15 @@ patio:
 # Margem calibrada com a operação real: Caio busca ~25% sobre venda (≈33% sobre
 # custo), validado pelo histórico do Polo Track 2024 (lucro líquido R$ 10.964
 # sobre R$ 52.200 investidos = 21% após desconto VJCAR; 28% bruto pré-desconto).
+#
+# VJCAR = parceiro operacional que cobra 30% do LUCRO LÍQUIDO da operação
+# (venda - capital - reforma - frete - taxas - custo_op). A `margem.base = 0.25`
+# atual já EMBUTE esse desconto na calibração (target = ~25% sobre venda LÍQUIDO
+# da operação dele). NÃO modelado explicitamente no precificador hoje — se um
+# dia a parceria com VJCAR mudar (cut diferente, sair, dividir com outro), o
+# caminho é adicionar `comissoes.vjcar_pct: 0.30` aqui + ler em precificador.py
+# antes de aplicar margem. Por enquanto, manter como FACT registrado e
+# recalibrar `margem.base` quando o cenário mudar.
 margem:
   base: 0.25                    # 25% sobre o preço de giro (venda âncora)
   minima_absoluta: 0.10         # nunca abaixo disso

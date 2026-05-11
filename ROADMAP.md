@@ -42,7 +42,16 @@ Dependências externas conhecidas: Webmotors live (workstream G — bloqueia rea
   - Linha do Fusion (única adicionada em PR #83) migrada: R$ 4.397 agregado → 867 + 1200 + 580 + 550 + 0 + 1200 decomposto.
   - 8 testes novos em `TestFormatoDecomposto` cobrindo: detecção de formato (parcial/legacy/vazio), `total_extras` (soma vs fallback vs None), isolamento de reforma decomposto vs legacy, parse_csv populando buckets, import end-to-end com csv puro decomposto e csv misto (legacy + decomposto coexistem). 536/536 verde.
   - **Limitação irrecuperável:** linhas anteriores a 2026-05-11 (95 do CSV) continuam com `custos_extras` agregado poluído alimentando `gastos_reforma_real`. Não dá pra desagregar retroativamente. Solução: quando HH-2 tiver ≥5 linhas decompostas, calibrador filtra `extras_decompostos=True` pra baseline limpo e usa legacy só como prior.
-- **Follow-ups (não-bloqueantes):** #3, #4, #5 acima.
+- **HH-3 entregue (2026-05-11):** ✅ Subcomando CLI `registrar-compra` interativo — fecha o loop de entrada de compra real.
+  - Novo subcomando `carros-sa registrar-compra` em [`carros_sa/cli.py`](carros_sa/cli.py): aceita todas as flags de uma vez OU prompts interativos quando campo obrigatório for omitido (via `typer.Option(prompt=...)`).
+  - Flags obrigatórias (com prompt se ausentes): `--empresa`, `--marca`, `--modelo`, `--ano`, `--valor`.
+  - Flags opcionais: `--km`, `--data`, `--taxa`, `--frete`, `--transf`, `--higi`, `--outros`, `--reforma`, `--obs`, `--valor-venda`, `--data-venda`, `--csv` (override de caminho).
+  - Escreve em **duas etapas atômicas**: (a) upsert no CSV via `_upsert_csv_row` (append ou update da linha existente); (b) chamada a `importar_historico` pra sync DB (Lote sintético + Arrematado). Atomicidade: CSV escreve primeiro; se DB falhar, próximo `arrematado-import` corrige.
+  - **Idempotente** — mesma chave `(marca, modelo, ano, valor_compra)` atualiza ao invés de duplicar (tanto no CSV quanto no DB, espelhando lógica de `importar_historico`).
+  - **Sempre decomposto (HH-2)**: `custos_extras` legacy fica vazio em todo registro novo; `taxa/frete/transf/higi/outros/reforma` vão para as 6 colunas separadas — calibrador recebe dado limpo desde o 1º registro.
+  - 9 testes em [`tests/test_registrar_compra.py`](tests/test_registrar_compra.py): todas as flags, interativo (prompt), idempotência, isolamento de reforma no Arrematado, preservação de linhas existentes, validação de ano/valor/data.
+  - **Limitações conhecidas:** `--csv` default aponta pra `data/historico/<empresa>_arrematado.csv` relativo ao CWD; operador precisa rodar do root do repo (ou passar `--csv` explícito). Sem lock de arquivo — não suporta escrita concorrente (ok pra CLI interativo single-user).
+- **Follow-ups (não-bloqueantes):** #4, #5 acima (calibração taxa AA e higienização — agora desbloqueados por HH-2 + HH-3 acumulando linhas decompostas).
 - **Limitações conhecidas:**
   - Valor R$ 580 é N=1 (só o Fusion). Variação por UF de origem desconhecida (SP→MG pode ser diferente de RJ→MG, GO→MG). Aceitável como ponto de partida — `transferencia_interestadual` é uniforme por empresa, não tabela.
   - Custo é aplicado por igual a TODA UF ≠ pátio. Não trata caso de UF adjacente com convênio (raro no Brasil; DETRAN é estadual).

@@ -655,5 +655,204 @@ def _auditar_apos_triagem(empresa_id: str) -> int:
     return len(rel.incompletos)
 
 
+# ---------------------------------------------------------------------------
+# registrar-compra — entrada interativa de compra real no CSV + DB
+# ---------------------------------------------------------------------------
+
+# Schema canônico do CSV de histórico (HH-2). Manter em sync com
+# `data/historico/<empresa>_arrematado.csv` — qualquer coluna nova em HH-N+
+# precisa ser adicionada aqui também.
+_HISTORICO_CSV_HEADER = [
+    "marca", "modelo", "ano", "km", "valor_compra", "data_compra",
+    "custos_extras", "valor_venda", "data_venda",
+    "taxa_leilao_real", "frete_real", "transferencia_real",
+    "higienizacao_real", "outros_extras_real", "gastos_reforma_real",
+    "observacoes",
+]
+
+
+def _upsert_csv_row(csv_path: Path, nova_linha: dict) -> bool:
+    """Atualiza ou append a `nova_linha` no CSV de histórico.
+
+    Chave de idempotência: (marca, modelo, ano, valor_compra) — mesma do DB.
+
+    Retorna True se atualizou linha existente, False se fez append.
+    Garante que o CSV terá EXATAMENTE as colunas de `_HISTORICO_CSV_HEADER`
+    (preenche vazio nos campos ausentes de linhas legacy).
+    """
+    import csv as csv_module
+
+    atualizado = False
+    rows: list[dict] = []
+
+    if csv_path.exists():
+        with csv_path.open(newline="", encoding="utf-8") as fh:
+            reader = csv_module.DictReader(fh)
+            for row in reader:
+                if (
+                    row.get("marca", "").strip() == nova_linha["marca"].strip()
+                    and row.get("modelo", "").strip() == nova_linha["modelo"].strip()
+                    and row.get("ano", "").strip() == nova_linha["ano"]
+                    and row.get("valor_compra", "").strip() == nova_linha["valor_compra"]
+                ):
+                    rows.append(nova_linha)
+                    atualizado = True
+                else:
+                    rows.append(dict(row))
+
+    if not atualizado:
+        rows.append(nova_linha)
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        import csv as csv_module  # noqa: F811 — re-import inside function is fine
+        writer = csv_module.DictWriter(fh, fieldnames=_HISTORICO_CSV_HEADER)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in _HISTORICO_CSV_HEADER})
+
+    return atualizado
+
+
+@app.command("registrar-compra")
+def registrar_compra(
+    empresa: str = typer.Option(..., "--empresa", prompt="Empresa (ex: carros_uberlandia)", help="ID da empresa"),
+    marca: str = typer.Option(..., "--marca", prompt="Marca (ex: Ford)", help="Marca do veículo"),
+    modelo: str = typer.Option(..., "--modelo", prompt="Modelo (ex: Fusion Titanium 2.0 AWD)", help="Modelo do veículo"),
+    ano: int = typer.Option(..., "--ano", prompt="Ano", help="Ano do veículo"),
+    valor: int = typer.Option(..., "--valor", prompt="Valor de compra (R$)", help="Valor pago no leilão"),
+    km: Optional[int] = typer.Option(None, "--km", help="Quilometragem"),
+    data: Optional[str] = typer.Option(None, "--data", help="Data de compra (YYYY-MM-DD ou DD/MM/YYYY)"),
+    taxa: Optional[int] = typer.Option(None, "--taxa", help="Taxa do leiloeiro (R$)"),
+    frete: Optional[int] = typer.Option(None, "--frete", help="Frete (R$)"),
+    transf: Optional[int] = typer.Option(None, "--transf", help="Transferência interestadual DETRAN (R$)"),
+    higi: Optional[int] = typer.Option(None, "--higi", help="Higienização/polimento (R$)"),
+    outros: Optional[int] = typer.Option(None, "--outros", help="Outros extras (R$)"),
+    reforma: Optional[int] = typer.Option(None, "--reforma", help="Reforma/peças (R$)"),
+    obs: str = typer.Option("", "--obs", help="Observações livres"),
+    valor_venda: Optional[int] = typer.Option(None, "--valor-venda", help="Valor de venda (se já vendido)"),
+    data_venda: Optional[str] = typer.Option(None, "--data-venda", help="Data de venda (YYYY-MM-DD ou DD/MM/YYYY)"),
+    csv_override: Optional[Path] = typer.Option(None, "--csv", help="Override do caminho do CSV (default: data/historico/<empresa>_arrematado.csv)"),
+) -> None:
+    """Registra uma compra real no CSV de histórico e no banco.
+
+    Aceita flags ou prompts interativos quando campo obrigatório for omitido.
+    Idempotente: re-rodar com mesmo (marca, modelo, ano, valor) atualiza em vez de duplicar.
+    Escreve no formato decomposto (HH-2) — taxa, frete, transf, higi, outros, reforma separados.
+    """
+    from datetime import datetime as dt
+
+    from carros_sa.db import get_session, init_db
+    from carros_sa.tools.historico_import import HistoricoRow, _parse_data, importar_historico
+
+    ano_atual = dt.now().year
+
+    if valor <= 0:
+        console.print("[red]Erro: valor de compra deve ser maior que zero[/red]")
+        raise typer.Exit(1)
+
+    if not (1980 <= ano <= ano_atual + 1):
+        console.print(f"[red]Erro: ano {ano} fora do intervalo [1980, {ano_atual + 1}][/red]")
+        raise typer.Exit(1)
+
+    try:
+        data_compra = _parse_data(data)
+    except ValueError as exc:
+        console.print(f"[red]Erro na data de compra: {exc}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        dt_venda = _parse_data(data_venda)
+    except ValueError as exc:
+        console.print(f"[red]Erro na data de venda: {exc}[/red]")
+        raise typer.Exit(1)
+
+    csv_path = csv_override or (Path("data/historico") / f"{empresa}_arrematado.csv")
+
+    nova_linha = {
+        "marca": marca,
+        "modelo": modelo,
+        "ano": str(ano),
+        "km": str(km) if km is not None else "",
+        "valor_compra": str(valor),
+        "data_compra": data_compra.strftime("%Y-%m-%d") if data_compra else "",
+        "custos_extras": "",  # sempre decomposto em registrar-compra
+        "valor_venda": str(valor_venda) if valor_venda is not None else "",
+        "data_venda": dt_venda.strftime("%Y-%m-%d") if dt_venda else "",
+        "taxa_leilao_real": str(taxa) if taxa is not None else "",
+        "frete_real": str(frete) if frete is not None else "",
+        "transferencia_real": str(transf) if transf is not None else "",
+        "higienizacao_real": str(higi) if higi is not None else "",
+        "outros_extras_real": str(outros) if outros is not None else "",
+        "gastos_reforma_real": str(reforma) if reforma is not None else "",
+        "observacoes": obs,
+    }
+
+    atualizado_csv = _upsert_csv_row(csv_path, nova_linha)
+
+    row_obj = HistoricoRow(
+        marca=marca,
+        modelo=modelo,
+        ano=ano,
+        km=km,
+        valor_compra=valor,
+        data_compra=data_compra,
+        taxa_leilao_real=taxa,
+        frete_real=frete,
+        transferencia_real=transf,
+        higienizacao_real=higi,
+        outros_extras_real=outros,
+        gastos_reforma_real=reforma,
+        valor_venda=valor_venda,
+        data_venda=dt_venda,
+        observacoes=obs,
+    )
+
+    init_db()
+    with get_session() as session:
+        result = importar_historico([row_obj], empresa, session)
+
+    acao = "atualizado" if (atualizado_csv or result.atualizados > 0) else "criado"
+
+    tbl = Table(title=f"Registro {acao} — {empresa}")
+    tbl.add_column("Campo")
+    tbl.add_column("Valor")
+    tbl.add_row("Veículo", f"{marca} {modelo} {ano}")
+    tbl.add_row("Valor compra", f"R$ {valor:,}")
+    if data_compra:
+        tbl.add_row("Data compra", data_compra.strftime("%d/%m/%Y"))
+    if km is not None:
+        tbl.add_row("KM", f"{km:,}")
+    custos_desc = " | ".join(
+        f"{label}: R$ {val:,}"
+        for label, val in [
+            ("Taxa", taxa), ("Frete", frete), ("Transf", transf),
+            ("Higi", higi), ("Outros", outros), ("Reforma", reforma),
+        ]
+        if val is not None
+    )
+    if custos_desc:
+        tbl.add_row("Custos extras", custos_desc)
+    if valor_venda is not None:
+        tbl.add_row("Valor venda", f"R$ {valor_venda:,}")
+    if obs:
+        tbl.add_row("Obs", obs)
+    console.print(tbl)
+
+    console.print(f"\n[green]✓ CSV:[/green] {csv_path}")
+    if result.erros:
+        console.print(f"[yellow]⚠ Aviso DB: {result.erros[0][1]}[/yellow]")
+    else:
+        console.print("[green]✓ DB sincronizado[/green]")
+
+    console.print(
+        "\n[dim]Próximos passos:[/dim]\n"
+        "  • Rode [bold]carros-sa triagem[/bold] na próxima janela pra atualizar a planilha\n"
+        f"  • Quando vender: [bold]carros-sa registrar-compra --empresa {empresa} "
+        f"--marca {marca!r} --modelo {modelo!r} --ano {ano} --valor {valor} "
+        "--valor-venda N --data-venda YYYY-MM-DD[/bold]"
+    )
+
+
 if __name__ == "__main__":
     app()

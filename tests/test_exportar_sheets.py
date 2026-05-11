@@ -20,6 +20,7 @@ from carros_sa.tools.sheets import (
     SheetsExporter,
     _col_letter,
     _km_indicator,
+    _km_por_ano,
     _lucro_absoluto_efetivo,
     _lucro_absoluto_no_alvo,
     _score_roi_efetivo,
@@ -622,11 +623,11 @@ class TestSheetsExporterQuery:
         # rows[0]=banner, rows[1]=header, rows[2]=primeiro lote
         assert "Viável" in rows[2][idx_situacao]
 
-    def test_exportar_inviavel_oculta_lucro_roi_tese(self):
-        """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro,
-        ROI anualizado nem Tese — esses números pressupõem comprar pelo preço-alvo
-        (que é menor que o lance atual nesse caso, cenário fantasioso). Mantemos
-        Lance Máximo + FIPE + Reforma pra o operador entender o descarte.
+    def test_exportar_inviavel_oculta_lucro_e_roi(self):
+        """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro nem
+        ROI alvo — esses números pressupõem comprar pelo preço-alvo (que é menor
+        que o lance atual nesse caso, cenário fantasioso). Mantemos Lance Máximo
+        + FIPE + Reforma pra o operador entender o descarte.
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -658,7 +659,6 @@ class TestSheetsExporterQuery:
         # Numéricos especulativos suprimidos
         assert row[HEADER.index("Lucro (R$)")] == "—"
         assert row[HEADER.index("ROI alvo (%)")] == "—"
-        assert row[HEADER.index("Tese")] == "—"
         # Mas contexto pra triagem manual continua visível
         assert row[HEADER.index("Lance Máximo (R$)")] == 30_000
         assert row[HEADER.index("Reforma (R$)")] == 3_000
@@ -1029,6 +1029,133 @@ class TestKmIndicator:
         assert _km_indicator(-1, 2020, 2026) is None
 
 
+class TestKmPorAno:
+    """Helper canônico que `_km_indicator` usa internamente — agora também
+    exibido como coluna 'KM/ano' do display.
+    """
+
+    def test_valor_arredondado(self):
+        # 80k em carro 2020, ano_atual=2026 → idade=6 → 13.333,33 → 13_333
+        assert _km_por_ano(80_000, 2020, 2026) == 13_333
+
+    def test_idade_floor_1_no_ano_corrente(self):
+        # idade=0 viraria divisão por zero; floor=1 → 30k/ano
+        assert _km_por_ano(30_000, 2026, 2026) == 30_000
+
+    def test_carro_futuro_tratado_como_idade_1(self):
+        assert _km_por_ano(15_000, 2027, 2026) == 15_000
+
+    def test_km_none_devolve_none(self):
+        assert _km_por_ano(None, 2020, 2026) is None
+
+    def test_ano_none_devolve_none(self):
+        assert _km_por_ano(40_000, None, 2026) is None
+
+    def test_km_negativo_devolve_none(self):
+        assert _km_por_ano(-1, 2020, 2026) is None
+
+
+class TestSheetsExporterColunaLoja:
+    """Coluna 'Loja' lê `lote.raw_json['loja']` populado pelo
+    `extrair_loja_do_card` no scraper. '—' quando ausente.
+    """
+
+    def test_loja_populada_aparece_na_celula(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            lote = _lote("L001")
+            lote.raw_json = {"loja": "AUTO SHOP UDI · GRUPO ABC"}
+            session.add(lote)
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        with patch("gspread.service_account", return_value=mock_gc):
+            with Session(engine) as session:
+                _exporter().exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        assert rows[2][HEADER.index("Loja")] == "AUTO SHOP UDI · GRUPO ABC"
+
+    def test_loja_ausente_vira_em_dash(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))  # raw_json default = {}
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        with patch("gspread.service_account", return_value=mock_gc):
+            with Session(engine) as session:
+                _exporter().exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        assert rows[2][HEADER.index("Loja")] == "—"
+
+
+class TestSheetsExporterColunaKmPorAno:
+    """Coluna 'KM/ano' = km/idade arredondado, mesma fórmula do colorizer da KM."""
+
+    def test_km_por_ano_calculado(self):
+        engine = _engine_mem()
+        ano_atual = datetime.now().year
+        with Session(engine) as session:
+            # 60k km num carro com 3 anos de idade → 20k/ano
+            session.add(_lote("L001", ano=ano_atual - 3, km=60_000))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        with patch("gspread.service_account", return_value=mock_gc):
+            with Session(engine) as session:
+                _exporter().exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        assert rows[2][HEADER.index("KM/ano")] == 20_000
+
+    def test_km_none_vira_em_dash(self):
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", km=None))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+        with patch("gspread.service_account", return_value=mock_gc):
+            with Session(engine) as session:
+                _exporter().exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        assert rows[2][HEADER.index("KM/ano")] == "—"
+
+
+class TestHeaderSemTese:
+    """Coluna 'Tese' foi removida do relatório por decisão do operador."""
+
+    def test_tese_ausente_do_header(self):
+        assert "Tese" not in HEADER
+
+
 class TestAplicaCoresKm:
     """`_aplicar_cores_km` pinta a coluna H (KM) por linha conforme indicador."""
 
@@ -1340,6 +1467,47 @@ class TestSheetsExporterTimestamp:
 
         # O primeiro freeze é da aba de dados (o segundo é o Glossário)
         mock_ws.freeze.assert_any_call(rows=2)
+
+
+class TestBannerStampCommit:
+    """Banner exibe `(commit <hash>)` pra rastrear QUAL checkout gerou a Sheet.
+    Sem isso, cron antigo (laptop/worktree esquecido) sobrescrevia o output do
+    CI com layout velho e o operador só notava pelas colunas faltando.
+    """
+
+    def test_banner_inclui_commit_hash(self):
+        from carros_sa.tools.sheets import _git_short_hash
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        banner = rows[0][0]
+        # No working tree real, _git_short_hash devolve o hash do HEAD;
+        # qualquer valor não-vazio é aceito — o teste valida que o stamp
+        # foi incluído, não qual hash específico.
+        assert "(commit " in banner
+        commit = _git_short_hash()
+        assert f"(commit {commit})" in banner
+
+    def test_git_short_hash_fail_soft_sem_dot_git(self, tmp_path, monkeypatch):
+        """Sem `.git/` (container minimal, deploy isolado) devolve '?' sem crash."""
+        from carros_sa.tools.sheets import _git_short_hash
+        monkeypatch.chdir(tmp_path)  # cwd sem .git
+        assert _git_short_hash() == "?"
 
 
 class TestCidadesFreteSheet:

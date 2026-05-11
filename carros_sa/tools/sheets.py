@@ -25,11 +25,6 @@ from carros_sa.models import AvaliacaoLote, CategoriaVeiculo, LaudoCache, Lote
 from carros_sa.scraping.parsers import is_laudo_pdf_url
 from carros_sa.tenancy import carregar_empresa
 from carros_sa.tools.laudo_audit import PDF_DIR_DEFAULT, verificar_laudo_completo
-from carros_sa.tools.tese import (
-    calcular_tese,
-    carregar_config_tese,
-    carregar_historico_stat,
-)
 
 HEADER = [
     "Rank",
@@ -38,8 +33,10 @@ HEADER = [
     "Modelo",
     "Ano",
     "Cidade",
+    "Loja",
     "Fim do Leilão",
     "KM",
+    "KM/ano",
     "Lance Atual (R$)",
     "Lance Máximo (R$)",
     "FIPE (R$)",
@@ -48,7 +45,6 @@ HEADER = [
     "ROI alvo (%)",
     "Reforma (R$)",
     "Racional Reforma",
-    "Tese",
     "Anúncio",
     "Laudo",
 ]
@@ -64,6 +60,7 @@ _NUMBER_DECIMAL_1 = {"numberFormat": {"type": "NUMBER", "pattern": "0.0"}}
 
 COLUMN_FORMATS = {
     "KM": _NUMBER_INTEIRO,
+    "KM/ano": _NUMBER_INTEIRO,
     "Lance Atual (R$)": _NUMBER_INTEIRO,
     "Lance Máximo (R$)": _NUMBER_INTEIRO,
     "FIPE (R$)": _NUMBER_INTEIRO,
@@ -96,24 +93,60 @@ _COR_POR_INDICADOR_KM = {
 }
 
 
-def _km_indicator(km: Optional[int], ano: Optional[int], ano_atual: int) -> Optional[str]:
-    """Classifica o KM do lote pelo km/ano em "verde" / "amarelo" / "vermelho".
+def _km_por_ano(km: Optional[int], ano: Optional[int], ano_atual: int) -> Optional[int]:
+    """km/idade arredondado, com idade floor=1.
 
-    Devolve None quando faltam dados (km ou ano None) — célula fica sem cor
-    em vez de chutar uma classificação enganosa. Idade tem floor de 1 ano:
-    carro do ano-corrente com 30k km vira "uso intensivo" (~30k/ano), não
-    divide por idade=0. Carro futuro (modelo > ano_atual) também é tratado
-    como idade=1.
+    None quando km ou ano ausente. Carro do ano-corrente vira idade=1 (não
+    divide por zero); modelo futuro idem. Resultado serve tanto pra colorir
+    a célula KM (`_km_indicator`) quanto pra exibir como número na coluna
+    "KM/ano".
     """
     if km is None or km < 0 or ano is None:
         return None
     idade = max(1, ano_atual - ano)
-    km_por_ano = km / idade
-    if km_por_ano <= _KM_POR_ANO_VERDE_MAX:
+    return round(km / idade)
+
+
+def _km_indicator(km: Optional[int], ano: Optional[int], ano_atual: int) -> Optional[str]:
+    """Classifica o KM do lote pelo km/ano em "verde" / "amarelo" / "vermelho".
+
+    Devolve None quando faltam dados (km ou ano None) — célula fica sem cor
+    em vez de chutar uma classificação enganosa.
+    """
+    kpa = _km_por_ano(km, ano, ano_atual)
+    if kpa is None:
+        return None
+    if kpa <= _KM_POR_ANO_VERDE_MAX:
         return "verde"
-    if km_por_ano <= _KM_POR_ANO_AMARELO_MAX:
+    if kpa <= _KM_POR_ANO_AMARELO_MAX:
         return "amarelo"
     return "vermelho"
+
+
+def _git_short_hash() -> str:
+    """Short hash do HEAD do checkout que está rodando este export.
+
+    Estampar no banner deixa óbvio QUAL versão do código produziu a Sheet
+    atual — se aparecer um hash diferente do HEAD de `main` no GitHub, é
+    sinal de que um cron antigo (laptop, worktree esquecido) rodou em
+    código stale e sobrescreveu o output do CI. Sem o stamp, o operador
+    precisava deduzir isso pelo layout das colunas, o que só funciona
+    quando a diferença é visível.
+
+    Lê `.git/HEAD` direto (sem invocar `git` no PATH) — funciona em
+    qualquer ambiente que tenha o repo checked out, mesmo onde o binário
+    `git` não está instalado. Fail-soft pra "?" quando `.git` não existe
+    (deploy isolado, container minimal, copy do código sem versionamento).
+    """
+    try:
+        import pathlib
+        head = pathlib.Path(".git/HEAD").read_text().strip()
+        if head.startswith("ref: "):
+            ref_path = pathlib.Path(".git") / head[5:]
+            return ref_path.read_text().strip()[:7]
+        return head[:7]
+    except Exception:
+        return "?"
 
 
 def _col_letter(idx_0based: int) -> str:
@@ -285,15 +318,6 @@ class SheetsExporter:
             select(AvaliacaoLote).where(AvaliacaoLote.empresa_id == empresa_id)
         ).all()
 
-        # Pré-carrega histórico pra Tese (sinalização informativa). Fail-soft:
-        # se config ou banco quebrarem, rows ganham tese_texto="—".
-        try:
-            hist_stat = carregar_historico_stat(session)
-            tese_cfg = carregar_config_tese()
-        except Exception:
-            hist_stat = None
-            tese_cfg = None
-
         agora = datetime.now()
         limite_exibicao = (
             agora + timedelta(days=horizonte_exibicao_dias)
@@ -394,20 +418,11 @@ class SheetsExporter:
             # fallback de valor, avisar explicitamente que não foi analisado.
             laudo_analisado = laudo_status.laudo_cache_ok
 
-            # Tese — sinalização informativa baseada em Arrematado histórico.
-            # NÃO afeta rank nem filtra. Quando hist_stat/tese_cfg não carregam
-            # (ex: config quebrou), todas as linhas viram "—" — fail-soft.
-            if hist_stat is not None and tese_cfg is not None and lote.marca and lote.modelo:
-                tese_texto = calcular_tese(
-                    marca=lote.marca,
-                    modelo=lote.modelo,
-                    km=lote.km,
-                    lance_max=av.preco_max,
-                    historico=hist_stat,
-                    config=tese_cfg,
-                ).texto
-            else:
-                tese_texto = "—"
+            loja_raw = (
+                lote.raw_json.get("loja")
+                if isinstance(lote.raw_json, dict)
+                else None
+            )
 
             rows.append({
                 "lote_id": av.lote_id,
@@ -415,8 +430,10 @@ class SheetsExporter:
                 "modelo": lote.modelo,
                 "ano": lote.ano,
                 "cidade": lote.origem_cidade or "—",
+                "loja": loja_raw,
                 "fim_em": fim_em_str,
                 "km": lote.km,
+                "km_por_ano": _km_por_ano(lote.km, lote.ano, agora.year),
                 "km_indicator": _km_indicator(lote.km, lote.ano, agora.year),
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
@@ -433,7 +450,6 @@ class SheetsExporter:
                 "lucro": lucro,
                 "reforma_estimada": av.reforma_estimada,
                 "reforma_racional": av.reforma_racional,
-                "tese": tese_texto,
                 "url": lote.url,
                 "laudo_url": laudo_url,
                 "pdf_local_existe": pdf_local_existe,
@@ -461,8 +477,12 @@ class SheetsExporter:
         # Linha 1: banner global "Última atualização" — deixa óbvio o quão fresco
         # está o snapshot. Preenche a primeira célula e mantém o resto vazio pra
         # não poluir o layout; o freeze(rows=2) congela tanto o banner quanto o
-        # header de colunas.
-        banner = [f"Última atualização da planilha: {ts}"] + [""] * (len(HEADER) - 1)
+        # header de colunas. O short hash do commit identifica QUAL checkout
+        # produziu esta Sheet — quando aparecer hash ≠ HEAD do main no GitHub
+        # é sinal de cron antigo (laptop/worktree esquecido) sobrescrevendo o
+        # output do CI; sem o stamp, só dava pra inferir pelo layout das colunas.
+        commit = _git_short_hash()
+        banner = [f"Última atualização da planilha: {ts} (commit {commit})"] + [""] * (len(HEADER) - 1)
 
         sheet_rows = [banner, HEADER]
         for rank, r in enumerate(rows, start=1):
@@ -540,10 +560,6 @@ class SheetsExporter:
                 # Sem laudo o estimador não rodou — racional viraria fallback
                 # vazio "—" e poluiria a coluna. Aborta junto com Reforma (R$).
                 racional_cell = "—"
-                # Tese depende do lance_max pra detectar "ticket acima do teto";
-                # sem esse valor definido (laudo pendente), zerar a célula evita
-                # sinalização enganosa.
-                tese_cell = "—"
             else:
                 preco_max_cell = r["preco_max"]
                 # Em lotes inviáveis (lance atual já passou do nosso teto),
@@ -556,11 +572,9 @@ class SheetsExporter:
                 if r["viavel"]:
                     lucro_cell = r["lucro"]
                     roi_alvo_cell = r["roi_alvo"]
-                    tese_cell = r["tese"]
                 else:
                     lucro_cell = "—"
                     roi_alvo_cell = "—"
-                    tese_cell = "—"
                 reforma_cell = r["reforma_estimada"]
                 racional_cell = r["reforma_racional"] or "—"
 
@@ -574,6 +588,9 @@ class SheetsExporter:
             # quando persistido. Em registros antigos (NULL) cai pro placeholder.
             mediana_cell = r["webmotors_mediana"] if r.get("webmotors_mediana") else "—"
 
+            loja_cell = r["loja"] or "—"
+            km_por_ano_cell = r["km_por_ano"] if r["km_por_ano"] is not None else "—"
+
             sheet_rows.append([
                 rank,
                 situacao,
@@ -581,8 +598,10 @@ class SheetsExporter:
                 r["modelo"],
                 r["ano"],
                 r["cidade"],
+                loja_cell,
                 r["fim_em"],
                 r["km"] if r["km"] is not None else "—",
+                km_por_ano_cell,
                 r["lance_atual"],
                 preco_max_cell,
                 fipe_cell,
@@ -591,7 +610,6 @@ class SheetsExporter:
                 roi_alvo_cell,
                 reforma_cell,
                 racional_cell,
-                tese_cell,
                 url_cell,
                 laudo_cell,
             ])
@@ -773,7 +791,7 @@ class SheetsExporter:
                 "Situação",
                 "Derivado",
                 "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro, ROI e Tese ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito.",
+                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro e ROI ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito.",
             ],
             [
                 "Marca",
@@ -800,6 +818,12 @@ class SheetsExporter:
                 "Sanity logístico — cidades distantes do pátio entram com frete maior embutido no Lance Máximo",
             ],
             [
+                "Loja",
+                "Auto Avaliar (listagem)",
+                "Nome da concessionária/grupo que está anunciando o lote, extraído das duas últimas linhas do card antes do CTA ('FILIAL · GRUPO'). Persistido em `lote.raw_json['loja']`; '—' quando o card é atípico (sem rótulo) ou em coletas antigas anteriores ao scraper de loja.",
+                "Permite filtrar/agrupar por vendedor — algumas lojas são mais confiáveis com laudos e prazos do que outras. Operador pode bloquear lojas com histórico ruim ou priorizar parceiros conhecidos.",
+            ],
+            [
                 "Fim do Leilão",
                 "Auto Avaliar",
                 "Timer HH:MM:SS[:centésimos] do card convertido pra datetime absoluto. Lotes SEM fim visível são filtrados do export (Auto Avaliar só mostra countdown enquanto o lote está ativo).",
@@ -810,6 +834,12 @@ class SheetsExporter:
                 "Auto Avaliar",
                 "Número parseado da página de detalhe (specs). Cor de fundo da célula sinaliza km/ano (idade = max(1, ano_atual − ano_modelo)): 🟢 ≤15.000 km/ano (média Brasil ou abaixo, conservado), 🟡 15.001–25.000 km/ano (uso típico-alto), 🔴 >25.000 km/ano (uso intensivo, alta probabilidade de frota/Uber/táxi). Sem cor quando ano ou km estão ausentes.",
                 "Sanity check rápido de desgaste. KM absoluto sozinho engana (60k num carro 2010 é diferente de 60k num 2024); km/ano normaliza pela idade. Vermelho = revenda mais difícil + desgaste mecânico desproporcional; verde = carro pouco rodado pra idade.",
+            ],
+            [
+                "KM/ano",
+                "Derivado",
+                "km ÷ max(1, ano_atual − ano_modelo), arredondado. '—' quando km ou ano ausentes. Mesma fórmula que pinta a coluna KM (verde ≤15k/ano, amarelo 15-25k, vermelho >25k), exibida como número pra o operador ler o valor exato em vez de inferir pela cor.",
+                "Normaliza o KM pela idade do carro pra comparar lotes de anos diferentes em pé de igualdade. Junto com a cor de fundo do KM forma a leitura rápida de desgaste relativo.",
             ],
             [
                 "Lance Atual (R$)",
@@ -858,12 +888,6 @@ class SheetsExporter:
                 "EstimadorReformaLLM.justificativa (fallback: sumário do precificador)",
                 "Texto descrevendo por que a reforma custou R$X — quais peças/avarias entraram no orçamento. Quando o LLM rodou: justificativa do estimador (ex.: 'Coluna B reparada → solda + pintura; capô amassado'). Quando caiu pro fallback determinístico: sumário gerado pelo precificador a partir dos itens da tabela YAML. '—' em '⚠ LAUDO NÃO CAPTURADO' (estimador não rodou) e em registros pré-workstream O (campo NULL no DB).",
                 "Audita o valor da Reforma sem precisar abrir o PDF do laudo — operador lê a justificativa e confere se o LLM/fallback enxergou o que devia. Texto pode ocupar 3-5 linhas wrapped no Sheets; preferimos preservar a info completa a truncar.",
-            ],
-            [
-                "Tese",
-                "Derivado (tabela Arrematado + config/tese.yaml)",
-                "🟢 típica: modelo ≥ 2 compras + ticket e KM na faixa histórica (12k-85k, 30k-260k km). 🔴 atípica: 2+ sinais ruins (V6 gasolina + km alto, diesel + km muito alto, nicho sem histórico, ticket acima do teto, elétrico sem revenda). 🟡 fora da curva: um eixo fora ou 1 sinal isolado.",
-                "SINALIZAÇÃO informativa — NÃO altera rank, NÃO filtra. Lado-a-lado com o ROI, responde 'isso se parece com o que a gente já comprou?'. Thresholds editáveis em config/tese.yaml sem release de código.",
             ],
             [
                 "Anúncio",

@@ -322,7 +322,17 @@ def ingest(
 
 @app.command("arrematado-import")
 def arrematado_import_cmd(
-    arquivo: Path = typer.Argument(..., help="CSV com colunas marca,modelo,ano,km,valor_compra,data_compra,custos_extras,valor_venda,data_venda,observacoes"),
+    arquivo: Path = typer.Argument(
+        ...,
+        help=(
+            "CSV de histórico. Colunas obrigatórias: marca, modelo, ano, valor_compra. "
+            "Opcionais: km, data_compra, valor_venda, data_venda, observacoes. "
+            "Custos pós-arremate em DOIS formatos: (legacy) custos_extras agregado, "
+            "ou (decomposto, HH-2) taxa_leilao_real + frete_real + transferencia_real "
+            "+ higienizacao_real + outros_extras_real + gastos_reforma_real. "
+            "Decomposto vence quando qualquer bucket está preenchido."
+        ),
+    ),
     empresa: str = typer.Option(..., help="ID da empresa (ex: carros_uberlandia)"),
 ) -> None:
     """Importa histórico de compra/venda offline pra tabela Arrematado.

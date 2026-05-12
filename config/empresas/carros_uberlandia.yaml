@@ -57,10 +57,11 @@ tabela_frete:                   # R$ por faixa_km × categoria
     picape: 4500
     outro: 3800
 categorias_aceitas: [hatch, sedan, suv, utilitario, picape]
-# Auto Avaliar cobra R$ 999 fixos por arremate (não percentual). Para leilões
-# judiciais futuros que usam %, manter `taxa_leilao_pct > 0` que soma com fixa.
-taxa_leilao_pct: 0.0
-taxa_leilao_fixa: 999
+# Taxa Auto Arremate calibrada em N=1 (Fusion 2014: R$866,80 sobre R$55.500 = 1.56%).
+# Modelada como percentual do lance vencedor — `taxa_leilao_fixa` zerada.
+# Recalibrar quando tiver ≥3 notas decompostas (coluna taxa_leilao_real no CSV).
+taxa_leilao_pct: 0.0156
+taxa_leilao_fixa: 0
 # Custos operacionais não-veículo decompostos — calibrados com a operação real
 # do Polo Track 2024 (despachante R$380, polimento R$450, marketing IG/FB/portais
 # R$1500 médio, laudo cautelar pré-venda R$120, combustível R$73). Total = R$2523.

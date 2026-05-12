@@ -51,7 +51,12 @@ Dependências externas conhecidas: Webmotors live (workstream G — bloqueia rea
   - **Sempre decomposto (HH-2)**: `custos_extras` legacy fica vazio em todo registro novo; `taxa/frete/transf/higi/outros/reforma` vão para as 6 colunas separadas — calibrador recebe dado limpo desde o 1º registro.
   - 9 testes em [`tests/test_registrar_compra.py`](tests/test_registrar_compra.py): todas as flags, interativo (prompt), idempotência, isolamento de reforma no Arrematado, preservação de linhas existentes, validação de ano/valor/data.
   - **Limitações conhecidas:** `--csv` default aponta pra `data/historico/<empresa>_arrematado.csv` relativo ao CWD; operador precisa rodar do root do repo (ou passar `--csv` explícito). Sem lock de arquivo — não suporta escrita concorrente (ok pra CLI interativo single-user).
-- **Follow-ups (não-bloqueantes):** #4, #5 acima (calibração taxa AA e higienização — agora desbloqueados por HH-2 + HH-3 acumulando linhas decompostas).
+- **HH-4 entregue (2026-05-11):** ✅ Taxa Auto Arremate calibrada de fixa (R$999) para percentual (1.56%).
+  - `config/empresas/carros_uberlandia.yaml`: `taxa_leilao_pct: 0.0156`, `taxa_leilao_fixa: 0`. Calibrado em N=1 (Fusion: R$866,80 / R$55.500 = 1.5618%). Recalibrar quando tiver ≥3 notas no CSV.
+  - Impacto nos lotes: taxa menor que R$999 em lotes < R$64k (preco_max sobe); maior em lotes > R$64k (preco_max cai). Breakeven: R$999/0.0156 ≈ R$64k.
+  - 3 testes atualizados em `test_precificador.py` com novos valores e comentários explicando a álgebra (diff de transferência = 580/(1+pct) ≈ 571, não mais 580 exato).
+  - **Limitação N=1:** única nota decompostas disponível. Suficiente pra trocar o modelo de fixed→pct; não suficiente pra triangular piso mínimo ou faixa por valor. Recalibrar via `data/historico/uberlandia_arrematado.csv::taxa_leilao_real` quando ≥3 registros.
+- **Follow-ups (não-bloqueantes):** #5 (calibrar higienização — depende de mais linhas decompostas no CSV).
 - **Limitações conhecidas:**
   - Valor R$ 580 é N=1 (só o Fusion). Variação por UF de origem desconhecida (SP→MG pode ser diferente de RJ→MG, GO→MG). Aceitável como ponto de partida — `transferencia_interestadual` é uniforme por empresa, não tabela.
   - Custo é aplicado por igual a TODA UF ≠ pátio. Não trata caso de UF adjacente com convênio (raro no Brasil; DETRAN é estadual).

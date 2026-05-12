@@ -867,29 +867,36 @@ def registrar_compra(
 
 @app.command("webmotors-coletar")
 def webmotors_coletar(
-    marca: Optional[str] = typer.Option(None, "--marca", help="Marca específica (default: todos lotes ativos sem cache fresh)"),
-    modelo: Optional[str] = typer.Option(None, "--modelo", help="Modelo específico (default: todos)"),
-    ano: Optional[int] = typer.Option(None, "--ano", help="Ano específico (default: todos)"),
+    marca: Optional[str] = typer.Option(None, "--marca", help="Marca específica (override do ranking — útil pra validação manual)"),
+    modelo: Optional[str] = typer.Option(None, "--modelo", help="Modelo específico (combina com --marca/--ano)"),
+    ano: Optional[int] = typer.Option(None, "--ano", help="Ano específico (combina com --marca/--modelo)"),
     rate_limit_s: int = typer.Option(
         60, "--rate-limit", help="Sleep entre requisições em segundos (default 60, mínimo 30)"
     ),
     max_modelos: int = typer.Option(
-        120, "--max", help="Máximo de (marca,modelo,ano) por execução. Default 120 = ~2h em 60s/req."
+        10, "--max", help="Máximo de (marca,modelo,ano) por execução. Default 10 = top 10 do ranking do dia (~10min em 60s/req)."
     ),
     debug: bool = typer.Option(False, "--debug", help="Browser visível + log verboso"),
 ) -> None:
     """Coleta noturna do Webmotors live pra popular cache `anuncio_webmotors`.
 
-    Workstream G. Estratégia anti-bot:
+    Workstream G. Estratégia anti-bot conservadora:
       - Cron noturno único (3-4h da manhã)
       - 60s/req (configurável; rejeita <30s pra evitar burst)
       - Playwright + stealth, 1 contexto sequencial
       - Cache 24h: skip (marca,modelo,ano) já coletado nas últimas 24h
       - Marca anúncios sumidos pra calibração de giro real (workstream G.2)
+      - **Default: só top 10 do ranking** — modelos que o operador realmente
+        vai considerar comprar. Cobre o ROADMAP linha 574 (≥5 amostras nos
+        modelos populares) sem multiplicar carga / risco anti-bot.
 
-    Default: coleta todos `(marca,modelo,ano)` de lotes ATIVOS no DB sem
-    cache fresh, ordenados por urgência (fim_em mais próximo primeiro).
-    Filtros `--marca`/`--modelo`/`--ano` restringem a 1 alvo (validação manual).
+    Default: coleta os top `max_modelos` (10) `(marca,modelo,ano)` ranqueados
+    por **ROI anualizado** (mesma métrica do `carros-sa top`), filtrados pra
+    lotes viáveis (preco_max > lance_atual) e sem cache fresh. Dedupe por
+    (marca,modelo,ano) cobre múltiplas empresas com mesmo modelo.
+
+    Filtros `--marca`/`--modelo`/`--ano` substituem o ranking por 1 alvo
+    explícito (validação manual / debug de URL/seletor).
 
     Antes de agendar em cron, valide manualmente:
       carros-sa webmotors-coletar --marca Ford --modelo Fiesta --ano 2013 --debug
@@ -899,8 +906,10 @@ def webmotors_coletar(
 
     from sqlmodel import select as _select
 
+    from carros_sa.agents.calibracao_giro import roi_anualizado
     from carros_sa.db import get_session, init_db
-    from carros_sa.models import Lote
+    from carros_sa.models import AvaliacaoLote, Lote
+    from carros_sa.tools.sheets import _score_roi_efetivo
     from carros_sa.tools.webmotors_cache import (
         marcar_anuncios_sumidos,
         obter_anuncios_cacheados,
@@ -918,19 +927,44 @@ def webmotors_coletar(
 
     init_db()
 
-    # 1. Monta lista de alvos
+    # 1. Monta lista de alvos — top N do ranking ROI anualizado, ou override
+    #    explícito via --marca/--modelo/--ano (validação manual)
     alvos: list[tuple[str, str, int]] = []
     if marca and modelo and ano:
         alvos = [(marca, modelo, ano)]
     else:
+        agora = _dt.now()
         with get_session() as session:
-            stmt = _select(Lote).where(Lote.fim_em.is_not(None)).order_by(Lote.fim_em)
-            lotes = session.exec(stmt).all()
-            seen = set()
-            for lote in lotes:
+            # JOIN AvaliacaoLote + Lote, filtra lotes ATIVOS (fim_em > now) e
+            # viáveis (preco_max > lance_atual). Ranking idêntico ao `top`.
+            stmt = (
+                _select(AvaliacaoLote, Lote)
+                .join(Lote, Lote.id == AvaliacaoLote.lote_id)  # type: ignore[arg-type]
+                .where(Lote.fim_em.is_not(None))
+                .where(Lote.fim_em > agora)
+            )
+            pares = session.exec(stmt).all()
+
+            # Filtra viáveis + calcula ROI anualizado honesto (score efetivo).
+            ranqueados = []
+            for av, lote in pares:
                 if not lote.marca or not lote.modelo or not lote.ano:
                     continue
-                key = (lote.marca.strip(), lote.modelo.strip(), lote.ano)
+                if av.preco_max <= (lote.lance_atual or 0):
+                    continue
+                roi = roi_anualizado(
+                    _score_roi_efetivo(av, lote.lance_atual),
+                    av.dias_giro_estimado,
+                )
+                ranqueados.append((roi, lote.marca.strip(), lote.modelo.strip(), lote.ano))
+
+            # Ordena por ROI desc, dedupe por (marca,modelo,ano) cobrindo
+            # múltiplas empresas com mesmo modelo (a mediana Webmotors é
+            # global — não duplicar fetch).
+            ranqueados.sort(key=lambda x: x[0], reverse=True)
+            seen = set()
+            for _roi, m, mo, an in ranqueados:
+                key = (m, mo, an)
                 if key in seen:
                     continue
                 seen.add(key)

@@ -600,6 +600,13 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **G.3** (futuro): redesenhar precificador como `preco_giro = FIPE × β + mediana × (1−β)` com `β` variando por sample size. Bloqueia em ≥1 semana de coleta real estável.
 - **G.2** (infra pronta, ativação operacional): `marcar_anuncios_sumidos` já popula `sumiu_em` no cron noturno; basta criar relatório DuckDB `vendido_em (proxy) - primeiro_visto` pra calibrar `dias_giro_estimado` (workstream H).
 
+**Follow-ups (não-bloqueantes, da auto-review arquitetural do PR #90):**
+- **G.1a** — Validação manual do template de URL `_build_search_url`. Rodar `carros-sa webmotors-coletar --marca Ford --modelo Fiesta --ano 2013 --debug` em ambiente real antes de agendar cron. Se layout mudou, ajustar `WEBMOTORS_SEARCH_URL_TEMPLATE` ou seletor JS. Documentar resultado em `data/scrapes/`.
+- **G.1b** — Smoke test do subcommand `webmotors-coletar` (CliRunner com `StealthBrowser` mockado). Hoje só exercitado manualmente. Casos: alvos vazios → "nenhum precisa coletar"; `--rate-limit <30` → exit 2.
+- **G.1c** — Range de ano `[ano-1, ano, ano+1]` em `obter_anuncios_cacheados` pode misturar modelos em transição de geração (ex.: novo Onix 2020 vs antigo 2019). Mitigação futura: persistir `ano_fab` E `ano_mod` separados em `AnuncioWebmotors` e fazer match exato em `ano_mod` com fallback pra range. Não urgente — ruído residual absorvido pela mediana.
+- **G.1d** — Outlier defensivo opcional pós-fetch: clip percentil 5-95 dentro de `webmotors_cache.obter_anuncios_cacheados` quando `n>=10`. Substitui o cap n<5 removido por algo estatisticamente sadio. `_check_mediana_distante_fipe` continua avisando.
+- **G.1e** — Configuração de cron (crontab/systemd timer/launchd) pra rodar `carros-sa webmotors-coletar` 3-4h da manhã todo dia. Default top 10 do ranking ROI anualizado.
+
 ### G.3 — Reativar mediana no precificador 🕐 bloqueado (≥1 semana de dado real do G)
 - Precificador hoje: `preco_giro = FIPE × f_km × 0.95` (FIPE-only desde 2026-05-08).
 - Próximo: `preco_giro = (FIPE × β + mediana × (1−β)) × f_km × 0.95` com `β = f(n_anuncios)`.

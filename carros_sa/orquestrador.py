@@ -402,8 +402,15 @@ def _upsert_laudo_cache(lote_id: str, laudo: LaudoEstruturado, session: Session,
         session.add(LaudoCache(**dados))
 
 
-def _upsert_avaliacao(avaliacao, empresa_id: str, session: Session) -> None:
-    """Persiste ou atualiza AvaliacaoLote (por empresa + lote)."""
+def _upsert_avaliacao(
+    avaliacao, empresa_id: str, session: Session, *, mercado=None,
+) -> None:
+    """Persiste ou atualiza AvaliacaoLote (por empresa + lote).
+
+    `mercado` (SinalMercado, opcional) é usado pra propagar
+    `n_anuncios_competidores` → `AvaliacaoLote.webmotors_n_anuncios` (workstream G).
+    Quando ausente (testes antigos), o campo fica None.
+    """
     existente = session.exec(
         select(AvaliacaoLote)
         .where(AvaliacaoLote.empresa_id == empresa_id)
@@ -427,6 +434,7 @@ def _upsert_avaliacao(avaliacao, empresa_id: str, session: Session) -> None:
         preco_giro_aa=avaliacao.preco_giro_aa,
         fipe=avaliacao.fipe,
         webmotors_mediana=avaliacao.webmotors_mediana,
+        webmotors_n_anuncios=(mercado.n_anuncios_competidores if mercado else None),
         dias_giro_estimado=avaliacao.dias_giro_estimado,
         justificativa=avaliacao.justificativa,
         reforma_racional=avaliacao.reforma_racional,
@@ -634,15 +642,19 @@ async def _pipeline_lote(
             categoria = _categoria_de_modelo(lote.modelo)
 
         try:
+            # Workstream G: similares do AA deixaram de ser fonte de mediana
+            # (poluídos por outliers categóricos). Mediana vem do cache
+            # Webmotors via `session` (TTL 24h, populado pelo cron noturno
+            # `carros-sa webmotors-coletar`). Sem cache → mediana=FIPE neutra,
+            # display mostra "—" via `n_anuncios_competidores=0`.
             mercado = avaliar_mercado(
                 marca=lote.marca,
                 modelo=lote.modelo,
                 ano=lote.ano,
                 km=lote.km,
-                similares_precos=flags.similares_precos or None,
                 categoria=categoria,
                 session=session,
-                empresa_id=empresa.empresa_id,  # ativa calibração via Arrematado
+                empresa_id=empresa.empresa_id,
             )
         except LookupError as exc:
             # FIPE Parallelum não tem catálogo de motos (Dafra, Triumph, Harley…)
@@ -694,7 +706,7 @@ async def _pipeline_lote(
         avaliacao = precificar(lote_raw, laudo, mercado, reforma, frete, empresa)
 
         # 9. Persist
-        _upsert_avaliacao(avaliacao, empresa.empresa_id, session)
+        _upsert_avaliacao(avaliacao, empresa.empresa_id, session, mercado=mercado)
         session.commit()
 
         roi_pct = round(avaliacao.score_roi * 100, 1)

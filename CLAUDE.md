@@ -144,14 +144,23 @@ Por construção: `preco_max + reforma + frete + taxas_max + custo_op = preco_gi
 ### Lucro absoluto exato — fórmula fechada
 `score_roi = lucro / capital_alvo` ⇒ `capital_alvo = preco_giro / (1 + score_roi)` ⇒ `lucro_absoluto = preco_giro × score_roi / (1 + score_roi)`. Não use `score_roi × preco_alvo` como aproximação — subestima ~10% porque `capital_alvo > preco_alvo` (engloba reforma/frete/taxas/custo_op). Helper canônico em `sheets._lucro_absoluto_no_alvo`.
 
-### Refactor FIPE-only no precificador (2026-05-08)
-`preco_giro_fipe = FIPE × f_km × 0.95` desde 2026-05-08. Antes era `webmotors_mediana × f_km` com 3 caps em série (n<5 no avaliador → 1.20×FIPE no precificador → 1.05×FIPE no audit) tentando consertar similares poluídos do Auto Avaliar (Tiggo 7 vs Tiggo 2, Airtrek vs Outlander, Ka descontinuado). Como Webmotors live não está conectado (workstream G), `webmotors_mediana` era `FIPE × 0.97` na prática — sistema já era FIPE-driven mascarado por camadas de incerteza. Refactor matou os 2 caps redundantes; cap n<5 no `avaliador_mercado.py` mantido só pra limpar display da mediana (não afeta cálculo).
+### Refactor FIPE-only no precificador (2026-05-08) + Workstream G live (2026-05-12)
+`preco_giro_fipe = FIPE × f_km × 0.95` desde 2026-05-08. Precificador continua FIPE-only mesmo após workstream G ligar a coleta Webmotors live — mediana é só DISPLAY. G.3 (reativar mediana no precificador via `FIPE × β + mediana × (1−β)`) bloqueia em ≥1 semana de cron acumulando amostra estável.
 
-`preco_giro_aa` agora é sempre `None`. `webmotors_mediana` continua persistido em `Avaliacao`/`AvaliacaoLote` pra display na nova coluna **"Mediana mercado (R$)"** da planilha (entre FIPE e Lucro/mês). Operador vê FIPE × Mediana × Lance Atual lado a lado pra contextualizar.
+Histórico: antes era `webmotors_mediana × f_km` com 3 caps em série (n<5 no avaliador → 1.20×FIPE no precificador → 1.05×FIPE no audit) tentando consertar similares poluídos do Auto Avaliar (Tiggo 7 vs Tiggo 2, Airtrek vs Outlander, Ka descontinuado). Como Webmotors live não estava conectado, `webmotors_mediana` era `FIPE × 0.97` na prática — sistema já era FIPE-driven mascarado.
+
+**Fonte de mediana mudou (workstream G — 2026-05-12):** similares do Auto Avaliar foram DESCONTINUADOS como input do `avaliador_mercado`. Mediana agora vem do cache `anuncio_webmotors` populado pelo cron `carros-sa webmotors-coletar` (60s/req, 3-4h da manhã, Playwright + stealth, retry com Cloudflare-detect). Sem amostra fresh (n=0) → `webmotors_mediana = fipe` placeholder neutro + `AvaliacaoLote.webmotors_n_anuncios = 0` faz o display mostrar "—" (paridade `sheets._write_sheet` ↔ `audit.COLUMN_EXTRACTORS`). **NÃO reintroduzir similares do AA como fallback** — gera ruído categórico que motivou todo o refactor.
+
+`preco_giro_aa` agora é sempre `None`. `webmotors_mediana` continua persistido em `Avaliacao`/`AvaliacaoLote` pra display. Cap defensivo n<5 → FIPE×1.20 do `avaliador_mercado.py` **foi removido** com workstream G (era band-aid pra AA poluído; Webmotors tem amostra precisa por (marca,modelo,ano) sem mistura categórica). Quando mediana de Webmotors legítimo passar de 1.20×FIPE, `_check_mediana_distante_fipe` em audit.py dispara warning informativo (não bloqueia).
 
 **Por construção `preco_max < FIPE`** em qualquer cenário (max teórico = `FIPE × 1.15 × 0.95 × 0.90 ≈ 0.98 × FIPE`). Audit threshold 1.05×FIPE mantido como guard de regressão. **Não renomear campos persistidos** — contratos (models.py).
 
-Quando workstream G ligar Webmotors live, redesenhar como `FIPE × β + mediana × (1−β)` com `β` variando por `n_anuncios_competidores` (sample size).
+### Operação do cron Webmotors (workstream G)
+- **Comando:** `carros-sa webmotors-coletar` (sem args = itera lotes ativos sem cache fresh, ordem fim_em mais próximo primeiro, max 120 por execução).
+- **Primeira validação manual obrigatória:** `carros-sa webmotors-coletar --marca Ford --modelo Fiesta --ano 2013 --debug` antes de agendar cron — confirma URL/seletor JS contra o site real (Webmotors muda CSS-Modules com hash volátil; nosso seletor ancora em `a[href*="/comprar/"]` + innerText do card).
+- **Override URL:** `WEBMOTORS_SEARCH_URL_TEMPLATE` env var se o template default não bater.
+- **Fail-rate alerta:** >30% falhas no batch sinaliza Cloudflare detectando — pausar cron, aumentar rate-limit ou trocar IP. NÃO insistir em loop apertado (risco de queimar IP).
+- **Rate-limit mínimo:** 30s/req (CLI rejeita valores menores). Default 60s.
 
 ### Antes de mexer em precificador / sheets / cli, rodar `make test` com olhos abertos
 Os testes `test_exportar_sheets.py::TestLucroAbsolutoNoAlvo` e `test_audit_columns.py::test_roi_absurdo_reportado` são guard-rails das fórmulas — qualquer mudança que quebrá-los provavelmente está reintroduzindo um dos bugs anteriores (ROI tautológico ou lucro subestimado).

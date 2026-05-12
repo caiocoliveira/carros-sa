@@ -865,5 +865,166 @@ def registrar_compra(
     )
 
 
+@app.command("webmotors-coletar")
+def webmotors_coletar(
+    marca: Optional[str] = typer.Option(None, "--marca", help="Marca específica (override do ranking — útil pra validação manual)"),
+    modelo: Optional[str] = typer.Option(None, "--modelo", help="Modelo específico (combina com --marca/--ano)"),
+    ano: Optional[int] = typer.Option(None, "--ano", help="Ano específico (combina com --marca/--modelo)"),
+    rate_limit_s: int = typer.Option(
+        60, "--rate-limit", help="Sleep entre requisições em segundos (default 60, mínimo 30)"
+    ),
+    max_modelos: int = typer.Option(
+        10, "--max", help="Máximo de (marca,modelo,ano) por execução. Default 10 = top 10 do ranking do dia (~10min em 60s/req)."
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Browser visível + log verboso"),
+) -> None:
+    """Coleta noturna do Webmotors live pra popular cache `anuncio_webmotors`.
+
+    Workstream G. Estratégia anti-bot conservadora:
+      - Cron noturno único (3-4h da manhã)
+      - 60s/req (configurável; rejeita <30s pra evitar burst)
+      - Playwright + stealth, 1 contexto sequencial
+      - Cache 24h: skip (marca,modelo,ano) já coletado nas últimas 24h
+      - Marca anúncios sumidos pra calibração de giro real (workstream G.2)
+      - **Default: só top 10 do ranking** — modelos que o operador realmente
+        vai considerar comprar. Cobre o ROADMAP linha 574 (≥5 amostras nos
+        modelos populares) sem multiplicar carga / risco anti-bot.
+
+    Default: coleta os top `max_modelos` (10) `(marca,modelo,ano)` ranqueados
+    por **ROI anualizado** (mesma métrica do `carros-sa top`), filtrados pra
+    lotes viáveis (preco_max > lance_atual) e sem cache fresh. Dedupe por
+    (marca,modelo,ano) cobre múltiplas empresas com mesmo modelo.
+
+    Filtros `--marca`/`--modelo`/`--ano` substituem o ranking por 1 alvo
+    explícito (validação manual / debug de URL/seletor).
+
+    Antes de agendar em cron, valide manualmente:
+      carros-sa webmotors-coletar --marca Ford --modelo Fiesta --ano 2013 --debug
+    """
+    import asyncio as _asyncio
+    from datetime import datetime as _dt
+
+    from sqlmodel import select as _select
+
+    from carros_sa.agents.calibracao_giro import roi_anualizado
+    from carros_sa.db import get_session, init_db
+    from carros_sa.models import AvaliacaoLote, Lote
+    from carros_sa.tools.sheets import _score_roi_efetivo
+    from carros_sa.tools.webmotors_cache import (
+        marcar_anuncios_sumidos,
+        obter_anuncios_cacheados,
+        persistir_anuncios,
+    )
+    from carros_sa.tools.webmotors_live import (
+        StealthBrowser,
+        WebmotorsLiveError,
+        fetch_com_retry,
+    )
+
+    if rate_limit_s < 30:
+        console.print("[red]rate-limit < 30s rejeitado (risco de queimar IP)[/red]")
+        raise typer.Exit(2)
+
+    init_db()
+
+    # 1. Monta lista de alvos — top N do ranking ROI anualizado, ou override
+    #    explícito via --marca/--modelo/--ano (validação manual)
+    alvos: list[tuple[str, str, int]] = []
+    if marca and modelo and ano:
+        alvos = [(marca, modelo, ano)]
+    else:
+        agora = _dt.now()
+        with get_session() as session:
+            # JOIN AvaliacaoLote + Lote, filtra lotes ATIVOS (fim_em > now) e
+            # viáveis (preco_max > lance_atual). Ranking idêntico ao `top`.
+            stmt = (
+                _select(AvaliacaoLote, Lote)
+                .join(Lote, Lote.id == AvaliacaoLote.lote_id)  # type: ignore[arg-type]
+                .where(Lote.fim_em.is_not(None))
+                .where(Lote.fim_em > agora)
+            )
+            pares = session.exec(stmt).all()
+
+            # Filtra viáveis + calcula ROI anualizado honesto (score efetivo).
+            ranqueados = []
+            for av, lote in pares:
+                if not lote.marca or not lote.modelo or not lote.ano:
+                    continue
+                if av.preco_max <= (lote.lance_atual or 0):
+                    continue
+                roi = roi_anualizado(
+                    _score_roi_efetivo(av, lote.lance_atual),
+                    av.dias_giro_estimado,
+                )
+                ranqueados.append((roi, lote.marca.strip(), lote.modelo.strip(), lote.ano))
+
+            # Ordena por ROI desc, dedupe por (marca,modelo,ano) cobrindo
+            # múltiplas empresas com mesmo modelo (a mediana Webmotors é
+            # global — não duplicar fetch).
+            ranqueados.sort(key=lambda x: x[0], reverse=True)
+            seen = set()
+            for _roi, m, mo, an in ranqueados:
+                key = (m, mo, an)
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Skip se já tem cache fresh (TTL 24h)
+                if obter_anuncios_cacheados(session, *key):
+                    continue
+                alvos.append(key)
+                if len(alvos) >= max_modelos:
+                    break
+
+    if not alvos:
+        console.print("[yellow]Nenhum (marca,modelo,ano) precisa coletar — cache fresh ou DB vazio.[/yellow]")
+        return
+
+    console.print(
+        f"\n[bold]Webmotors live coleta:[/bold] {len(alvos)} alvos, "
+        f"rate-limit {rate_limit_s}s → ~{len(alvos) * rate_limit_s / 60:.0f} min total"
+    )
+
+    async def _run():
+        ok = 0
+        falhas = 0
+        ts_inicio = _dt.utcnow()
+        async with StealthBrowser(headless=not debug) as page:
+            for i, (m, mo, an) in enumerate(alvos, start=1):
+                console.print(f"\n[{i}/{len(alvos)}] {m} {mo} {an}")
+                try:
+                    anuncios = await fetch_com_retry(page, m, mo, an)
+                except WebmotorsLiveError as exc:
+                    console.print(f"  [red]✗ {exc}[/red]")
+                    falhas += 1
+                else:
+                    with get_session() as session:
+                        n_novos = persistir_anuncios(session, anuncios)
+                        # Marca sumidos: anúncios desse (m,mo,an) com ultimo_visto
+                        # < inicio do batch = não apareceram dessa vez
+                        n_sumidos = marcar_anuncios_sumidos(
+                            session, m, mo, an, visto_em_ou_apos=ts_inicio,
+                        )
+                    console.print(
+                        f"  [green]✓ {len(anuncios)} anúncios[/green] "
+                        f"({n_novos} novos, {n_sumidos} sumiram)"
+                    )
+                    ok += 1
+                # Rate-limit entre requests (skip no último)
+                if i < len(alvos):
+                    await _asyncio.sleep(rate_limit_s)
+
+        console.print(
+            f"\n[bold]Coleta concluída:[/bold] {ok}/{len(alvos)} ok, "
+            f"{falhas} falhas ({falhas/len(alvos):.0%} fail rate)"
+        )
+        if falhas / len(alvos) > 0.3:
+            console.print(
+                "[yellow]⚠ Fail rate > 30% — possível Cloudflare detectando. "
+                "Aumentar rate-limit, trocar IP ou pausar cron.[/yellow]"
+            )
+
+    _asyncio.run(_run())
+
+
 if __name__ == "__main__":
     app()

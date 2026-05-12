@@ -438,13 +438,15 @@ class SheetsExporter:
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
                 "fipe": av.fipe,
-                # Mediana de mercado é REFERÊNCIA — não entra no cálculo do
-                # Lance Máximo desde o refactor FIPE-only (2026-05-08). Origem:
-                # similares do Auto Avaliar quando disponíveis, fallback FIPE×0.97
-                # quando o lote não trouxe similares. Workstream G (Webmotors live)
-                # vai substituir por dado real. Operador compara FIPE vs mediana
-                # vs Lance Atual lado a lado pra contextualizar.
+                # Mediana de mercado: dado real do Webmotors via cache populado
+                # pelo cron `carros-sa webmotors-coletar` (workstream G, 2026-05-12).
+                # Sem amostra → `webmotors_n_anuncios=0/None` faz o display mostrar
+                # "—" (ver `_write_sheet`). Operador compara FIPE vs mediana vs
+                # Lance Atual lado a lado pra contextualizar a decisão da máquina.
+                # Mediana NÃO entra no cálculo de Lance Máximo (precificador é
+                # FIPE-only desde 2026-05-08).
                 "webmotors_mediana": av.webmotors_mediana,
+                "webmotors_n_anuncios": av.webmotors_n_anuncios,
                 "roi_anualizado": round(roi_anual, 1),
                 "roi_alvo": round(roi_alvo, 1),
                 "lucro": lucro,
@@ -584,9 +586,17 @@ class SheetsExporter:
             fipe_cell = r["fipe"] if r["fipe"] is not None else "—"
 
             # Mediana de mercado: referência informativa lado a lado com FIPE.
-            # Não depende do laudo (sinal de mercado externo). Sempre exibe
-            # quando persistido. Em registros antigos (NULL) cai pro placeholder.
-            mediana_cell = r["webmotors_mediana"] if r.get("webmotors_mediana") else "—"
+            # Workstream G (2026-05-12): dado vem do Webmotors live (cache 24h).
+            # Suprime ("—") quando NÃO há amostra real — `webmotors_n_anuncios`
+            # vazio/0 sinaliza que a `webmotors_mediana` persistida é placeholder
+            # FIPE neutro (sem sinal de mercado real). Em registros pré-G
+            # (`webmotors_n_anuncios IS NULL`) também suprime — operador não
+            # consegue distinguir se é dado real ou fallback antigo.
+            n_anuncios = r.get("webmotors_n_anuncios") or 0
+            if r["webmotors_mediana"] and n_anuncios >= 1:
+                mediana_cell = r["webmotors_mediana"]
+            else:
+                mediana_cell = "—"
 
             loja_cell = r["loja"] or "—"
             km_por_ano_cell = r["km_por_ano"] if r["km_por_ano"] is not None else "—"
@@ -861,9 +871,9 @@ class SheetsExporter:
             ],
             [
                 "Mediana mercado (R$)",
-                "Auto Avaliar (similares do anúncio) ou fallback FIPE×0.97",
-                "Mediana dos preços de 'Talvez se interesse por' do Auto Avaliar quando o lote traz similares. Quando não traz, fallback FIPE×0.97. Persistido em `avaliacao_lote.webmotors_mediana` pra display. Em registros antigos (NULL) mostra '—'. Cap n<5 em FIPE×1.20 (avaliador_mercado.py) reduz outliers categóricos no display, mas a coluna pode ainda divergir da FIPE quando a amostra de similares é boa.",
-                "Sinal de mercado INFORMATIVO — não entra no cálculo de Lance Máximo desde o refactor FIPE-only. Operador compara FIPE × Mediana × Lance Atual lado a lado pra contextualizar a decisão da máquina (ex.: mediana muito acima da FIPE pode indicar similares poluídos no AA — vale conferir manualmente). Workstream G (Webmotors live) substituirá fallback por dado real e a coluna passará a refletir mercado de revenda real.",
+                "Webmotors live (cache 24h via `carros-sa webmotors-coletar`)",
+                "Mediana dos preços de anúncios reais no Webmotors pra (marca, modelo, ano), coletada pelo cron noturno (workstream G, 2026-05-12). Persistida em `avaliacao_lote.webmotors_mediana` junto com `webmotors_n_anuncios` (tamanho da amostra). Quando NÃO há amostra fresh (n=0/NULL), o sistema persiste FIPE como placeholder neutro mas o DISPLAY mostra '—' — sinal honesto de 'sem dado de mercado real ainda, espere o cron rodar'. Anúncios sumidos do estoque ganham `sumiu_em` (proxy de venda, alimenta calibração de giro real — workstream G.2).",
+                "Sinal de mercado INFORMATIVO — não entra no cálculo de Lance Máximo (precificador FIPE-only desde 2026-05-08). Operador compara FIPE × Mediana × Lance Atual lado a lado pra contextualizar. Mediana muito acima da FIPE (>1.20×) sinaliza modelos premium em alta; muito abaixo (<0.70×) pode indicar sample fraca ou anúncios vencidos. Histórico: similares do Auto Avaliar foram descontinuados como fonte (workstream G) porque amostras eram poluídas por outliers categóricos (Tiggo 7 vs Tiggo 2 etc.) e exigiam cap defensivo FIPE×1.20 que mascarava o ruído.",
             ],
             [
                 "Lucro (R$)",

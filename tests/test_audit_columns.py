@@ -60,6 +60,9 @@ def _avaliacao(
     dias_giro_estimado: Optional[int] = 90,
     fipe: Optional[int] = 40000,
     webmotors_mediana: Optional[int] = 35000,
+    # n=10 default = "tem amostra Webmotors" (display mostra mediana, audit checa).
+    # Testes podem override pra 0 pra simular "sem amostra" (display vira "—").
+    webmotors_n_anuncios: Optional[int] = 10,
     preco_giro_fipe: int = 35000,
     preco_giro_aa: Optional[int] = None,
     score_roi: float = 0.3,
@@ -83,6 +86,7 @@ def _avaliacao(
         preco_giro_aa=preco_giro_aa,
         fipe=fipe,
         webmotors_mediana=webmotors_mediana,
+        webmotors_n_anuncios=webmotors_n_anuncios,
         dias_giro_estimado=dias_giro_estimado,
         justificativa=justificativa,
         reforma_racional=reforma_racional,

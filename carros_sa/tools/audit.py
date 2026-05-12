@@ -270,7 +270,13 @@ COLUMN_EXTRACTORS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "Lance Atual (R$)": lambda r: r["lance_atual"],
     "Lance Máximo (R$)": lambda r: r["preco_max"] if r.get("laudo_analisado") else "—",
     "FIPE (R$)": lambda r: r["fipe"] if r["fipe"] is not None else "—",
-    "Mediana mercado (R$)": lambda r: r.get("webmotors_mediana") if r.get("webmotors_mediana") else "—",
+    # Workstream G: só mostra mediana se amostra real do Webmotors cobriu
+    # (`webmotors_n_anuncios >= 1`). Sem amostra → "—" (paridade com sheets).
+    "Mediana mercado (R$)": lambda r: (
+        r.get("webmotors_mediana")
+        if r.get("webmotors_mediana") and (r.get("webmotors_n_anuncios") or 0) >= 1
+        else "—"
+    ),
     "ROI alvo (%)": lambda r: (
         r["roi_alvo"] if r["viavel"] and r.get("laudo_analisado") else "—"
     ),
@@ -391,6 +397,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "preco_giro_fipe": av.preco_giro_fipe,
             "preco_giro_aa": av.preco_giro_aa,
             "webmotors_mediana": av.webmotors_mediana,
+            "webmotors_n_anuncios": av.webmotors_n_anuncios,
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
             "score_roi": av.score_roi,
             "dias_giro": av.dias_giro_estimado,
@@ -683,7 +690,10 @@ def _check_mediana_distante_fipe(row: Dict[str, Any]) -> List[CheckResult]:
     """
     mediana = row.get("webmotors_mediana")
     fipe = row.get("fipe")
-    if not mediana or not fipe or fipe <= 0:
+    n = row.get("webmotors_n_anuncios") or 0
+    # Workstream G: sem amostra real, `webmotors_mediana` é placeholder FIPE
+    # neutro — não faz sentido checar distância. Display já suprime ("—").
+    if not mediana or not fipe or fipe <= 0 or n < 1:
         return []
     ratio = mediana / fipe
     if ratio > 1.20:

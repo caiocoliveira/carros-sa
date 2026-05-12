@@ -4,11 +4,11 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape** — 481/481 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache** — 563/563 testes passando
 
-Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML.
+Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML, **coleta noturna Webmotors live (workstream G — 2026-05-12) com cache 24h, retry/Cloudflare-detect e display honesto ("—" quando sem amostra real)**.
 
-Dependências externas conhecidas: Webmotors live (workstream G — bloqueia reativação da mediana real), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
+Dependências externas conhecidas: workstream G.3 (reativar mediana no precificador — bloqueia em ≥1 semana de dado real do cron G), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
 
 ### HH — Calibração de custos pós-compra real Fusion (2026-05-11) 🔄
 
@@ -559,19 +559,55 @@ Cada um vai em seu próprio worktree git. Independentes entre si até o Orquestr
 - **Cobertura:** 6 testes em [`tests/test_exportar_sheets.py`](tests/test_exportar_sheets.py) (ROI, ordenação, sem laudo, sem avaliações), todos mockando gspread.
 - **Limitações:** depende de `avaliacao_lote` populado (workstream E). Setup one-time: service account JSON + compartilhar Sheet com e-mail do SA.
 
-### G — Webmotors live + tracking longitudinal 🕐 futuro
-Escopo expandido em 2026-05-08 (workstreams BB e CC dependem dele). Inclui dois entregáveis:
+### G — Webmotors live + tracking longitudinal ✅ (G.1 + G.2 infra, 2026-05-12)
+- **Branch:** `claude/investigate-median-source-AKH3H`
+- **Arquivos novos:**
+  - [`carros_sa/tools/webmotors_live.py`](carros_sa/tools/webmotors_live.py) — fetch async com Playwright + `playwright-stealth`, retry exponencial, detecção de Cloudflare challenge, `StealthBrowser` context manager.
+  - [`carros_sa/tools/webmotors_cache.py`](carros_sa/tools/webmotors_cache.py) — wrapper sobre tabela `anuncio_webmotors` (TTL 24h, match de ano em faixa, `marcar_anuncios_sumidos` pra G.2, `obter_estatisticas_cacheadas` integrado).
+  - [`tests/test_webmotors_live.py`](tests/test_webmotors_live.py) — 8 testes, mocka `page` Playwright, exercita parse, Cloudflare, retry/backoff.
+  - [`tests/test_webmotors_cache.py`](tests/test_webmotors_cache.py) — 9 testes, gold pra upsert/TTL/match-ano/sumiu.
+- **Arquivos modificados:**
+  - [`carros_sa/models.py`](carros_sa/models.py) — `AvaliacaoLote.webmotors_n_anuncios: Optional[int] = None` (mudança coordenada, aprovada explicitamente; migração leve em [`db.py`](carros_sa/db.py)).
+  - [`carros_sa/agents/avaliador_mercado.py`](carros_sa/agents/avaliador_mercado.py) — fonte de mediana mudou de `similares_precos` (AA) pra `webmotors_anuncios` (cache Webmotors via `session`). Cap n<5 → FIPE×1.20 **removido** (band-aid pra AA, não mais necessário). Sem amostra → `mediana = fipe` placeholder, `n=0`.
+  - [`carros_sa/orquestrador.py`](carros_sa/orquestrador.py) — para de passar `similares_precos`; propaga `mercado.n_anuncios_competidores` → `AvaliacaoLote.webmotors_n_anuncios`.
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) + [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — display da coluna "Mediana mercado (R$)" mostra "—" quando `webmotors_n_anuncios < 1` (paridade explícita). Audit `_check_mediana_distante_fipe` ignora quando `n=0`.
+  - [`carros_sa/cli.py`](carros_sa/cli.py) — novo subcommand `webmotors-coletar` pra cron noturno.
 
-**G.1 — Scraper Webmotors live (bloqueante pra reativar mediana real):**
-- Hoje `webmotors_mediana` em `SinalMercado` cai pra `FIPE × 0.97` quando Auto Avaliar não tem similares — não é dado real de Webmotors. BB removeu a mediana do cálculo do `preco_giro` justamente porque o sinal era ruído.
-- Quando G.1 ligar, redesenhar precificador como `preco_giro = FIPE × β + mediana × (1−β)` com `β` variando por `n_anuncios_competidores` (sample size). β alto → confia mais na FIPE; β baixo → confia na mediana de mercado real.
-- Anti-bot é red flag (CLAUDE.md): discutir estratégia ANTES de qualquer scraping agressivo. Pode queimar IP.
+**Estratégia anti-bot acordada (CLAUDE.md red flag respeitada):**
+- Cron noturno único, 60s/req (rate-limit configurável, rejeita <30s), batch 3-4h da manhã.
+- Playwright + stealth, 1 contexto sequencial sem paralelismo.
+- Cache 24h: skip `(marca,modelo,ano)` já coletado nas últimas 24h.
+- Retry exponencial em 403/Cloudflare/zero cards (30s → 60s → 120s).
+- Alerta de fail-rate >30% sugere pausar e investigar.
 
-**G.2 — Tracking longitudinal:**
-- Cron semanal que popula `anuncio_webmotors.sumiu_em` (calibra `dias_giro_estimado` via tempo real de mercado).
-- Só faz sentido depois de ≥2 semanas de coleta contínua de G.1.
+**Workflow operacional:**
+1. Validar manualmente uma vez: `carros-sa webmotors-coletar --marca Ford --modelo Fiesta --ano 2013 --debug`
+2. Confirmar URL/seletor JS no site real (Webmotors muda CSS-Modules com hash volátil; nosso seletor ancora em `a[href*="/comprar/"]` + innerText).
+3. Agendar cron 3h da manhã rodando `carros-sa webmotors-coletar` sem args (itera lotes ativos sem cache fresh).
 
-**Critério de "G concluído pra desbloquear BB/CC":** scraper Webmotors live retornando ≥5 amostras reais por modelo nas categorias mais comuns (hatch popular, sedan popular) com taxa de captura >70% por semana.
+**Mudanças no design da mediana:**
+- Antes: `webmotors_mediana = mediana(similares_AA)` ou `FIPE × 0.97` fallback. Cap n<5 em FIPE×1.20 mascarava similares poluídos.
+- Depois: `webmotors_mediana = mediana(Webmotors cache)` ou `FIPE` (placeholder neutro quando cache vazio). Sem cap — Webmotors tem amostra precisa por (marca,modelo,ano) sem mistura categórica.
+- **Display honesto:** coluna "Mediana mercado" vira "—" quando `n=0`, evitando passar impressão de "sinal real" pra placeholder. Quando workstream G estabilizar (≥1 semana de cron rodando), coluna passa a ter dado de mercado de revenda real.
+
+**Limitações conhecidas:**
+- `_build_search_url` usa template configurável via `WEBMOTORS_SEARCH_URL_TEMPLATE` env var — primeira validação manual pode requerer ajuste fino do template.
+- Precificador ainda é FIPE-only. **NÃO** redesenhamos como `FIPE × β + mediana × (1−β)` — isso depende de ≥1-2 semanas de cron acumulando amostra suficiente pra calibrar β por `n_anuncios_competidores`. Fica como **G.3** abaixo.
+- `_fetch_playwright` síncrono em `webmotors.py` continua bloqueado (NotImplementedError) — entry point é só o CLI.
+- Critério "≥5 amostras/modelo, captura >70%/semana" ainda não validado em produção — só após operador rodar cron por 1 semana e revisar.
+
+**Próximas iterações (G.3 e G.2 ativos):**
+- **G.3** (futuro): redesenhar precificador como `preco_giro = FIPE × β + mediana × (1−β)` com `β` variando por sample size. Bloqueia em ≥1 semana de coleta real estável.
+- **G.2** (infra pronta, ativação operacional): `marcar_anuncios_sumidos` já popula `sumiu_em` no cron noturno; basta criar relatório DuckDB `vendido_em (proxy) - primeiro_visto` pra calibrar `dias_giro_estimado` (workstream H).
+
+### G.3 — Reativar mediana no precificador 🕐 bloqueado (≥1 semana de dado real do G)
+- Precificador hoje: `preco_giro = FIPE × f_km × 0.95` (FIPE-only desde 2026-05-08).
+- Próximo: `preco_giro = (FIPE × β + mediana × (1−β)) × f_km × 0.95` com `β = f(n_anuncios)`.
+  - `β = 1.0` quando `n=0` (cai pra FIPE puro, mantém comportamento atual).
+  - `β = 0.3` quando `n ≥ 10` (confia em 70% no mercado real).
+  - Curva intermediária (sigmoid?) entre os dois.
+- **Bloqueia em:** ≥1 semana de cron rodando + auditoria de qualidade da amostra (lotes da Uberlândia precisam ter pelo menos n=5 médio).
+- **Risco:** mexer na fórmula central, exige simulação canônica de 10 cenários (CLAUDE.md/LESSONS.md). Não fazer junto com o G.1.
 
 ### H — Calibração coeficientes 🔓 destravado (dados disponíveis)
 - **Pré-requisito atendido:** [data/historico/uberlandia_arrematado.csv](data/historico/uberlandia_arrematado.csv) com **32 vendas reais** importáveis via `carros-sa arrematado-import`. Carregadas em `arrematado` + `lote` (sintético com `leilao="historico_offline"`) — preserva FK sem mexer em `models.py`.

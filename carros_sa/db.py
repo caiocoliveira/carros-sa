@@ -41,6 +41,8 @@ def init_db(db_path: Path | str | None = None) -> None:
 _MIGRACOES_ADD_COLUMN = [
     ("avaliacao_lote", "dias_giro_estimado", "INTEGER"),
     ("avaliacao_lote", "reforma_racional", "TEXT"),
+    # Workstream G (2026-05-12): tamanho da amostra Webmotors usada pra mediana.
+    ("avaliacao_lote", "webmotors_n_anuncios", "INTEGER"),
 ]
 
 

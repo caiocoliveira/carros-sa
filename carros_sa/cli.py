@@ -865,5 +865,132 @@ def registrar_compra(
     )
 
 
+@app.command("webmotors-coletar")
+def webmotors_coletar(
+    marca: Optional[str] = typer.Option(None, "--marca", help="Marca específica (default: todos lotes ativos sem cache fresh)"),
+    modelo: Optional[str] = typer.Option(None, "--modelo", help="Modelo específico (default: todos)"),
+    ano: Optional[int] = typer.Option(None, "--ano", help="Ano específico (default: todos)"),
+    rate_limit_s: int = typer.Option(
+        60, "--rate-limit", help="Sleep entre requisições em segundos (default 60, mínimo 30)"
+    ),
+    max_modelos: int = typer.Option(
+        120, "--max", help="Máximo de (marca,modelo,ano) por execução. Default 120 = ~2h em 60s/req."
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Browser visível + log verboso"),
+) -> None:
+    """Coleta noturna do Webmotors live pra popular cache `anuncio_webmotors`.
+
+    Workstream G. Estratégia anti-bot:
+      - Cron noturno único (3-4h da manhã)
+      - 60s/req (configurável; rejeita <30s pra evitar burst)
+      - Playwright + stealth, 1 contexto sequencial
+      - Cache 24h: skip (marca,modelo,ano) já coletado nas últimas 24h
+      - Marca anúncios sumidos pra calibração de giro real (workstream G.2)
+
+    Default: coleta todos `(marca,modelo,ano)` de lotes ATIVOS no DB sem
+    cache fresh, ordenados por urgência (fim_em mais próximo primeiro).
+    Filtros `--marca`/`--modelo`/`--ano` restringem a 1 alvo (validação manual).
+
+    Antes de agendar em cron, valide manualmente:
+      carros-sa webmotors-coletar --marca Ford --modelo Fiesta --ano 2013 --debug
+    """
+    import asyncio as _asyncio
+    from datetime import datetime as _dt
+
+    from sqlmodel import select as _select
+
+    from carros_sa.db import get_session, init_db
+    from carros_sa.models import Lote
+    from carros_sa.tools.webmotors_cache import (
+        marcar_anuncios_sumidos,
+        obter_anuncios_cacheados,
+        persistir_anuncios,
+    )
+    from carros_sa.tools.webmotors_live import (
+        StealthBrowser,
+        WebmotorsLiveError,
+        fetch_com_retry,
+    )
+
+    if rate_limit_s < 30:
+        console.print("[red]rate-limit < 30s rejeitado (risco de queimar IP)[/red]")
+        raise typer.Exit(2)
+
+    init_db()
+
+    # 1. Monta lista de alvos
+    alvos: list[tuple[str, str, int]] = []
+    if marca and modelo and ano:
+        alvos = [(marca, modelo, ano)]
+    else:
+        with get_session() as session:
+            stmt = _select(Lote).where(Lote.fim_em.is_not(None)).order_by(Lote.fim_em)
+            lotes = session.exec(stmt).all()
+            seen = set()
+            for lote in lotes:
+                if not lote.marca or not lote.modelo or not lote.ano:
+                    continue
+                key = (lote.marca.strip(), lote.modelo.strip(), lote.ano)
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Skip se já tem cache fresh (TTL 24h)
+                if obter_anuncios_cacheados(session, *key):
+                    continue
+                alvos.append(key)
+                if len(alvos) >= max_modelos:
+                    break
+
+    if not alvos:
+        console.print("[yellow]Nenhum (marca,modelo,ano) precisa coletar — cache fresh ou DB vazio.[/yellow]")
+        return
+
+    console.print(
+        f"\n[bold]Webmotors live coleta:[/bold] {len(alvos)} alvos, "
+        f"rate-limit {rate_limit_s}s → ~{len(alvos) * rate_limit_s / 60:.0f} min total"
+    )
+
+    async def _run():
+        ok = 0
+        falhas = 0
+        ts_inicio = _dt.utcnow()
+        async with StealthBrowser(headless=not debug) as page:
+            for i, (m, mo, an) in enumerate(alvos, start=1):
+                console.print(f"\n[{i}/{len(alvos)}] {m} {mo} {an}")
+                try:
+                    anuncios = await fetch_com_retry(page, m, mo, an)
+                except WebmotorsLiveError as exc:
+                    console.print(f"  [red]✗ {exc}[/red]")
+                    falhas += 1
+                else:
+                    with get_session() as session:
+                        n_novos = persistir_anuncios(session, anuncios)
+                        # Marca sumidos: anúncios desse (m,mo,an) com ultimo_visto
+                        # < inicio do batch = não apareceram dessa vez
+                        n_sumidos = marcar_anuncios_sumidos(
+                            session, m, mo, an, visto_em_ou_apos=ts_inicio,
+                        )
+                    console.print(
+                        f"  [green]✓ {len(anuncios)} anúncios[/green] "
+                        f"({n_novos} novos, {n_sumidos} sumiram)"
+                    )
+                    ok += 1
+                # Rate-limit entre requests (skip no último)
+                if i < len(alvos):
+                    await _asyncio.sleep(rate_limit_s)
+
+        console.print(
+            f"\n[bold]Coleta concluída:[/bold] {ok}/{len(alvos)} ok, "
+            f"{falhas} falhas ({falhas/len(alvos):.0%} fail rate)"
+        )
+        if falhas / len(alvos) > 0.3:
+            console.print(
+                "[yellow]⚠ Fail rate > 30% — possível Cloudflare detectando. "
+                "Aumentar rate-limit, trocar IP ou pausar cron.[/yellow]"
+            )
+
+    _asyncio.run(_run())
+
+
 if __name__ == "__main__":
     app()

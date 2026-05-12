@@ -314,6 +314,11 @@ class AvaliacaoLote(SQLModel, table=True):
     # Podem ficar NULL em registros antigos (pré-workstream K).
     fipe: Optional[int] = None
     webmotors_mediana: Optional[int] = None
+    # Tamanho da amostra Webmotors usada pra calcular `webmotors_mediana`.
+    # 0/None = sem amostra (display em sheets/audit mostra "—" pra não passar
+    # impressão de sinal real quando o cache não cobre). >=1 = amostra real.
+    # Adicionado em 2026-05-12 (workstream G — Webmotors live + cron noturno).
+    webmotors_n_anuncios: Optional[int] = None
     # Tempo estimado de venda (dias) — usado pra calcular ROI anualizado no
     # ranking. NULL em registros pré-Bloco C; nesses casos rank cai pro score_roi
     # absoluto.

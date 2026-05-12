@@ -1,13 +1,20 @@
-"""AvaliadorMercado — combina FIPE + similares Auto Avaliar em SinalMercado.
+"""AvaliadorMercado — combina FIPE + amostra de mercado (Webmotors live) em SinalMercado.
 
-Webmotors (workstream B) ainda não existe; enquanto isso usamos os preços de
-similares que a própria plataforma Auto Avaliar mostra na página de detalhe
-(`DetalheFlags.similares_precos`). Quando B chegar, troca-se a fonte de
-mediana/p25 sem mexer no contrato.
+Fonte de mediana/p25 (workstream G, 2026-05-12):
+  - **Webmotors live** via cache populado pelo CLI `carros-sa webmotors-coletar`
+    (cron noturno, rate-limit ≥60s, TTL 24h). `session` ativa o lookup.
+  - **Sem amostra fresh** → `webmotors_mediana = fipe` como placeholder neutro
+    (não muda o cálculo — precificador é FIPE-only desde 2026-05-08), e
+    `n_anuncios_competidores = 0` sinaliza ao display "sem sinal de mercado"
+    (sheets/audit mostram "—").
+  - **Similares do Auto Avaliar foram descontinuados** como fonte de mediana
+    nesse fluxo: amostras frequentemente poluídas (Tiggo 7 entre Tiggo 2,
+    Airtrek vs Outlander) e exigiam cap defensivo `FIPE×1.20` que mascarava
+    o ruído. Workstream G pula AA aqui.
 
 Cache:
-  - In-memory por instância do FipeClient (auto)
-  - Persistente em `modelo_fipe_cache` quando uma `Session` é passada
+  - FIPE in-memory + persistente em `modelo_fipe_cache` (quando `session` passada)
+  - Webmotors em `anuncio_webmotors` (TTL 24h via `webmotors_cache`)
 """
 
 from __future__ import annotations
@@ -100,19 +107,26 @@ def avaliar(
     modelo: str,
     ano: int,
     km: Optional[int] = None,
-    similares_precos: Optional[List[int]] = None,
     categoria: CategoriaVeiculo = CategoriaVeiculo.OUTRO,
     fipe_client: Optional[FipeClient] = None,
     session: Optional[Session] = None,
     empresa_id: Optional[str] = None,
     aplicar_popularidade: bool = True,
     webmotors_km_mediana: Optional[int] = None,
+    webmotors_anuncios: Optional[List["AnuncioWM"]] = None,  # type: ignore[name-defined]  # noqa: F821
 ) -> SinalMercado:
     """Devolve SinalMercado para um (marca, modelo, ano).
 
-    `similares_precos` é a lista de preços que a página de detalhe de Auto
-    Avaliar mostra na seção 'Talvez se interesse por'. Quando vazio, caímos
-    na heurística FIPE × 0.9 (mediana) / 0.78 (p25).
+    Mediana/p25 vêm do **Webmotors** (workstream G). Em produção,
+    `webmotors_anuncios` é None e o cache em `anuncio_webmotors` é
+    consultado via `session` (TTL 24h, populado pelo cron noturno
+    `carros-sa webmotors-coletar`). Testes podem injetar
+    `webmotors_anuncios=[AnuncioWM(...), ...]` pra bypassar o DB.
+
+    Sem amostra fresh: `webmotors_mediana = fipe` (placeholder neutro — não
+    afeta cálculo do precificador, que é FIPE-only desde 2026-05-08), e
+    `n_anuncios_competidores = 0` faz o display em sheets/audit mostrar "—"
+    pra evitar passar a impressão de "sinal real" quando o cache não cobre.
 
     Quando `empresa_id` e `session` são passados, `dias_giro_estimado` é
     calibrado a partir do histórico real (Arrematado da empresa) — fallback
@@ -121,35 +135,30 @@ def avaliar(
     fipe = fipe_client or FipeClient()
     fipe_valor = _consultar_fipe_com_cache(fipe, marca, modelo, ano, session)
 
-    sim = [p for p in (similares_precos or []) if p > 0]
-    if sim:
-        mediana = int(round(statistics.median(sim)))
-        p25 = _percentil_25(sim)
-        n = len(sim)
-        # Cap mediana inflada quando amostra é pequena. Auto Avaliar pode incluir
-        # "similares" de outro modelo/versão (ex.: Tiggo 7 listado entre Tiggo 2),
-        # e a mediana de n<5 com 1 outlier puxa o preço-âncora pra cima — vimos
-        # casos de mediana 153% da FIPE com n=2. FIPE × 1.20 é teto generoso
-        # (Civic e Corolla legitimamente vendem ~110% da FIPE em alta de mercado).
-        # Sem este cap, um lance máximo > FIPE × 1.05 podia sair (audit pega o
-        # sintoma, mas só após o estrago já estar persistido).
-        if n < 5:
-            cap_mediana = int(fipe_valor * 1.20)
-            if mediana > cap_mediana:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "mediana_similares_inflada cap_aplicado mediana=%s cap=%s n=%s fipe=%s marca=%s modelo=%s",
-                    mediana, cap_mediana, n, fipe_valor, marca, modelo,
-                )
-                mediana = cap_mediana
-                if p25 > mediana:
-                    p25 = mediana
+    # Lookup do cache Webmotors (workstream G). Testes injetam lista direta
+    # via `webmotors_anuncios=`. Em produção, `session` ativa o cache do DB.
+    anuncios = webmotors_anuncios
+    if anuncios is None and session is not None:
+        from carros_sa.tools.webmotors_cache import obter_anuncios_cacheados
+        anuncios = obter_anuncios_cacheados(session, marca, modelo, ano)
+
+    precos = sorted(a.preco for a in (anuncios or []) if a.preco > 0)
+    if precos:
+        mediana = int(statistics.median(precos))
+        p25 = _percentil_25(precos)
+        n = len(precos)
+        # km_mediana derivado da própria amostra Webmotors quando disponível —
+        # mais preciso que `webmotors_km_mediana` injetado externamente. Caller
+        # pode override passando explicitamente.
+        if webmotors_km_mediana is None:
+            kms = [a.km for a in (anuncios or []) if a.km and a.km > 0]
+            if kms:
+                webmotors_km_mediana = int(statistics.median(kms))
     else:
-        # sem dados de competidores: usa FIPE como referência de revenda.
-        # O usuário confirmou que vende próximo da FIPE — então mediana≈97%
-        # (margem de negociação de ~3%). p25≈88% é conservador pra ranking.
-        # Webmotors (workstream B) substituirá esses fallbacks por dados reais.
-        mediana = int(round(fipe_valor * 0.97))
+        # Sem amostra: FIPE como placeholder neutro pra preservar contrato
+        # (`SinalMercado.webmotors_mediana: int` rejeita ≤0). p25 sentinela
+        # conservador. Display em sheets/audit suprime quando `n=0`.
+        mediana = fipe_valor
         p25 = int(round(fipe_valor * 0.88))
         n = 0
 

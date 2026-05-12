@@ -219,11 +219,19 @@ def estatisticas(
 # =============================================================================
 
 def _fetch_playwright(marca: str, modelo: str) -> List[AnuncioWM]:
-    """Placeholder. Implementar com playwright-stealth, rate-limit, cache 24h
-    antes de ligar. Red flag do CLAUDE.md: risco de queimar IP.
+    """Bloqueado por design — `estatisticas()` sem `anuncios`/`fetch` injetado.
+
+    Workstream G (2026-05-12) habilitou coleta ao vivo, MAS o entry point
+    público é o CLI `carros-sa webmotors-coletar` que aplica rate-limit ≥60s
+    e cache 24h em DB. Chamar `estatisticas()` síncrono sem passar
+    `anuncios=` é caminho que tenta fazer 1 fetch isolado e pode queimar IP.
+
+    Pra usar dado live no avaliador: chame `webmotors_cache.obter_anuncios_cacheados(...)`
+    e passe em `anuncios=`. O cron noturno popula o cache.
     """
     raise NotImplementedError(
-        "Coleta ao vivo do Webmotors ainda não habilitada. "
-        "Passe anuncios=... ou fetch=... explicitamente. "
+        "Coleta ao vivo do Webmotors só via CLI `carros-sa webmotors-coletar` "
+        "(rate-limit + cache). Pra usar dado live, leia do cache via "
+        "`webmotors_cache.obter_anuncios_cacheados()` e passe em `anuncios=`. "
         "Ver workstream G no ROADMAP."
     )

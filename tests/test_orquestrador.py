@@ -37,6 +37,7 @@ from carros_sa.orquestrador import (
     _persistir_flags_no_lote,
     _pipeline_lote,
     _upsert_avaliacao,
+    _upsert_laudo_cache,
     _upsert_lote,
 )
 from carros_sa.models import Avaliacao, PrecoReferenciaAA
@@ -615,6 +616,54 @@ class TestPersistencia:
             ).first()
             assert persistida is not None
             assert persistida.preco_alvo == 18000
+
+
+class TestUpsertLaudoCacheTentativas:
+    """Circuit-breaker: cada extração com confidence<0.6 incrementa o
+    contador; uma extração ≥0.6 zera. Filtro de retry usa pra parar de
+    queimar LLM em lotes onde o problema é input, não extrator."""
+
+    def _persistir(self, session, lote_id: str, confidence: float):
+        laudo = _laudo_estruturado()
+        laudo.confidence = confidence
+        _upsert_laudo_cache(lote_id, laudo, session)
+        session.commit()
+        return session.get(LaudoCache, lote_id)
+
+    def test_primeira_extracao_fraca_seta_um(self):
+        engine = _engine()
+        with Session(engine) as session:
+            session.add(_lote("L_T1"))
+            session.commit()
+            cache = self._persistir(session, "L_T1", confidence=0.3)
+            assert cache.tentativas_extracao == 1
+
+    def test_segunda_extracao_fraca_incrementa(self):
+        engine = _engine()
+        with Session(engine) as session:
+            session.add(_lote("L_T2"))
+            session.commit()
+            self._persistir(session, "L_T2", confidence=0.3)
+            cache = self._persistir(session, "L_T2", confidence=0.3)
+            assert cache.tentativas_extracao == 2
+
+    def test_extracao_forte_zera_contador(self):
+        engine = _engine()
+        with Session(engine) as session:
+            session.add(_lote("L_T3"))
+            session.commit()
+            self._persistir(session, "L_T3", confidence=0.3)
+            self._persistir(session, "L_T3", confidence=0.3)
+            cache = self._persistir(session, "L_T3", confidence=0.85)
+            assert cache.tentativas_extracao == 0
+
+    def test_extracao_forte_de_cara_fica_zero(self):
+        engine = _engine()
+        with Session(engine) as session:
+            session.add(_lote("L_T4"))
+            session.commit()
+            cache = self._persistir(session, "L_T4", confidence=0.9)
+            assert cache.tentativas_extracao == 0
 
 
 # ---------------------------------------------------------------------------

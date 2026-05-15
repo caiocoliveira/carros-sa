@@ -118,6 +118,9 @@ jobs:
           printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > "$RUNNER_TEMP/gsa.json"
           echo "GOOGLE_SERVICE_ACCOUNT_PATH=$RUNNER_TEMP/gsa.json" >> "$GITHUB_ENV"
 
+      - name: Migra schema (idempotente)
+        run: .venv/bin/python scripts/migrar_tentativas_extracao.py
+
       - name: Triagem + limpa decoys + retry de laudos pendentes + audit gate
         env:
           AUTOAVALIAR_EMAIL: ${{ secrets.AUTOAVALIAR_EMAIL }}

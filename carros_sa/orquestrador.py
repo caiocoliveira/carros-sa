@@ -380,8 +380,16 @@ def _upsert_lote(
 
 
 def _upsert_laudo_cache(lote_id: str, laudo: LaudoEstruturado, session: Session, modelo_llm: str = "gemini-flash") -> None:
-    """Persiste LaudoCache (global, por lote_id)."""
+    """Persiste LaudoCache (global, por lote_id).
+
+    `tentativas_extracao` é circuit-breaker: incrementa em extração fraca
+    (confidence < 0.6 — input ruim, LLM nada pôde fazer), zera em sucesso
+    (>= 0.6). Filtro de retry consulta pra evitar perma-loop em lotes com
+    body_text vazio ou PDF inacessível.
+    """
     existente = session.get(LaudoCache, lote_id)
+    tentativas_prev = (existente.tentativas_extracao if existente else 0) or 0
+    tentativas_novo = 0 if laudo.confidence >= 0.6 else tentativas_prev + 1
     dados = dict(
         lote_id=lote_id,
         avarias_json=[a.model_dump() for a in laudo.avarias],
@@ -393,6 +401,7 @@ def _upsert_laudo_cache(lote_id: str, laudo: LaudoEstruturado, session: Session,
         modelo_llm=modelo_llm,
         custo_usd=0.001,
         extraido_em=datetime.utcnow(),
+        tentativas_extracao=tentativas_novo,
     )
     if existente:
         for k, v in dados.items():

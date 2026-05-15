@@ -48,6 +48,11 @@ jobs:
       PYTHONPATH: .
       AUTOAVALIAR_COOKIES_PATH: ${{ github.workspace }}/.state/autoavaliar_cookies.json
       CARROS_SA_DB: ${{ github.workspace }}/carros_sa.db
+      # Runner do GH Actions é UTC. Todo o pipeline usa `datetime.now()` naive
+      # local pra comparações de `fim_em` (ver LESSONS.md / CLAUDE.md
+      # "Lote.fim_em é naive LOCAL — nunca UTC"). Sem isso, lotes encerrados
+      # parecem ativos e o banner da planilha sai 3h adiantado.
+      TZ: America/Sao_Paulo
     steps:
       - uses: actions/checkout@v4
 

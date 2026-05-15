@@ -382,6 +382,38 @@ docstring que vincule "este flag responde a pergunta X, default responde
 a pergunta Y". Tests-âncora são MAIS valiosos que tests de "happy path"
 porque restringem o que você pode mudar sem pensar.
 
+### RC10. Extrator devolvendo "vazio confiável" persistido como-está vira loop perpétuo
+
+Sintoma: uma camada de extração devolve resposta válida mas com sinal nulo
+— modelo dizendo "olhei e não tem nada útil aqui" (confidence baixa + listas
+vazias) em vez de inventar. Persistir esse resultado como-está parece honesto
+mas, se a próxima rodada do pipeline aplicar o MESMO extrator no MESMO input,
+o resultado é o mesmo, indefinidamente. O lote fica num bucket de retry
+perpétuo, audit reclama, cron exit-1, ninguém olha.
+
+Caso de referência (2026-05-15, DD4):
+- **Gemini visual sobre página 2 do PDF** — extrator hardcoded pro template
+  Auto Avaliar (diagrama colorido na página 2). Vendors observados em
+  produção (DEKRA, Procemax, SA-Laudo, Vistoria Cautelar genérica) NÃO têm o
+  diagrama nessa página. Gemini corretamente devolvia `confidence=0.0,
+  pecas=[]`. Persistido. Próximo cron rodava no mesmo lote → mesmo resultado.
+  22/47 lotes ativos travados em `cache_confianca_baixa` perpetuamente.
+
+**Antídoto operacional:** detectar "extrator respondeu mas inútil"
+(confidence < threshold + listas vazias) como caso DIFERENTE de "extrator
+respondeu com sinal forte". Disparar uma camada de fallback que olha pra
+input DIFERENTE — mesmo PDF, mas usando texto completo em vez de página 2;
+ou mesmo lote, mas refazendo o scrape; ou mesmo dado, mas via LLM diferente.
+"Mesmo extrator, mesmo input, próxima rodada" é definição de loop infinito.
+
+**Antídoto estrutural:** quando uma camada de extração tem premissa de
+formato hardcoded (template do vendor X, página N do PDF, regex calibrada
+em fixture Y), prever que vendors NOVOS vão chegar e ou (a) construir o
+extrator pra ser vendor-agnostic desde o início (LLM com prompt sobre input
+diverso), ou (b) ter uma camada de fallback explícita pronta. "Vendor X é o
+único que existe" é premissa não-validada — viola RC2 (fornecedor instável
+tratado como API estável).
+
 ### RC7. Pressa em fechar o workstream
 
 ROADMAP trata `✅` como métrica de sucesso visível. Isso cria incentivo

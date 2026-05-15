@@ -27,6 +27,11 @@ Dependências externas conhecidas: workstream G.3 (reativar mediana no precifica
   - Não resolve o problema upstream (DD5 — `coletar_detalhe` retornando `body_text=""`). Apenas para de queimar LLM nele.
   - Constante MAX=3 não é ajustável via env var. Se operador quiser destravar manualmente, deletar a linha de `LaudoCache` ou rodar `UPDATE laudo SET tentativas_extracao=0 WHERE lote_id=...` direto no SQLite.
   - Operador precisa ler audit `--strict` pra saber que tem lotes em circuit-break — não há aviso visual diferenciado na planilha (continua "⚠ LAUDO NÃO CAPTURADO").
+- **Follow-ups (não-bloqueantes, post-merge da revisão arquitetural do PR #93):**
+  - **II-FU1 — Teste do branch "forte→fraco":** asserir que após `conf=0.9` seguido de `conf=0.3`, `tentativas_extracao` vai 0→1. Hoje cobrimos a direção inversa (`test_extracao_forte_zera_contador`). Lógica está correta (`tentativas_prev=0, novo=0+1=1`), só falta cobertura.
+  - **II-FU2 — Alinhar convenção de migração:** hoje a migração de `tentativas_extracao` vive em `scripts/migrar_tentativas_extracao.py` + step no workflow, mas `db.py::_MIGRACOES_ADD_COLUMN` tem o padrão "in-process" usado por K. Dois caminhos paralelos. Opção: mover pra registry de `db.py` OU documentar em CLAUDE.md por que coexistem.
+  - **II-FU3 — Audit-aware circuit-break:** adicionar `motivo='cache_confianca_baixa_circuit_break'` distinto quando `tentativas>=MAX`. Operador consegue grepar "stuck e desistimos" separado de "stuck e ainda tentando". Pairs com DD4-FU1 (`metodo_extracao` instrumentação).
+  - **II-FU4 — CLI helper `laudo reset-tentativas <lote_id>`:** evita operador rodar SQL cru contra `state/db` em prod. Pequeno, mas fecha o loop UX.
 
 ### DD4 — LLM textual vendor-agnostic destrava lotes com PDF de leiloeiro fora do template Auto Avaliar (2026-05-15) ✅
 - **Branch:** `claude/amazing-goldberg-ijutz`

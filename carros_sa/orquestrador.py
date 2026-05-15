@@ -602,8 +602,14 @@ async def _pipeline_lote(
 
         if pdf_dest is not None:
             try:
-                # Tentativa 1: extração completa (textual + visão)
-                laudo = extrair_laudo(pdf_dest, vision_client)
+                # Tentativa 1: extração completa (textual + visão + LLM textual
+                # vendor-agnostic). `text_llm_client` ativa a camada 4 do
+                # extrator — fallback que cobre vendors fora do template AA
+                # (DEKRA / Procemax / SA-Laudo / Vistoria Cautelar genérica)
+                # cujos PDFs faziam Gemini visual devolver confidence=0.0,
+                # condenando o lote ao bucket `cache_confianca_baixa` em runs
+                # subsequentes (22/47 incompletos em produção 2026-05-15).
+                laudo = extrair_laudo(pdf_dest, vision_client, text_llm_client=text_llm_client)
             except Exception:
                 # Tentativa 2: só camada textual (quando PDF tem <2 páginas ou visão falha)
                 try:

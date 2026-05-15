@@ -373,6 +373,146 @@ def extrair_laudo_visual(pdf_path: Path, vision_client) -> dict:
 
 
 # =============================================================================
+# Camada 4 — LLM textual sobre o PDF inteiro (fallback vendor-agnostic)
+# =============================================================================
+#
+# Quando a visão Gemini renderiza a página 2 (índice 1) do PDF mas devolve
+# confidence=0.0 + pecas vazias, é porque o PDF NÃO é do template Auto Avaliar
+# clássico (diagrama colorido na página 2). Vendors observados em produção
+# (2026-05-15, 22/47 incompletos):
+#   - DEKRA CAUTELAR: page 6/7 tem ESTRUTURA, page 1 só tem cliente
+#   - Procemax (sistemaprocemax.com.br): laudo 100% textual, sem diagrama
+#   - Vistoria Cautelar genérica (sa-laudo, doc-b2b-adm): fotografias de peças
+#     individuais, listadas como "COLUNA CENTRAL ESQUERDA", "LONGARINA DIANTEIRA"
+#   - SA-Laudo (BM Veiculos): listagem de peças danificadas em página 5
+#
+# A regex de `extrair_avarias_textuais` (camada 2) também falha pra esses
+# layouts porque foi calibrada nos termos do Auto Avaliar ("VEÍCULO POSSUI
+# REPARO NAS COLUNAS B e C..."). Em vez de manter regex por vendor (frágil,
+# vira N×M caso futuro), delegamos pro Gemini Flash text-only. Custo: ~grátis
+# (free tier) + ~2-3s/lote. Roda só quando visual deu 0 sinal, então não
+# afeta a maioria dos lotes (~75% Auto Avaliar puro, visual responde bem).
+
+_PROMPT_LAUDO_TEXTUAL = """Você é um especialista em laudos cautelares veiculares brasileiros (Auto Avaliar, DEKRA, Procemax, SA-Laudo, Vistoria Cautelar genérica). Recebeu o TEXTO INTEGRAL extraído de um laudo PDF e precisa identificar avarias estruturais e de carroceria.
+
+TEXTO DO LAUDO:
+---
+{texto}
+---
+
+Sua tarefa: extrair as peças que apresentam reparo, substituição, dano estrutural OU avaria superficial. Os layouts variam por leiloeiro, mas as menções típicas são:
+
+  - "REPARO NA COLUNA B ESQUERDA" / "Coluna B esquerda REPARADA"
+  - "LONGARINA DIANTEIRA DIREITA: Reparada / Soldada / Substituída"
+  - "Paralama esquerdo amassado" / "Capô com pequenos danos"
+  - "Porta dianteira direita repintura"
+  - "Pintura repintada" / "Não original" / "Lateral repintada"
+  - Listas tipo "1. Painel diagnóstico - REPARADO" / "DIANTEIRA C/ LATERAL DIREITA: Reparada"
+
+Use EXATAMENTE estes nomes (lowercase, snake_case) para as peças:
+  painel_frontal, painel_traseiro, capo_tampa_motor, tampa_traseira, teto_veiculo,
+  longarina_dianteira_esquerda, longarina_dianteira_direita,
+  longarina_traseira_esquerda, longarina_traseira_direita,
+  coluna_a_esquerda, coluna_a_direita,
+  coluna_b_esquerda, coluna_b_direita,
+  coluna_c_esquerda, coluna_c_direita,
+  coluna_d_esquerda, coluna_d_direita,
+  paralama_dianteiro_esquerdo, paralama_dianteiro_direito,
+  paralama_traseiro_esquerdo, paralama_traseiro_direito,
+  porta_dianteira_esquerda, porta_dianteira_direita,
+  porta_traseira_esquerda, porta_traseira_direita
+
+Retorne APENAS JSON válido no formato:
+{{
+  "pecas_reparadas": ["<nomes>"],
+  "pecas_avariadas": ["<nomes>"],
+  "severidade_geral": "nenhuma" | "leve" | "media" | "grave" | "estrutural",
+  "confidence": 0.0-1.0,
+  "observacao_textual": "1-2 frases descrevendo o que você encontrou (em português)"
+}}
+
+Regras para severidade_geral:
+  - "estrutural" se QUALQUER longarina ou coluna aparecer como reparada/substituída/soldada
+  - "grave" se 3+ peças quaisquer reparadas
+  - "media" se 1-2 peças de chapa externa (porta, paralama, capô) reparadas
+  - "leve" se só avariadas/pequenos danos
+  - "nenhuma" se nada de relevante (laudo aprovado, nada consta)
+
+Regras para confidence:
+  - 0.8-0.95 se o texto explicitamente lista peças com status claro (reparado/avariado)
+  - 0.6-0.75 se inferência razoável a partir de "Nada Consta" / "Laudo Aprovado" sem lista
+  - 0.3-0.5 se texto incompleto/cortado/ambíguo
+  - 0.0-0.2 se o texto NÃO parece um laudo veicular (página em branco, OCR ruim)
+
+IMPORTANTE: Se o texto está claramente vazio ou só contém boilerplate (cabeçalho/rodapé sem conteúdo de inspeção), devolva confidence=0.0 e listas vazias. Não invente avarias.
+
+NÃO inclua comentários, NÃO inclua texto fora do JSON."""
+
+
+def extrair_laudo_via_llm_textual(
+    pdf_path: Path,
+    text_llm_client,
+    max_chars: int = 20_000,
+) -> Optional[dict]:
+    """Extrai avarias via LLM text-only sobre o PDF inteiro (fallback vendor-agnostic).
+
+    Lê todas as páginas do PDF, junta como string única, trunca em `max_chars`
+    (default 20KB — suficiente pros laudos típicos de 10-15 páginas; mais que
+    isso é exceção e Gemini Flash absorve sem problema, mas truncar protege
+    contra PDF anômalo de centenas de páginas) e delega pro LLM com prompt
+    vendor-agnostic.
+
+    Retorna `None` se o LLM falhar, JSON inválido, ou se `text_llm_client=None`.
+    Caller decide se usa este resultado ou mantém o anterior.
+    """
+    if text_llm_client is None:
+        return None
+
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    try:
+        doc = fitz.open(str(pdf_path))
+        partes = []
+        total = 0
+        for page in doc:
+            txt = page.get_text() or ""
+            partes.append(txt)
+            total += len(txt)
+            if total >= max_chars:
+                break
+        doc.close()
+        texto = "\n".join(partes)[:max_chars]
+    except Exception as exc:
+        _log.warning(
+            "extrair_laudo_via_llm_textual: falha lendo PDF %s (%s: %s)",
+            pdf_path.name, type(exc).__name__, exc,
+        )
+        return None
+
+    if not texto.strip():
+        _log.warning(
+            "extrair_laudo_via_llm_textual: PDF %s sem texto extraível",
+            pdf_path.name,
+        )
+        return None
+
+    prompt = _PROMPT_LAUDO_TEXTUAL.format(texto=texto)
+    try:
+        resposta = text_llm_client.generate_json(prompt)
+    except Exception as exc:
+        _log.warning(
+            "extrair_laudo_via_llm_textual: LLM falhou em %s (%s: %s)",
+            pdf_path.name, type(exc).__name__, exc,
+        )
+        return None
+
+    if not isinstance(resposta, dict):
+        return None
+    return resposta
+
+
+# =============================================================================
 # Combinação: LaudoEstruturado final
 # =============================================================================
 
@@ -385,15 +525,52 @@ _SEVERIDADE_MAP = {
 }
 
 
+def _visual_e_inutil(visual: Optional[dict]) -> bool:
+    """Visual extraction "respondeu" mas sem sinal útil: conf<0.6 + 0 peças.
+
+    Caso típico observado em produção (2026-05-15, 22/47 incompletos): Gemini
+    renderiza página 2 (índice 1) mas o PDF é DEKRA / Procemax / SA-Laudo
+    genérica, onde page 2 não contém o diagrama estrutural. Modelo
+    corretamente devolve confidence=0.0 + pecas_reparadas=[] +
+    pecas_avariadas=[] em vez de inventar. Persistir como-está condena o
+    lote ao bucket `cache_confianca_baixa` em todos os runs subsequentes —
+    o retry roda mas chega ao mesmo 0.0. Sinaliza pro caller que vale chamar
+    o fallback `extrair_laudo_via_llm_textual`.
+    """
+    if visual is None:
+        return True
+    conf = visual.get("confidence", 0.7)
+    try:
+        conf = float(conf)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf >= 0.6:
+        return False
+    reparadas = visual.get("pecas_reparadas") or []
+    avariadas = visual.get("pecas_avariadas") or []
+    return not reparadas and not avariadas
+
+
 def extrair_laudo(
     pdf_path: Path,
     vision_client,
     categoria_veiculo: CategoriaVeiculo = CategoriaVeiculo.OUTRO,
+    text_llm_client=None,
 ) -> LaudoEstruturado:
-    """Pipeline completo: parse textual + visão + consolidação em LaudoEstruturado.
+    """Pipeline completo: parse textual + visão + (opcional) LLM textual + consolidação.
 
-    Se a camada de visão falhar (ex.: Gemini 503 UNAVAILABLE), cai pra apenas o
-    extrator textual (observações + documentação), com confidence reduzida.
+    Camadas em ordem:
+      1. `parse_laudo_textual` — identificadores + Observações (sempre roda)
+      2. `extrair_laudo_visual` — Gemini sobre página 2 do PDF (diagrama AA)
+      3. `extrair_avarias_textuais` — regex sobre Observações (enriquece)
+      4. `extrair_laudo_via_llm_textual` — Gemini text-only sobre PDF inteiro
+         (vendor-agnostic; só dispara quando visual+regex deram 0 sinal E
+         `text_llm_client` foi passado). Cobre DEKRA / Procemax / SA-Laudo
+         genérica cujos PDFs não seguem o template Auto Avaliar.
+
+    Se a camada de visão falhar (ex.: Gemini 503 UNAVAILABLE), cai pra apenas
+    o extrator textual (observações + documentação) + LLM textual quando
+    disponível. Sem `text_llm_client`, comportamento idêntico ao histórico.
     """
     import logging as _logging
     _log = _logging.getLogger(__name__)
@@ -442,9 +619,52 @@ def extrair_laudo(
             vistas_parte.add(av_text.parte)
             avarias.append(av_text)
 
-    # Severidade: prioriza valor da visão, senão deriva das avarias textuais.
-    if visual is not None and "severidade_geral" in visual:
+    # Camada 4 — LLM textual sobre o PDF inteiro. Dispara só quando visual
+    # respondeu sem sinal útil E o regex de Observações também ficou vazio
+    # (i.e. todas as outras camadas falharam). Dois objetivos:
+    #   (a) cobrir PDFs de vendors fora do template Auto Avaliar (DEKRA,
+    #       Procemax, SA-Laudo, Vistoria Cautelar genérica) — em produção
+    #       isso afetava 22/47 lotes incompletos (2026-05-15);
+    #   (b) tirar o lote da fila perpétua de retry: sem este passo, o
+    #       `auditar_laudos --strict` reportava `cache_confianca_baixa` runs
+    #       seguidos e o cron exit-1 mesmo após processamento completo.
+    # Quando o LLM acha avarias, integra na lista (mesma severidade-por-nome
+    # do visual). Quando devolve confidence>=0.6 com listas vazias e severidade
+    # "nenhuma", ESTABELECE que o laudo foi revisado E está limpo — a planilha
+    # passa a mostrar "✓ Viável" ao invés de "⚠ LAUDO NÃO CAPTURADO".
+    llm_textual: Optional[dict] = None
+    if _visual_e_inutil(visual) and not avarias and text_llm_client is not None:
+        llm_textual = extrair_laudo_via_llm_textual(pdf_path, text_llm_client)
+        if llm_textual is not None:
+            for nome in llm_textual.get("pecas_reparadas", []) or []:
+                if nome in vistas_parte:
+                    continue
+                vistas_parte.add(nome)
+                sev = (
+                    SeveridadeAvaria.GRAVE
+                    if ("coluna" in nome or "longarina" in nome)
+                    else SeveridadeAvaria.MEDIA
+                )
+                avarias.append(Avaria(
+                    parte=nome, severidade=sev,
+                    descricao="reparado/soldado/substituído (via LLM textual)",
+                ))
+            for nome in llm_textual.get("pecas_avariadas", []) or []:
+                if nome in vistas_parte:
+                    continue
+                vistas_parte.add(nome)
+                avarias.append(Avaria(
+                    parte=nome, severidade=SeveridadeAvaria.LEVE,
+                    descricao="avariado/pequenos danos (via LLM textual)",
+                ))
+
+    # Severidade: prioridade visual → LLM textual → consolidada das avarias.
+    if visual is not None and not _visual_e_inutil(visual) and "severidade_geral" in visual:
         severidade = _SEVERIDADE_MAP.get(visual.get("severidade_geral", "nenhuma"), SeveridadeAvaria.NENHUMA)
+    elif llm_textual is not None and "severidade_geral" in llm_textual:
+        severidade = _SEVERIDADE_MAP.get(
+            llm_textual.get("severidade_geral", "nenhuma"), SeveridadeAvaria.NENHUMA,
+        )
     else:
         severidade = _severidade_consolidada(avarias)
 
@@ -466,10 +686,23 @@ def extrair_laudo(
     motor_textual = txt.motor_original if txt.motor_original is not None else True
     motor_ok = motor_textual and severidade != SeveridadeAvaria.ESTRUTURAL
 
-    # Confidence: alta quando visão respondeu; menor quando só textual serviu.
-    confidence = float(visual.get("confidence", 0.7)) if visual is not None else (
-        0.65 if avarias else 0.5
-    )
+    # Confidence: visual confiável > LLM textual > textual puro.
+    # Quando visual respondeu COM sinal (>=0.6 OU peças), usa o valor do visual.
+    # Quando visual veio inútil mas LLM textual respondeu, usa o do LLM.
+    # Sem nenhum dos dois, cai pro 0.65/0.5 do textual histórico.
+    if visual is not None and not _visual_e_inutil(visual):
+        confidence = float(visual.get("confidence", 0.7))
+    elif llm_textual is not None and "confidence" in llm_textual:
+        try:
+            confidence = float(llm_textual.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.5 if avarias else 0.0
+    elif visual is not None:
+        # Visual respondeu mas inútil, e LLM textual não respondeu ou veio sem
+        # confidence — persiste o 0.0 do visual pra audit continuar flagando.
+        confidence = float(visual.get("confidence", 0.0))
+    else:
+        confidence = 0.65 if avarias else 0.5
 
     return LaudoEstruturado(
         avarias=avarias,

@@ -604,3 +604,70 @@ class TestFiltroRetryPdfAusente:
         )
         out = _filtrar([lote], {"L_URL_DECOY": 0.95}, pdf_dir=tmp_path)
         assert len(out) == 1
+
+
+class TestFiltroRetryCircuitBreaker:
+    """Circuit-breaker: cache<0.6 + tentativas>=MAX sai do retry. Lote em
+    perma-loop (body_text vazio do AA, PDF inacessível) parou de queimar
+    LLM. Cache forte + outras pendências NÃO são bloqueados — o retry
+    pra elas não chama LLM."""
+
+    def _importar(self):
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        from reprocessar_lotes_do_db import _filtrar_laudo_pendente, MAX_TENTATIVAS_EXTRACAO
+        return _filtrar_laudo_pendente, MAX_TENTATIVAS_EXTRACAO
+
+    def test_cache_fraco_com_max_tentativas_atingido_sai_da_fila(self, tmp_path):
+        _filtrar, MAX = self._importar()
+        _criar_pdf_fake(tmp_path, "L_STUCK")
+        lote = _lote("L_STUCK")
+        out = _filtrar(
+            [lote], {"L_STUCK": 0.0}, pdf_dir=tmp_path,
+            laudos_tentativas={"L_STUCK": MAX},
+        )
+        assert out == []
+
+    def test_cache_fraco_com_tentativas_abaixo_do_max_continua_na_fila(self, tmp_path):
+        _filtrar, MAX = self._importar()
+        _criar_pdf_fake(tmp_path, "L_RETRY")
+        lote = _lote("L_RETRY")
+        out = _filtrar(
+            [lote], {"L_RETRY": 0.0}, pdf_dir=tmp_path,
+            laudos_tentativas={"L_RETRY": MAX - 1},
+        )
+        assert len(out) == 1
+
+    def test_cache_forte_com_pdf_ausente_ignora_tentativas(self, tmp_path):
+        """PDF sumiu de disco mas cache é forte: retry só re-baixa PDF, não
+        chama LLM. Tentativas esgotadas NÃO bloqueiam — circuit-breaker é
+        sobre evitar LLM desperdiçado, não sobre bloquear toda re-tentativa."""
+        _filtrar, _MAX = self._importar()
+        # Sem _criar_pdf_fake → PDF ausente
+        lote = _lote("L_PDF_SUMIU")
+        out = _filtrar(
+            [lote], {"L_PDF_SUMIU": 0.95}, pdf_dir=tmp_path,
+            laudos_tentativas={"L_PDF_SUMIU": 99},
+        )
+        assert len(out) == 1
+
+    def test_sem_entrada_em_cache_nao_bloqueia(self, tmp_path):
+        """Lote novo (sem LaudoCache ainda) precisa rodar pipeline. Sem
+        registro = sem tentativas = passa pelo filtro normalmente."""
+        _filtrar, _MAX = self._importar()
+        _criar_pdf_fake(tmp_path, "L_NOVO")
+        lote = _lote("L_NOVO")
+        out = _filtrar([lote], {}, pdf_dir=tmp_path, laudos_tentativas={})
+        assert len(out) == 1
+
+    def test_backward_compat_sem_passar_tentativas(self, tmp_path):
+        """Caller antigo (sem `laudos_tentativas`) continua funcionando —
+        default vazio = ninguém esgotou tentativas, comportamento original."""
+        _filtrar, _MAX = self._importar()
+        _criar_pdf_fake(tmp_path, "L_LEGADO")
+        lote = _lote("L_LEGADO")
+        out = _filtrar([lote], {"L_LEGADO": 0.0}, pdf_dir=tmp_path)
+        assert len(out) == 1

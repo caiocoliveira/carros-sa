@@ -4,11 +4,29 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic** — 580/580 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop** — 571/571 testes passando
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual + LLM textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML, **coleta noturna Webmotors live (workstream G — 2026-05-12) com cache 24h, retry/Cloudflare-detect e display honesto ("—" quando sem amostra real)**.
 
 Dependências externas conhecidas: workstream G.3 (reativar mediana no precificador — bloqueia em ≥1 semana de dado real do cron G), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
+
+### II — Circuit-breaker em lotes perma-stuck no retry diário (2026-05-15) ✅
+- **Branch:** `claude/update-daily-content-Aau6F`
+- **Motivação:** Após DD4 destravar 22/47 lotes com vendor fora do template AA, sobraram 23 lotes com `body_text=""` do `coletar_detalhe` (DD5 follow-up — não capturado por DD4) + 2 com URL+PDF-ausente. Esses lotes recaíam todo cron no caminho `_filtrar_laudo_pendente` → `_pipeline_lote` → extração falhava de novo (mesmo input ruim) → persistia `confidence<0.6` → próximo cron repetia o ciclo. Estimativa: ~50-100 chamadas LLM/dia desperdiçadas em perma-loop entre Gemini visual + textual DD4 + reforma. Cron das 16:00 UTC de 2026-05-15 (1ª passagem com DD4) demorou 1h49m, em parte por essa fila de stuck lotes consumindo retry do Gemini Flash com flakiness intermitente.
+- **Solução:**
+  - Novo campo [`LaudoCache.tentativas_extracao: int`](carros_sa/models.py) (default 0). Incrementa em cada upsert com `confidence<0.6` (extração falhou — input ruim), zera quando uma extração ≥0.6 persiste.
+  - [`_upsert_laudo_cache`](carros_sa/orquestrador.py) atualiza o contador de forma transparente — mesma interface, comportamento aditivo.
+  - [`_filtrar_laudo_pendente`](scripts/reprocessar_lotes_do_db.py) ganha parâmetro opcional `laudos_tentativas: dict`. Lotes com `confidence<0.6 AND tentativas>=MAX_TENTATIVAS_EXTRACAO (=3)` saem da fila. Lotes com cache forte mas outras pendências (PDF ausente, URL inválida) NÃO são afetados — retry pra eles não chama LLM.
+  - Migração idempotente [`scripts/migrar_tentativas_extracao.py`](scripts/migrar_tentativas_extracao.py) (ALTER TABLE ADD COLUMN ... DEFAULT 0). Roda no início do workflow antes da triagem.
+- **Cobertura:** 9 testes novos:
+  - `tests/test_orquestrador.py::TestUpsertLaudoCacheTentativas` (4 testes — primeira fraca, incremento, reset em forte, forte de cara fica 0).
+  - `tests/test_laudo_audit.py::TestFiltroRetryCircuitBreaker` (5 testes — max atingido sai, abaixo do max passa, cache forte ignora tentativas, sem cache passa, backward compat).
+  - `tests/test_migrar_tentativas_extracao.py` (3 testes — adiciona em DB existente, idempotente, no-op sem DB).
+- **Impacto esperado:** Sai do laço perpétuo em 36h (3 cron cycles × 2 runs/dia = 6 incrementos atingem MAX=3). Após isso, ~50-100 LLM calls/dia salvas. Audit `--strict` continua reportando esses lotes como incompletos (status real do laudo), operador inspeciona manualmente e zera o contador (ou deleta a row de LaudoCache) pra forçar retry quando o problema upstream estiver resolvido.
+- **Limitações conhecidas:**
+  - Não resolve o problema upstream (DD5 — `coletar_detalhe` retornando `body_text=""`). Apenas para de queimar LLM nele.
+  - Constante MAX=3 não é ajustável via env var. Se operador quiser destravar manualmente, deletar a linha de `LaudoCache` ou rodar `UPDATE laudo SET tentativas_extracao=0 WHERE lote_id=...` direto no SQLite.
+  - Operador precisa ler audit `--strict` pra saber que tem lotes em circuit-break — não há aviso visual diferenciado na planilha (continua "⚠ LAUDO NÃO CAPTURADO").
 
 ### DD4 — LLM textual vendor-agnostic destrava lotes com PDF de leiloeiro fora do template Auto Avaliar (2026-05-15) ✅
 - **Branch:** `claude/amazing-goldberg-ijutz`

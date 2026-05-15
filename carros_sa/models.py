@@ -240,6 +240,11 @@ class LaudoCache(SQLModel, table=True):
     modelo_llm: str
     custo_usd: float = 0.0
     extraido_em: datetime = SQLField(default_factory=datetime.utcnow)
+    # Circuit-breaker contra perma-loop: incrementa em cada extração que falhou
+    # (confidence < 0.6), zera quando uma extração bem-sucedida persiste. Filtro
+    # de retry (scripts/reprocessar_lotes_do_db.py) usa pra parar de re-rodar
+    # LLM em lotes onde input (PDF/body_text) é o problema, não o extrator.
+    tentativas_extracao: int = SQLField(default=0)
 
 
 class AnuncioWebmotors(SQLModel, table=True):

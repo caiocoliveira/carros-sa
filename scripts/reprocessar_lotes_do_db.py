@@ -29,7 +29,21 @@ console = Console()
 app = typer.Typer(add_completion=False)
 
 
-def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Path] = None):
+# Circuit-breaker: depois de N extrações com confidence<0.6, o lote sai do retry
+# diário. Sintoma alvo: lote com body_text vazio ou PDF inacessível fica em
+# perma-loop, queimando 2-3 chamadas LLM/dia indefinidamente (~50-100/dia
+# acumulado entre todos os lotes presos). Audit `--strict` continua reportando
+# como `cache_confianca_baixa` — operador inspeciona manualmente e zera o
+# contador (ou deleta a row de LaudoCache) pra forçar retry.
+MAX_TENTATIVAS_EXTRACAO = 3
+
+
+def _filtrar_laudo_pendente(
+    lotes,
+    laudos_confidence: dict,
+    pdf_dir: Optional[Path] = None,
+    laudos_tentativas: Optional[dict] = None,
+):
     """Filtra `lotes` mantendo só os que têm laudo pendente.
 
     "Pendente" = qualquer uma:
@@ -44,6 +58,11 @@ def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Pa
          filtro precisa cobrir essa dimensão também — paridade total com
          `verificar_laudo_completo`.
 
+    Mas com circuit-breaker: lote com `confidence<0.6 AND tentativas>=MAX`
+    sai da fila (extração já falhou N vezes — não é o extrator, é o input).
+    Lotes pendentes por OUTROS motivos (PDF ausente, URL inválida) com cache
+    forte NÃO são afetados — o retry pra eles não gasta LLM, só re-baixa PDF.
+
     Extraído pra fora do CLI pra ficar coberto por teste unitário (sem
     Playwright, sem `_run`). O `pdf_dir=None` resolve em runtime via
     `PDF_DIR_DEFAULT` — mesma fonte do `verificar_laudo_completo`.
@@ -52,6 +71,7 @@ def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Pa
     from carros_sa.scraping.parsers import is_laudo_pdf_url
     if pdf_dir is None:
         pdf_dir = PDF_DIR_DEFAULT
+    laudos_tentativas = laudos_tentativas or {}
 
     def _pdf_ausente(lote_id: str) -> bool:
         p = pdf_dir / f"{lote_id}.pdf"
@@ -62,6 +82,9 @@ def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Pa
         url = det.get("laudo_pdf_url") if isinstance(det, dict) else None
         return not is_laudo_pdf_url(url)
 
+    def _esgotou_tentativas(lote_id: str) -> bool:
+        return (laudos_tentativas.get(lote_id) or 0) >= MAX_TENTATIVAS_EXTRACAO
+
     return [
         l for l in lotes
         if (
@@ -69,6 +92,13 @@ def _filtrar_laudo_pendente(lotes, laudos_confidence: dict, pdf_dir: Optional[Pa
             or (laudos_confidence.get(l.id) or 0) < 0.6
             or _pdf_ausente(l.id)
             or _url_invalida(l)
+        )
+        # Circuit-breaker SÓ pula quando o motivo de pendência é cache fraco —
+        # se cache é forte mas PDF/URL sumiu, o retry não chama LLM, então
+        # MAX_TENTATIVAS não se aplica.
+        and not (
+            (laudos_confidence.get(l.id) or 0) < 0.6
+            and _esgotou_tentativas(l.id)
         )
     ]
 
@@ -165,22 +195,30 @@ async def _run(
                 lotes = [l for l in lotes if l.fim_em is not None and l.fim_em > agora]
                 console.print(f"[cyan]Filtro ativo: só leilões abertos → {len(lotes)} candidatos[/cyan]")
             if somente_laudo_pendente:
-                # Carrega só (lote_id, confidence) — IMPORTANTE: tupla, não entity.
+                # Carrega só (lote_id, confidence, tentativas) — tupla, não entity.
                 # Se selecionarmos LaudoCache inteiro, os objetos vão pra identity
                 # map; depois `session.commit()` no meio de `_pipeline_lote` expira
                 # eles, e `session.get(LaudoCache, lote_id)` no `_upsert_laudo_cache`
                 # retorna None pra rows expirados → tenta INSERT → UNIQUE viola.
                 # (sintoma observado 2026-04-18 após processar ~105/139 lotes).
-                laudos = {
-                    row[0]: row[1]
+                laudos_full = {
+                    row[0]: (row[1], row[2])
                     for row in session.exec(
-                        select(LaudoCache.lote_id, LaudoCache.confidence)
+                        select(
+                            LaudoCache.lote_id,
+                            LaudoCache.confidence,
+                            LaudoCache.tentativas_extracao,
+                        )
                     ).all()
                 }
-                lotes = _filtrar_laudo_pendente(lotes, laudos)
+                laudos_confidence = {k: v[0] for k, v in laudos_full.items()}
+                laudos_tentativas = {k: v[1] for k, v in laudos_full.items()}
+                lotes = _filtrar_laudo_pendente(
+                    lotes, laudos_confidence, laudos_tentativas=laudos_tentativas,
+                )
                 console.print(
-                    f"[cyan]Filtro ativo: só laudo pendente (cache<0.6 OU PDF ausente) "
-                    f"→ {len(lotes)} candidatos[/cyan]"
+                    f"[cyan]Filtro ativo: só laudo pendente (cache<0.6 OU PDF ausente OU URL inválida, "
+                    f"max {MAX_TENTATIVAS_EXTRACAO} tentativas) → {len(lotes)} candidatos[/cyan]"
                 )
             if max_lotes:
                 lotes = lotes[:max_lotes]

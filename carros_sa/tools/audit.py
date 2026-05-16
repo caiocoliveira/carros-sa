@@ -21,7 +21,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlmodel import Session, select
 
-from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.tools.laudo_audit import verificar_laudo_completo
 from carros_sa.tools.sheets import HEADER, _lucro_absoluto_efetivo, _lucro_absoluto_no_alvo
@@ -322,18 +321,16 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         encerrado_por_timer = lote.fim_em is not None and lote.fim_em < agora
         encerrado = encerrado_por_badge or encerrado_por_timer
 
-        # Dois valores derivados:
-        # - `roi_anual` (interno) usa `score_roi_efetivo` + anualização. Continua
-        #   sendo a chave de DESEMPATE pra ranking (espelha SheetsExporter).
-        # - `roi_alvo` (display) usa `score_efetivo` × 100 — paridade audit ↔
-        #   display (fix P5b 2026-05-10). Antes era `score_roi` intrinsic; o
-        #   sheets.py mostrava efetivo no Lucro mas intrinsic no ROI alvo —
-        #   audit replicava o intrinsic, então em zona apertada um lote que
-        #   passava no audit pelo intrinsic poderia exibir Lucro irrealmente
-        #   pequeno na planilha sem audit chamar atenção. Alinhar agora.
+        # `roi_alvo` (display) = `score_efetivo × 100` — paridade audit ↔
+        # display (fix P5f 2026-05-10). Mesma base do Lucro (R$). Em zona
+        # apertada (lance_atual > preco_alvo) ambos caem em sincronia, refletindo
+        # capital efetivo cresceu. Antes era `score_roi` intrinsic e divergia
+        # do Lucro efetivo — mental math do operador falhava.
+        # `roi_anualizado` foi removido do audit em 2026-05-16 (workstream II):
+        # ranking passou de ROI anualizado pra LUCRO ABSOLUTO em todas as views
+        # (sheets/cli/audit), e nenhuma coluna exibe a versão anual.
         from carros_sa.tools.sheets import _score_roi_efetivo
         score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
-        roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
         roi_alvo = score_efetivo * 100
         lucro = _lucro_absoluto_efetivo(av, lote.lance_atual)
 
@@ -402,7 +399,6 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "fipe_pct_lance_minimo": lote.fipe_pct_lance_minimo,
             "score_roi": av.score_roi,
             "dias_giro": av.dias_giro_estimado,
-            "roi_anualizado": round(roi_anual, 1),
             "roi_alvo": round(roi_alvo, 1),
             "lucro": lucro,
             "fator_risco": round(av.fator_risco, 3),

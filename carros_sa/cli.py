@@ -103,7 +103,6 @@ def top(
     """
     from sqlmodel import select
 
-    from carros_sa.agents.calibracao_giro import roi_anualizado
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, Lote
 
@@ -889,9 +888,11 @@ def webmotors_coletar(
         modelos populares) sem multiplicar carga / risco anti-bot.
 
     Default: coleta os top `max_modelos` (10) `(marca,modelo,ano)` ranqueados
-    por **ROI anualizado** (mesma métrica do `carros-sa top`), filtrados pra
-    lotes viáveis (preco_max > lance_atual) e sem cache fresh. Dedupe por
-    (marca,modelo,ano) cobre múltiplas empresas com mesmo modelo.
+    por **ROI anualizado** (urgência de coleta — lote rápido com ROI alto
+    encerra antes; semântica diferente do `carros-sa top` default que ranqueia
+    por LUCRO ABSOLUTO — workstream II 2026-05-16). Filtrados pra lotes viáveis
+    (preco_max > lance_atual) e sem cache fresh. Dedupe por (marca,modelo,ano)
+    cobre múltiplas empresas com mesmo modelo.
 
     Filtros `--marca`/`--modelo`/`--ano` substituem o ranking por 1 alvo
     explícito (validação manual / debug de URL/seletor).

@@ -188,13 +188,15 @@ def _score_roi_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> float:
     Quando `lance_atual > preco_alvo`, o operador real entra acima do alvo:
     capital empatado cresce, retorno cai. **AMBAS** as colunas `ROI alvo (%)`
     e `Lucro (R$)` da planilha consomem este helper — display coerente: o
-    operador faz a conta `capital × ROI ≈ Lucro` e bate (correção P5b de
+    operador faz a conta `capital × ROI ≈ Lucro` e bate (correção P5f de
     2026-05-10). Antes (até 2026-05-09), `Lucro` era efetivo e `ROI alvo`
     era intrinsic — em zona apertada o ROI ficava 64% mas o Lucro mostrava
     R$ 7k, capital implícito ~R$ 11k, conflitante com qualquer linha real.
-    O ranking interno (sheets `_query` + cli `top`) também usa este score
-    efetivo via `roi_anualizado`. `score_roi` persistido em `AvaliacaoLote`
-    continua sendo o intrinsic (caso médio no alvo) pra rastreabilidade.
+    Ranking (sheets `_query`, cli `top`, audit) agora ordena por LUCRO
+    ABSOLUTO efetivo desde workstream II (2026-05-16) — derivado deste mesmo
+    score via `_lucro_absoluto_efetivo`. `score_roi` persistido em
+    `AvaliacaoLote` continua sendo o intrinsic (caso médio no alvo teórico)
+    pra rastreabilidade + uso pelo flag `carros-sa top --roi-intrinsic`.
 
     Aproximação: ignora a parcela `taxa_leilao_pct × delta_lance` no capital
     incremental (≈zero em Auto Avaliar com taxa fixa; até 8% num leilão judicial,
@@ -354,24 +356,17 @@ class SheetsExporter:
 
             viavel = av.preco_max > (lote.lance_atual or 0)
 
-            from carros_sa.agents.calibracao_giro import roi_anualizado
-            # ROI alvo (display) = `score_roi` intrinsic do precificador, sem
-            # anualizar. É o ROI cru da operação se comprar pelo preço-alvo
-            # calibrado por risco/liquidez. Operador prefere ver o número da
-            # operação direto em vez de extrapolar pra ano (`× 365 / dias_giro`)
-            # — anualização dependia de `dias_giro_estimado` calibrado, que é
-            # frequentemente otimista por categoria genérica (ver workstream DD).
-            #
-            # Lucro é absoluto (em R$ no fim da revenda), idem — não normaliza.
-            #
-            # `roi_anual` continua calculado pra uso INTERNO no ranking: ordenar
-            # por ROI cru premiaria lote lento sobre lote rápido com mesmo ROI
-            # absoluto (Polo 227d com 21% acima de Gol 22d com 21% — invertido
-            # economicamente). Então mantemos `roi_anualizado` no `key=` do
-            # `sorted` (linha ~217) mas a coluna exibida é o ROI alvo intrinsic.
+            # Display da planilha consome SÓ `score_efetivo` (ROI realista que
+            # reflete o lance atual real) — ambas as colunas `Lucro (R$)` e
+            # `ROI alvo (%)` derivam dessa base, em paridade aritmética (P5f
+            # 2026-05-10). `roi_anualizado` não é mais calculado aqui desde
+            # workstream II (2026-05-16): o ranking passou de ROI anualizado
+            # pra LUCRO ABSOLUTO ("dinheiros que sobram no fim") e nenhuma
+            # coluna exibe a versão anual. Função `roi_anualizado` continua
+            # disponível em calibracao_giro.py pra outros usos (priorização
+            # da coleta Webmotors no cron G — ver cli.py::webmotors_coletar).
             score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
-            roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
-            # ROI alvo agora EFETIVO (mesma base do Lucro abaixo) — fix P5b 2026-05-10.
+            # ROI alvo EFETIVO (mesma base do Lucro abaixo) — fix P5f 2026-05-10.
             # Antes era `(av.score_roi or 0) * 100` (intrinsic) enquanto Lucro usava
             # score_efetivo. Em zona apertada operador via ROI 64% e Lucro R$7k mas
             # `capital × ROI ≈ Lucro` não batia (capital implícito ~R$11k, sem
@@ -449,7 +444,6 @@ class SheetsExporter:
                 # FIPE-only desde 2026-05-08).
                 "webmotors_mediana": av.webmotors_mediana,
                 "webmotors_n_anuncios": av.webmotors_n_anuncios,
-                "roi_anualizado": round(roi_anual, 1),
                 "roi_alvo": round(roi_alvo, 1),
                 "lucro": lucro,
                 "reforma_estimada": av.reforma_estimada,
@@ -796,8 +790,8 @@ class SheetsExporter:
             [
                 "Rank",
                 "Derivado",
-                "Ordem: (1) lotes com laudo analisado, (2) viáveis (lance atual ≤ Lance Máximo), (3) maior ROI ANUALIZADO primeiro (interno — não exibido). A coluna 'ROI alvo (%)' mostra o ROI cru sem anualizar, mas o desempate continua usando o anualizado pra normalizar retorno pelo tempo de giro. Mesma métrica do CLI `carros-sa top`.",
-                "Carro rápido com retorno menor pode ranquear acima de carro lento com retorno maior porque o anualizado normaliza pelo `dias_giro_estimado`. Sem isso, Polo Track 2024 (227d, 21% intrinsic) ficaria empatado com Gol 2014 (22d, 21% intrinsic) — invertido economicamente. Coluna exibe ROI cru pra leitura humana mais simples; ranking usa anualizado pra justiça temporal.",
+                "Ordem: (1) lotes com laudo analisado, (2) viáveis (lance atual ≤ Lance Máximo), (3) maior LUCRO ABSOLUTO primeiro (R$ que sobram no fim — coluna 'Lucro (R$)'). Mesma métrica do CLI `carros-sa top` e do audit (paridade explícita exigida — LESSONS.md/P5b). Lucro usa base `score_efetivo` (em zona apertada cai com o capital empatado real) — coerente com o que o operador vê.",
+                "'Dinheiros que sobram no final, qto mais melhor' (decisão do usuário, workstream II 2026-05-16). ROI anualizado e folga absoluta foram retirados como modos de ranking porque premiavam lote de capital pequeno com ROI% alto sobre lote de capital grande com lucro absoluto maior — distorcendo o que aparece na coluna Lucro (R$). Use `carros-sa top --roi-intrinsic` quando quiser sniff-test de potencial econômico no alvo teórico (ROI cru, ignora lance atual).",
             ],
             [
                 "Situação",

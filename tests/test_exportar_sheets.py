@@ -981,6 +981,34 @@ class TestSheetsExporterQuery:
             f"não bate com preco_giro persistido (40000) — colunas incoerentes."
         )
 
+    def test_query_nao_carrega_roi_anualizado_dead_key(self):
+        """Workstream II (2026-05-16) removeu ROI anualizado como modo de
+        ranking e display em favor de Lucro absoluto. A chave `roi_anualizado`
+        no dict do `_query` virou dead code (escrita mas nunca lida).
+
+        Esse teste é guard contra regressão: re-introduzir o cálculo
+        (provavelmente copiando de revisão antiga) sem ler em nenhuma view
+        é sintoma de dead code voltando — sinaliza que algum comentário ou
+        comportamento ficou stale. Se você está adicionando ROI anualizado
+        de volta, atualize o ranking/display correspondentes ANTES.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001"))
+            session.add(_avaliacao("L001"))
+            session.add(_laudo("L001"))
+            session.commit()
+
+        exporter = _exporter()
+        with Session(engine) as session:
+            rows = exporter._query("uberlandia_mg", session)
+
+        assert rows, "fixture deveria retornar ao menos 1 lote"
+        assert "roi_anualizado" not in rows[0], (
+            "Chave 'roi_anualizado' voltou ao dict do _query mas nenhuma view "
+            "consome — dead code. Ver workstream II / LESSONS.md/RC4."
+        )
+
 
 class TestKmIndicator:
     """Classifica km/ano em verde/amarelo/vermelho.

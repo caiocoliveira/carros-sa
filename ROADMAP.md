@@ -128,6 +128,23 @@ Dependências externas conhecidas: workstream G.3 (reativar mediana no precifica
   - **Teste de detalhe rico sobrevivendo ao upsert** — `test_upsert_lote_preserva_detalhe_em_re_scrape` assert apenas `laudo_pdf_url`. Adicionar fixture com detalhe rico (`specs`, `similares_precos`, opcionais) pra selar o contrato da preservação seletiva — qualquer subkey nova de `detalhe` escrita por outro passo precisa ser coberta.
   - **Mover `is_laudo_pdf_url` import pro topo de `orquestrador.py`** — 4ª referência no arquivo passou do limiar pra justificar import tardio.
 
+### II-FU5 — Limpeza de dead code residual + glossário stale pós-workstream II (2026-05-16) ✅
+- **Branch:** `claude/trusting-gates-6HeGx`
+- **Motivação:** Revisão preventiva diária (user pediu "encontre bugs, problemas e oportunidades de melhoria") — simulação canônica `/tmp/sim.py` com 13 cenários reais e adversariais (gold Polo Track, f_km saturado teto/piso, ESTRUTURAL conf 0.65 viável, mediana inflada 140% FIPE, zona apertada, inviável, dias_giro otimista 20d, km=None, ESTRUTURAL+lance baixo, motor_ok=False viável, reforma 35% preco_giro, transferência interestadual). Identidades algébricas batem em 13/13. Audit pega os red flags op (`_check_severidade_estrutural`, `_check_motor_problema`, `_check_zona_apertada`).
+- **Bugs encontrados (revisão pós workstream II / PR #94):**
+  - **Dead code:** `roi_anualizado` continuou calculado em `sheets._query` (linha 373) e `audit._build_rows` (linha 336) como `r["roi_anualizado"]`, mas o `sorted(key=...)` já trocou pra `-(r["lucro"] or 0)`. Grep cross-file confirmou: nenhuma view consome `r["roi_anualizado"]`. cli.py linha 106 (`top`) tinha import morto.
+  - **Comentário stale:** sheets.py linhas 357-371 documentava "ROI alvo = score_roi intrinsic" e "mantemos roi_anualizado no key= do sorted" — ambos contradiziam o código atual.
+  - **Glossário stale:** entrada "Rank" descrevia "ROI ANUALIZADO" como métrica de ranking (workstream II mudou pra LUCRO ABSOLUTO).
+  - **Docstring stale:** cli.py `webmotors-coletar` dizia "mesma métrica do carros-sa top" — não bate (webmotors ranking continua por ROI anualizado pra priorizar urgência da coleta; top default agora é lucro).
+- **Fix:**
+  - Extirpado cálculo + entry de dict + import em `sheets._query`, `audit._build_rows`, `cli.top`.
+  - Comentários reescritos pra documentar o estado atual ("ranking é lucro absoluto desde II"; `roi_anualizado` continua usada SOMENTE em `webmotors-coletar` pra urgência de coleta).
+  - Glossário "Rank" atualizado: cita lucro absoluto + flag `--roi-intrinsic` pra sniff-test.
+  - Teste guard `test_query_nao_carrega_roi_anualizado_dead_key` impede re-introdução.
+- **Cobertura:** 592 testes (+1 novo), todos verdes em ~52s.
+- **Limitações conhecidas:** simulação canônica não cobre lotes reais do `state/db` (container sem persistência); operador deve rodar `make auditar-laudos` no laptop pra validar contra DB de produção. Cenários adversariais expuseram que ROI anualizado ainda pode dar 200-300% em lotes com `dias_giro` otimista (HB20 NOVO=20d) — mas como a coluna foi removida do display (workstream II), o risco operacional ficou mitigado. Calibração de `dias_giro` por (categoria, faixa) continua follow-up (DD/calibração granular).
+- **Padrão genérico (LESSONS.md/P5b+RC4):** mudança de basis de ranking em arquivo com paridade obrigatória (sheets+cli+audit, P5b) exige grep `métrica_antiga` em CADA arquivo da lista antes de fechar PR — tendência natural é remover só do arquivo onde foi mudado `key=`, deixando os outros como fantasmas. Comentários longos justificando o basis antigo viram parágrafos órfãos. Padrão complementa P5b: lá era "mesma métrica em 2 lugares diverge"; aqui é "métrica antiga sobreviveu em N-1 lugares com paridade".
+
 ### II — Priorização da listagem por lucro absoluto (2026-05-16) ✅
 - **Branch:** `claude/review-listing-priority-wkMkC`
 - **Motivação:** ROI anualizado como métrica de ranking premiava lotes de capital pequeno com ROI alto sobre lotes de capital grande com lucro absoluto maior — distorcia o que o operador vê na coluna `Lucro (R$)`. Usuário: "lucro absoluto = dinheiros que sobram no final, qto mais melhor". Métrica única em paridade CLI ↔ planilha ↔ audit (P5b).

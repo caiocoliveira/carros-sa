@@ -158,7 +158,7 @@ def test_top_filtra_inviaveis_por_default(db_tmp):
 
     # Com --incluir-inviaveis: ambos aparecem, CARO no topo (ROI maior)
     result_all = runner.invoke(
-        app, ["top", "--empresa", "carros_uberlandia", "--incluir-inviaveis", "--absoluto"],
+        app, ["top", "--empresa", "carros_uberlandia", "--incluir-inviaveis", "--roi-intrinsic"],
         env={"COLUMNS": "200"},
     )
     assert result_all.exit_code == 0
@@ -203,8 +203,10 @@ def test_top_filtra_por_empresa(db_tmp):
     assert "UBE000" not in result.stdout
 
 
-def test_top_ranqueia_por_roi_anualizado_default(db_tmp):
-    """Default rankeia por ROI/ano: lote rápido (30d) com ROI menor passa lento (180d) maior."""
+def test_top_ranqueia_por_lucro_absoluto_default(db_tmp):
+    """Default rankeia por lucro absoluto em R$: capital maior com ROI menor pode
+    superar capital menor com ROI maior se o lucro total for maior. Garante
+    paridade CLI ↔ planilha ↔ audit (P5b)."""
     engine = create_engine(f"sqlite:///{db_tmp}", connect_args={"check_same_thread": False})
     from sqlmodel import Session
     with Session(engine) as session:
@@ -242,17 +244,24 @@ def test_top_ranqueia_por_roi_anualizado_default(db_tmp):
             session.add(r)
         session.commit()
 
-    # Default: ranking interno por ROI anualizado → RAPIDO vem antes.
-    # --incluir-inviaveis pq fixture tem lance > preco_max (escolha intencional
-    # pra isolar a regra de ranking do filtro de viabilidade).
+    # Default: ranking por lucro absoluto. Fixture: lote inviável (intencional
+    # pra isolar a regra de ranking do filtro de viabilidade — daí --incluir-inviaveis).
+    # Lucro absoluto efetivo (score_efetivo basis) em lance > preco_alvo:
+    #   RAPIDO: capital_alvo=46000/1.20≈38333, capital_ef=38333+(50000-45000)=43333,
+    #           score_ef=(46000-43333)/43333≈0.0615, lucro≈46000×0.0615/1.0615≈2667
+    #   LENTO:  capital_alvo=26000/1.30=20000,  capital_ef=20000+(30000-25000)=25000,
+    #           score_ef=(26000-25000)/25000=0.04, lucro≈26000×0.04/1.04≈1000
+    # RAPIDO lucro > LENTO lucro → RAPIDO vem antes.
     result = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--incluir-inviaveis"],
                            env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert result.stdout.index("RAPIDO") < result.stdout.index("LENTO")
-    assert "ROI anualizado interno" in result.stdout
+    assert "Lucro absoluto" in result.stdout
 
-    # --absoluto inverte: por score_roi puro → LENTO (30%) vem antes de RAPIDO (20%)
-    result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--absoluto",
+    # --roi-intrinsic inverte: por score_roi puro no alvo → LENTO (30%) vem antes
+    # de RAPIDO (20%). Anchor de intenção semântica do flag — sniff-test de
+    # potencial econômico independente do lance atual.
+    result_abs = runner.invoke(app, ["top", "--empresa", "carros_uberlandia", "--roi-intrinsic",
                                      "--incluir-inviaveis"],
                                env={"COLUMNS": "200"})
     assert result_abs.exit_code == 0

@@ -105,6 +105,20 @@ Dependências externas conhecidas: workstream G.3 (reativar mediana no precifica
   - **Teste de detalhe rico sobrevivendo ao upsert** — `test_upsert_lote_preserva_detalhe_em_re_scrape` assert apenas `laudo_pdf_url`. Adicionar fixture com detalhe rico (`specs`, `similares_precos`, opcionais) pra selar o contrato da preservação seletiva — qualquer subkey nova de `detalhe` escrita por outro passo precisa ser coberta.
   - **Mover `is_laudo_pdf_url` import pro topo de `orquestrador.py`** — 4ª referência no arquivo passou do limiar pra justificar import tardio.
 
+### II — Priorização da listagem por lucro absoluto (2026-05-16) ✅
+- **Branch:** `claude/review-listing-priority-wkMkC`
+- **Motivação:** ROI anualizado como métrica de ranking premiava lotes de capital pequeno com ROI alto sobre lotes de capital grande com lucro absoluto maior — distorcia o que o operador vê na coluna `Lucro (R$)`. Usuário: "lucro absoluto = dinheiros que sobram no final, qto mais melhor". Métrica única em paridade CLI ↔ planilha ↔ audit (P5b).
+- **Solução em 4 pontos:**
+  - [`carros_sa/tools/sheets.py`](carros_sa/tools/sheets.py) — sort key passa de `-roi_anualizado` pra `-lucro` (campo já calculado por linha via `_lucro_absoluto_efetivo`, basis score_efetivo = mesmo da coluna 'Lucro (R$)' exibida). Composta de filtros (laudo_analisado, viavel) inalterada.
+  - [`carros_sa/tools/audit.py`](carros_sa/tools/audit.py) — mesma chave + populei `r["lucro"]` no `_build_rows` (pre-existing latent bug: `COLUMN_EXTRACTORS["Lucro (R$)"]` lia `r.get("lucro", "—")` mas ninguém populava — sempre caía pro placeholder).
+  - [`carros_sa/cli.py`](carros_sa/cli.py) — default rankeia por lucro absoluto efetivo. Flag `--absoluto` renomeada pra **`--roi-intrinsic`** (semantic clearer: "ROI intrinsic do score_roi cru no preço-alvo"). Sufixo do título da tabela: "Lucro absoluto (R$)" vs "ROI intrinsic (alvo teórico)".
+- **Tests-âncora atualizados:**
+  - `tests/test_cli.py::test_top_ranqueia_por_lucro_absoluto_default` (substitui `test_top_ranqueia_por_roi_anualizado_default`) — fixture RAPIDO vs LENTO comprovando ranking por lucro efetivo + flag `--roi-intrinsic` ainda inverte por score_roi.
+  - `tests/test_cli.py::test_top_filtra_inviaveis_por_default` — flag rename `--absoluto → --roi-intrinsic`.
+  - `tests/test_exportar_sheets.py::test_exportar_ranking_por_lucro_absoluto_entre_viaveis` (renomeado) — semântica atualizada.
+- **Resultado:** 579 testes verdes. Lotes de capital grande/lucro alto sobem; lotes de capital pequeno/ROI% alto saem do topo (mas continuam acessíveis via `--roi-intrinsic`).
+- **Limitações conhecidas:** ROI anualizado e folga absoluta não são mais oferecidos como modos de ranking — se operador pedir, fácil reintroduzir como flags secundárias. Mediana de Webmotors live pode invalidar ranking durante warm-up do cron (workstream G) — mas isso afeta `preco_giro`/`lucro` em qualquer métrica.
+
 ### GG — Coerência aritmética entre `ROI alvo (%)` e `Lucro (R$)` em zona apertada (2026-05-10) ✅
 - **Branch:** `claude/sleepy-wright-tFNNb`
 - **Motivação:** Revisão preventiva pediu "verifique se a lógica está fazendo sentido considerando a relação entre os valores das colunas". Simulação canônica em `/tmp/sim.py` com 11 cenários expôs incoerência aritmética: em zona apertada (lance_atual entre preco_alvo e preco_max), `Lucro (R$)` usava `score_efetivo` (realista, reduzido) enquanto `ROI alvo (%)` usava `score_roi` intrinsic (alvo teórico). Cenário 6 (Gol em zona apertada): ROI exibido 64.3% e Lucro R$ 7,167 — capital implícito do mental math `lucro/(roi/100)` = R$ 11,148, sem correspondência em nenhum campo da linha. Operador suspeitava do sistema sem conseguir nomear o porquê.

@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 from carros_sa.agents.calibracao_giro import roi_anualizado
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.tools.laudo_audit import verificar_laudo_completo
-from carros_sa.tools.sheets import HEADER, _lucro_absoluto_no_alvo
+from carros_sa.tools.sheets import HEADER, _lucro_absoluto_efetivo, _lucro_absoluto_no_alvo
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
@@ -335,6 +335,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
         roi_anual = roi_anualizado(score_efetivo, av.dias_giro_estimado) * 100
         roi_alvo = score_efetivo * 100
+        lucro = _lucro_absoluto_efetivo(av, lote.lance_atual)
 
         # Popularidade (bucket relativo) — pode falhar se popularidade.py quebrar;
         # auditoria não deve morrer por isso, cai pro "—" que é valor aceito.
@@ -403,6 +404,7 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
             "dias_giro": av.dias_giro_estimado,
             "roi_anualizado": round(roi_anual, 1),
             "roi_alvo": round(roi_alvo, 1),
+            "lucro": lucro,
             "fator_risco": round(av.fator_risco, 3),
             "popularidade": popularidade,
             "severidade": laudo.severidade_geral if laudo else "—",
@@ -423,12 +425,13 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         })
 
     # Espelha SheetsExporter.exportar: filtra encerrados, depois ordena viáveis
-    # primeiro, desempate por ROI anualizado desc INTERNO (chave de ranking; a
-    # coluna exibida ao operador é 'ROI alvo (%)' = score_roi cru, sem anualizar).
+    # primeiro, desempate por lucro absoluto desc (paridade explícita com sheets.py
+    # e cli.py — P5b). Lucro aqui usa score_efetivo (mesmo basis da coluna 'Lucro (R$)'
+    # exibida ao operador).
     rows = [r for r in rows if not r["encerrado"]]
     rows.sort(key=lambda r: (
         0 if r["viavel"] else 1,
-        -(r["roi_anualizado"] or 0),
+        -(r["lucro"] or 0),
     ))
     for idx, r in enumerate(rows, start=1):
         r["rank"] = idx

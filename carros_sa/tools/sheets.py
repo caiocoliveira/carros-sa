@@ -293,13 +293,15 @@ class SheetsExporter:
                                                     # não-analisados só no final pra
                                                     # o operador conferir depois
                 0 if r["viavel"] else 1,            # viáveis antes dos inviáveis
-                # Ranking principal = ROI anualizado desc, MESMA métrica que o
-                # `carros-sa top` (cli.py:137). Antes era folga absoluta
-                # (`preco_max - lance_atual`), o que favorecia lotes baratos
-                # de ROI baixo sobre lotes lucrativos com lance perto do teto.
-                # Operador via duas ordens conflitantes da mesma fonte; agora
-                # uma só métrica governa o rank.
-                -(r["roi_anualizado"] or 0),
+                # Ranking principal = lucro absoluto desc — "dinheiros que sobram
+                # no final". MESMA métrica que o `carros-sa top` (cli.py) e o
+                # audit.py (paridade total exigida — P5b). Antes era ROI anualizado;
+                # premiava lote de capital pequeno com ROI alto sobre lote de
+                # capital grande com lucro absoluto maior, distorcendo o que o
+                # operador vê na coluna Lucro (R$). Lucro aqui é `_lucro_absoluto_efetivo`
+                # (basis score_efetivo, mesmo da coluna exibida) — em zona apertada
+                # cai com o capital empatado real.
+                -(r["lucro"] or 0),
             ),
         )
         self._write_sheet(empresa_id, rows_sorted)

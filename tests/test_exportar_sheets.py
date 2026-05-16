@@ -329,17 +329,19 @@ class TestSheetsExporterQuery:
         assert rows[2][idx_marca] == "Ford"
         assert rows[2][idx_modelo] == "Fiesta"
 
-    def test_exportar_ranking_por_roi_anualizado_entre_viaveis(self):
-        """Entre lotes viáveis com laudo analisado, rank é por ROI anualizado desc.
+    def test_exportar_ranking_por_lucro_absoluto_entre_viaveis(self):
+        """Entre lotes viáveis com laudo analisado, rank é por lucro absoluto desc.
 
         Bug histórico: planilha ranqueava por folga absoluta `preco_max - lance_atual`
-        (ver sheets.py:142 antes do fix de 2026-05). CLI `top` ranqueia por ROI
-        anualizado; resultado: operador via duas ordens conflitantes da mesma
-        fonte. Métrica única agora.
+        (até 2026-05); depois passou pra ROI anualizado; agora pra lucro absoluto
+        em R$ — "dinheiros que sobram no final". Paridade explícita com CLI `top`
+        e audit (P5b). Sem isso operador vê três ordens conflitantes da mesma fonte.
 
         Cenário deste teste:
-          - Lote BARATO: lance baixo (folga grande) mas ROI baixo → deve vir DEPOIS
-          - Lote LUCRATIVO: lance alto (folga pequena) mas ROI alto → deve vir ANTES
+          - Lote BARATO: lance baixo, capital pequeno, ROI 10% → lucro ~3k → DEPOIS
+          - Lote LUCRATIVO: lance alto, capital grande, ROI 50% → lucro ~40k → ANTES
+        Ranking igual ao anterior por construção do cenário (lucro = preco_giro × roi
+        / (1+roi) preserva ordem aqui), mas semântica trocou.
         """
         engine = _engine_mem()
         with Session(engine) as session:
@@ -1168,7 +1170,9 @@ class TestAplicaCoresKm:
         with Session(engine) as session:
             # km/ano: 5k → verde; 20k → amarelo; 30k → vermelho.
             # score_roi decrescente garante ordem de ranking determinística:
-            # bucket sort (laudo+viavel) idêntico → desempate por -roi_anualizado.
+            # bucket sort (laudo+viavel) idêntico → desempate por -lucro absoluto.
+            # Mesmo preco_giro nos 3 lotes ⇒ lucro = preco_giro × roi / (1+roi)
+            # preserva a ordem decrescente do score_roi.
             session.add(_lote("L_verde", ano=ano_2_atras, km=10_000, lance_atual=15_000))
             session.add(_avaliacao("L_verde", score_roi=0.5))
             session.add(_lote("L_amarelo", ano=ano_2_atras, km=40_000, lance_atual=15_000))

@@ -72,8 +72,11 @@ def _imprimir_vision_provider(client) -> None:
 @app.command()
 def top(
     empresa: str = typer.Option("carros_uberlandia", help="ID da empresa"),
-    n: int = typer.Option(10, "--n", "--top", help="Quantos lotes mostrar (top N por ROI)"),
-    por_absoluto: bool = typer.Option(False, "--absoluto", help="Ordena por ROI absoluto (sem anualizar)"),
+    n: int = typer.Option(10, "--n", "--top", help="Quantos lotes mostrar (top N por lucro absoluto)"),
+    por_roi_intrinsic: bool = typer.Option(
+        False, "--roi-intrinsic",
+        help="Ordena por ROI intrinsic (score_roi cru no preço-alvo, ignora lance atual)",
+    ),
     incluir_inviaveis: bool = typer.Option(
         False, "--incluir-inviaveis",
         help="Mostra também lotes onde lance_atual > preco_max (default: oculta)",
@@ -88,12 +91,12 @@ def top(
     apertada (capital efetivo cresce). Por construção `capital × ROI ≈ Lucro`
     bate (operator mental math passa).
 
-    Ordenação default: ROI ANUALIZADO interno (`score_efetivo × 365 / dias_giro`).
-    Premia carros de giro rápido — duas linhas com ROI alvo igual podem aparecer
-    em ordens diferentes porque o desempate usa o tempo de giro. `--absoluto`
-    força ranking pelo `score_roi` INTRINSIC (alvo teórico) — útil pra sniff-test
-    de oportunidade independente do lance atual; difere de score_efetivo apenas
-    em zona apertada e lotes inviáveis.
+    Ordenação default: **LUCRO ABSOLUTO** (R$ que sobram no fim da revenda).
+    Métrica única em paridade com `sheets.py` (planilha) e `audit.py` (P5b).
+    Lucro usa `_lucro_absoluto_efetivo` — basis score_efetivo, mesmo da coluna
+    'Lucro (R$)' exibida. `--roi-intrinsic` força ranking pelo `score_roi` cru
+    no preço-alvo (alvo teórico, ignora lance atual) — útil pra sniff-test de
+    oportunidade independente do leilão em andamento.
 
     Filtro default: oculta lotes inviáveis (lance atual já passou do nosso teto).
     Use `--incluir-inviaveis` pra ver tudo (útil pra calibrar fórmula).
@@ -137,27 +140,27 @@ def top(
 
     n_inviaveis = total_avaliados - len(todas)
 
-    # Anota cada linha com ROI anualizado HONESTO (entrada por max(lance, alvo)).
-    # `score_roi_efetivo` cai pra `score_roi` quando `lance_atual ≤ preco_alvo`,
-    # mas reduz o ROI exibido quando o leilão já passou do alvo. Ranking fica
-    # alinhado com o cenário real de compra.
-    from carros_sa.tools.sheets import _score_roi_efetivo
+    # Anota cada linha com:
+    #   x[2] = lucro absoluto efetivo (R$ que sobram, basis score_efetivo) — usado
+    #          como ranking default em paridade com sheets.py e audit.py (P5b).
+    # `_lucro_absoluto_efetivo` usa entrada por `max(lance_atual, preco_alvo)`,
+    # ou seja: lucro cai quando lance atual já passou do alvo (capital empatado
+    # real cresce). Coerente com a coluna "Lucro (R$)" da planilha.
+    from carros_sa.tools.sheets import _lucro_absoluto_efetivo, _score_roi_efetivo
     enriquecidas = [
         (
             av,
             lote,
-            roi_anualizado(_score_roi_efetivo(av, lote.lance_atual), av.dias_giro_estimado),
+            _lucro_absoluto_efetivo(av, lote.lance_atual),
         )
         for av, lote in todas
     ]
-    if por_absoluto:
-        # `--absoluto` = ranking pelo ROI INTRINSIC (score_roi cru, sem
-        # anualização). Mantido propositalmente intrinsic mesmo após o fix
-        # de display efetivo de 2026-05-10 — esse flag responde a "quais
-        # lotes têm POTENCIAL econômico se eu conseguir entrar pelo alvo
-        # calibrado", útil pra sniff-test de oportunidade. Default (sem
-        # `--absoluto`) usa anualizado sobre score_efetivo, que é a métrica
-        # realista do que o operador vai ganhar dado o lance atual real.
+    if por_roi_intrinsic:
+        # `--roi-intrinsic` = ranking pelo score_roi cru no preço-alvo (sniff-test
+        # de oportunidade independente do lance atual). Resposta a uma pergunta
+        # diferente do default: "se eu conseguisse entrar pelo alvo calibrado,
+        # quais lotes teriam maior margem percentual?". Default (sem flag) usa
+        # lucro absoluto em R$ — o que de fato sobra no bolso.
         enriquecidas.sort(key=lambda x: x[0].score_roi, reverse=True)
     else:
         enriquecidas.sort(key=lambda x: x[2], reverse=True)
@@ -167,7 +170,7 @@ def top(
     from carros_sa.agents.calibracao_giro import _categoria_de_modelo
     from carros_sa.tools.popularidade import bucket_modelo
 
-    sufixo = "ROI alvo" if por_absoluto else "ROI anualizado interno (giro)"
+    sufixo = "ROI intrinsic (alvo teórico)" if por_roi_intrinsic else "Lucro absoluto (R$)"
     titulo = f"Top {len(rows)} lotes — {empresa} (ordem: {sufixo})"
     if not incluir_inviaveis and n_inviaveis > 0:
         titulo += f" — {n_inviaveis} inviável(is) ocultado(s)"
@@ -182,14 +185,9 @@ def top(
     tbl.add_column("Lucro", justify="right")
     tbl.add_column("Pop.", justify="left")
     tbl.add_column("Risco", justify="right")
-    from carros_sa.tools.sheets import _lucro_absoluto_efetivo
-    for av, lote, _roi_anual_ranking_only in rows:
+    for av, lote, lucro_esperado in rows:
         cat = _categoria_de_modelo(lote.modelo)
         bucket = bucket_modelo(lote.marca, lote.modelo, cat, ano=lote.ano)
-        # Lucro absoluto efetivo: usa entrada por `max(lance_atual, preco_alvo)`
-        # pra refletir o capital empatado real (no alvo se leilão ainda permite,
-        # acima do alvo se já passou). Bate com a coluna "Lucro (R$)" da planilha.
-        lucro_esperado = _lucro_absoluto_efetivo(av, lote.lance_atual)
         # ROI exibido = score_efetivo (mesmo basis do Lucro) — fix P5b 2026-05-10.
         # Antes era `score_roi` intrinsic, divergindo do Lucro exibido em zona
         # apertada (operator math `capital × ROI ≈ Lucro` não batia).

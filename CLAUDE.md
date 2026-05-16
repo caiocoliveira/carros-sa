@@ -45,6 +45,15 @@ Outros arquivos "não tocar sem motivo":
 - `carros_sa/agents/extrator_laudo.py` + `vision_clients.py`
 - `config/empresas/*.yaml`
 
+## Tools MCP deferidas (Claude Code on the web)
+
+No ambiente de execução remota (web/mobile), todas as tools `mcp__github__*` (e outras MCP) entram **deferidas**: o nome aparece na lista mas o schema NÃO está carregado. Chamar direto dá `InputValidationError`. Fluxo correto:
+
+1. `ToolSearch` com `query: "select:mcp__github__<nome>[,mcp__github__<outra>]"` pra carregar os schemas.
+2. Aí sim invocar a tool.
+
+Pode carregar várias de uma vez no mesmo `select:`. Não tem `gh` CLI nesse ambiente — toda interação com GitHub passa pelas tools `mcp__github__*`.
+
 ## Segredos
 
 - **NUNCA** cole chaves, tokens ou senhas no chat — fica no histórico da conversa e vaza.

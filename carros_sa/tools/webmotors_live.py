@@ -33,11 +33,14 @@ from carros_sa.tools.webmotors import AnuncioWM, parse_resultados
 
 logger = logging.getLogger(__name__)
 
-# URL canônica de listagem do Webmotors. Operador pode override via env
-# WEBMOTORS_SEARCH_URL_TEMPLATE se o site mudar o padrão de rota.
+# URL de listagem do Webmotors. Default é a rota CANÔNICA SEO-friendly
+# (`/comprar/{marca}/{modelo}/ano-{a}-{a}`) que costuma passar mais limpa
+# pelo DataDome do que a rota com query string explícita
+# (`/carros/estoque?marca1=...`). A rota com query foi tentada primeiro
+# em 2026-05-16 e bateu de cara no "Press & Hold" challenge. Operador
+# pode override via env WEBMOTORS_SEARCH_URL_TEMPLATE se a rota mudar.
 _DEFAULT_SEARCH_URL = (
-    "https://www.webmotors.com.br/carros/estoque?"
-    "marca1={marca}&modelo1={modelo}&anode={ano}&anoate={ano}"
+    "https://www.webmotors.com.br/comprar/{marca}/{modelo}/ano-{ano}-{ano}"
 )
 
 # Timeout por navegação (Cloudflare challenge pode levar 5-10s).

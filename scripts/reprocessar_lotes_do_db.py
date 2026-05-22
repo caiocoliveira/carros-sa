@@ -147,6 +147,7 @@ async def _run(
     from datetime import datetime
 
     from carros_sa.agents.vision_clients import build_default_client
+    from carros_sa.agents.text_llm_clients import build_default_text_client
     from carros_sa.db import get_session, init_db
     from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
     from carros_sa.orquestrador import _pipeline_lote
@@ -163,6 +164,22 @@ async def _run(
     empresa = carregar_empresa(empresa_id)
     vision_client = build_default_client()
     console.print(f"[cyan]Vision:[/cyan] {type(vision_client).__name__}")
+    # text_llm_client habilita a camada 4 do `extrair_laudo` (DD4 — LLM textual
+    # vendor-agnostic) e o fallback de URL de laudo no scraper de detalhe.
+    # Sem isso, o retry diário rodava `_pipeline_lote` SEM camada 4: lotes de
+    # vendor fora do Auto Avaliar (Zachi, Procemax, Terceira Visão, etc) que
+    # entram pelo retry ficavam presos em confidence=0.0 indefinidamente,
+    # mesmo após DD4 ter aterrissado em main — paridade entre triagem inicial
+    # (que passa) e retry (que não passava). Tentativa N+1 incrementava e o
+    # circuit-breaker (II) os congelava após 3 ciclos, sem chance da camada 4
+    # rodar uma única vez sobre esses PDFs. Diagnóstico em 2026-05-22: 6/64
+    # lotes ativos presos exatamente por este caminho.
+    try:
+        text_llm_client = build_default_text_client()
+        console.print(f"[cyan]Text LLM:[/cyan] {type(text_llm_client).__name__}")
+    except RuntimeError:
+        text_llm_client = None
+        console.print("[yellow]Text LLM: desabilitado — camada 4 do extrator não dispara[/yellow]")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="carros_sa_reproc_"))
 
@@ -232,7 +249,10 @@ async def _run(
                 task = progress.add_task("Reprocessando", total=len(lotes))
                 for lote in lotes:
                     try:
-                        res = await _pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir)
+                        res = await _pipeline_lote(
+                            lote, page, vision_client, empresa, session, tmp_dir,
+                            text_llm_client=text_llm_client,
+                        )
                         if res.erro:
                             n_erro += 1
                         elif res.motivo_descarte:

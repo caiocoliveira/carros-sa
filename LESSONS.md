@@ -98,6 +98,48 @@ ranking (CLI + planilha + audit), adicionar em `audit.py` ou em teste de
 integração uma checagem de paridade — ex.: top-3 do `cli.top` é um subset do
 top-N da planilha, ordem preservada. Falha vira sinal antes do operador ver.
 
+### P5g. Callers paralelos do mesmo entrypoint com defaults divergentes silenciam camadas de defesa
+
+Sintoma: defesa em camadas funciona em alguns caminhos, falha silenciosa em
+outros. Audit reporta o sintoma; investigação rastreia até "o cliente X foi
+passado em A, não foi passado em B."
+
+Caso de referência (2026-05-22, DD6):
+- `extrair_laudo(pdf, vision_client, text_llm_client=None)` foi extendido em
+  DD4 (2026-05-15) com uma 4ª camada que dispara só quando `text_llm_client`
+  é passado. Triagem inicial (`triagem_diaria.py` → `orquestrar` → `_pipeline_lote`)
+  passava o cliente. Retry diário (`scripts/reprocessar_lotes_do_db.py` →
+  `_pipeline_lote` direto) NÃO passava — mesma assinatura, default None.
+- Lote de vendor fora do template Auto Avaliar entrando pela 1ª vez via
+  triagem: camada 4 dispara, extrai OK. Lote entrando via retry: camada 4
+  não dispara, visual responde "0.0 + listas vazias" honestamente, persiste,
+  `tentativas++`, 3 ciclos, circuit-breaker (II) congela. Nunca rodou a
+  defesa nele. Audit `--strict` reporta `cache_confianca_baixa` em loop.
+
+**Antídoto operacional:** quando uma feature opcional (kwarg default `None`)
+é gateway de uma camada de defesa, **todos os callers do entrypoint precisam
+passar o kwarg** — sem exceção. Adicionar grep guard cobrindo cada caller
+paralelo:
+
+```python
+# tests/test_paridade_callers.py
+def test_retry_passa_text_llm_client():
+    src = Path("scripts/reprocessar_lotes_do_db.py").read_text()
+    assert "text_llm_client=" in src.split("_pipeline_lote(")[1][:400]
+```
+
+**Antídoto estrutural:** se o kwarg é defesa-em-profundidade obrigatória,
+considere tornar o default *opinativo* (auto-instanciar via factory dentro
+do entrypoint) em vez de `None`. Aí o caller que não quer paga o custo
+explícito (`text_llm_client=False` ou similar). Hoje em DD4 escolhemos o
+caminho conservador (não auto-instanciar pra não quebrar testes) — mas a
+opção fica em cima da mesa se P5g aparecer de novo.
+
+**Conexão com P5b:** P5b é "mesma métrica em dois arquivos diverge no que
+calcula"; P5g é "mesma chamada em dois lugares com defaults divergentes
+silencia uma camada". Sintomas externos parecidos (paridade quebrada);
+causas e fixes diferentes.
+
 ### P5. Invariantes adicionadas reativamente, nunca preventivamente
 
 Sintoma: operador aponta "essa coluna tá sem sentido", e só depois vira teste.

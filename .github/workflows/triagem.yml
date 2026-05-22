@@ -27,7 +27,16 @@ name: triagem-diaria
 on:
   schedule:
     - cron: '0 10,16 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      reset_circuit_breaker:
+        description: >
+          Zera LaudoCache.tentativas_extracao em todas as rows com confidence<0.6
+          ANTES da triagem. Use UMA VEZ após melhorar uma camada do extrator
+          (ex.: novo vendor cobrindo lotes presos por DD4 + paridade text_llm_client).
+          NÃO marcar em runs automáticas — anula o circuit-breaker.
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -120,6 +129,17 @@ jobs:
 
       - name: Migra schema (idempotente)
         run: .venv/bin/python scripts/migrar_tentativas_extracao.py
+
+      # One-shot manual: zera circuit-breaker em lotes com cache fraco. Só roda
+      # quando o operador dispara "Run workflow" com a checkbox marcada. O cron
+      # automático NUNCA passa por aqui — circuit-breaker (II) precisa continuar
+      # defendendo lotes com input ruim em perma-loop. Uso típico: após
+      # melhorar uma camada do extrator (ex.: novo vendor coberto pela camada 4
+      # do DD4 + paridade text_llm_client no retry — 2026-05-22), destravar
+      # lotes que foram congelados pelo gap.
+      - name: Reset circuit-breaker (manual, opcional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_circuit_breaker == true }}
+        run: .venv/bin/python scripts/laudo_reset_tentativas.py --apply
 
       - name: Triagem + limpa decoys + retry de laudos pendentes + audit gate
         env:

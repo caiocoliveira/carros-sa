@@ -4,11 +4,30 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop** — 571/571 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry** — 602/602 testes passando
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual + LLM textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML, **coleta noturna Webmotors live (workstream G — 2026-05-12) com cache 24h, retry/Cloudflare-detect e display honesto ("—" quando sem amostra real)**.
 
 Dependências externas conhecidas: workstream G.3 (reativar mediana no precificador — bloqueia em ≥1 semana de dado real do cron G), workstream H (calibração de coeficientes com séries temporais), DD (granularidade de `dias_giro`).
+
+### DD6 — Paridade `text_llm_client` entre triagem e retry destrava camada 4 do DD4 no retry diário (2026-05-22) ✅
+- **Branch:** `claude/amazing-goldberg-HHafN`
+- **Motivação:** Operador pediu (5ª vez) "todo carro tem laudo baixado, revisado e link na planilha — se não, identificar razão e resolver pra nunca mais acontecer." Diagnóstico do state/db (snapshot 2026-05-22): 64 lotes ativos, 58 completos, 6 incompletos (cache_confianca_baixa). Todos com PDF ≥4MB com texto extraível de vendors fora do template Auto Avaliar (Zachi Vistorias, Procemax, Terceira Visão, CAUTELAR V2+PINTURA) — exatamente o caso que DD4 (2026-05-15) foi feito pra cobrir. Mas `modelo_llm=gemini-flash` (visual) em todos, e `avarias_json=[]` + `confidence=0.0` — camada 4 (LLM textual vendor-agnostic) NUNCA disparou.
+- **Causa raiz:** `scripts/reprocessar_lotes_do_db.py:235` chamava `_pipeline_lote(lote, page, vision_client, empresa, session, tmp_dir)` SEM `text_llm_client`. A camada 4 do `extrair_laudo` só dispara quando `text_llm_client is not None and _visual_e_inutil(visual) and not avarias`. Triagem inicial passa o cliente via `orquestrar(..., text_llm_client=...)` — mas o RETRY diário (cron 10:00/16:00 UTC, mesmo entrypoint `_pipeline_lote`) usa default `text_llm_client=None`. Lote de vendor novo: 1ª passagem inicial extraiu OK; 2ª+ passagem via retry → visual responde inútil (PDF é mesmo) → camada 4 não dispara → persiste 0.0 → tentativas++ → 3 ciclos → circuit-breaker (II) congela. Nunca rodou camada 4 sobre o PDF.
+- **Solução cirúrgica:**
+  1. [`scripts/reprocessar_lotes_do_db.py`](scripts/reprocessar_lotes_do_db.py) importa `build_default_text_client`, instancia `text_llm_client` (try/except RuntimeError igual triagem) e passa pro `_pipeline_lote`. **1 import + 1 try/except + 1 kwarg.**
+  2. [`scripts/laudo_reset_tentativas.py`](scripts/laudo_reset_tentativas.py) — helper one-shot que zera `LaudoCache.tentativas_extracao` em rows com `confidence<0.6`. Operador roda UMA VEZ após fix pra destravar os 6 lotes que circuit-breaker congelou injustamente (II-FU4 do ROADMAP). Dry-run por default; `--apply` escreve.
+  3. [`.github/workflows/triagem.yml`](.github/workflows/triagem.yml) ganha input opcional `reset_circuit_breaker` no `workflow_dispatch`. Cron automático ignora (continua deferente ao circuit-breaker). Operador marca a checkbox uma vez via "Run workflow" pra destravar.
+- **Cobertura:** 9 testes novos (602/602 verde):
+  - [`tests/test_reprocessar_lotes_text_llm.py`](tests/test_reprocessar_lotes_text_llm.py) — 3 guards de paridade source-level: importa `build_default_text_client`, chamada de `_pipeline_lote` inclui `text_llm_client=`, e `triagem_diaria.py` continua sendo a referência canônica (espelho — se mudar lá, o teste alerta).
+  - [`tests/test_laudo_reset_tentativas.py`](tests/test_laudo_reset_tentativas.py) — 6 testes do helper: dry-run não modifica DB, `--apply` zera tentativas em cache fraco, idempotência (2ª passagem nada a fazer), cache forte intocado pelo filtro default, `--lote-id X` força reset ignorando confidence, lote inexistente exit 1.
+- **Impacto:**
+  - Próximo cron noturno (10:00 UTC) com reset_circuit_breaker=true: 6 lotes presos vão receber camada 4 → ~5/6 devem retornar confidence ≥0.6 (PDFs têm 9-12k chars de texto + status "APROVADO"/"APROVADO COM APONTAMENTO") → audit `--strict` deixa de flagar → planilha mostra "✓ Viável" em vez de "⚠ LAUDO NÃO CAPTURADO".
+  - Lotes futuros de vendor novo entrando pelo retry: camada 4 dispara normalmente, sem ficar preso esperando passagem da triagem inicial (que pode nunca vir se cron pula direto pra retry).
+- **Padrão genérico ([LESSONS.md/P5g](LESSONS.md)):** Quando dois call-sites do MESMO entrypoint têm assinaturas idênticas mas defaults divergentes (`f(x, y, z=None)` chamado em A com `z=algo` e em B sem `z`), o caller silencioso vira buraco de defesa em camadas. Aqui DD4 (camada 4) só funcionava no caller que passava `text_llm_client`. Defesa: teste de paridade source-level entre callers paralelos (grep no fonte garantindo kwarg em todos os pontos).
+- **Limitações conhecidas:**
+  - Reset do circuit-breaker depende de operador clicar "Run workflow" + marcar checkbox. Sem isso, os 6 stuck continuam stuck (audit reporta, mas o fix de código sozinho não destrava). Aceito porque (a) anular circuit-breaker em todo cron é regressão direta da II, (b) opção manual é discoverable na UI do GitHub Actions.
+  - Dos 6 lotes no snapshot: 3 estão em `tentativas=2` (uma chance ainda — fix de código sozinho destrava) e 3 em `tentativas=3` (precisam do reset). Operador pode rodar o workflow uma vez com reset para destravar todos os 6 num ciclo.
 
 ### II — Circuit-breaker em lotes perma-stuck no retry diário (2026-05-15) ✅
 - **Branch:** `claude/update-daily-content-Aau6F`

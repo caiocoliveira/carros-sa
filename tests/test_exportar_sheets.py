@@ -625,6 +625,166 @@ class TestSheetsExporterQuery:
         # rows[0]=banner, rows[1]=header, rows[2]=primeiro lote
         assert "Viável" in rows[2][idx_situacao]
 
+    def test_situacao_estrutural_em_viavel_marca_warning(self):
+        """Lote viável + laudo analisado + severidade=ESTRUTURAL: Situação
+        ganha sufixo ' ⚠ ESTRUTURAL' pra operador ver visualmente o que o
+        audit (`_check_severidade_estrutural_em_viavel`) já flaga. Sem o sufixo,
+        operador focado em ROI alto pode dar lance num lote com coluna B/C
+        reparada sem perceber.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LE1", lance_atual=8000))
+            session.add(_avaliacao("LE1", preco_max=15000))
+            laudo = _laudo("LE1")
+            laudo.severidade_geral = "estrutural"
+            laudo.motor_ok = True
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "ESTRUTURAL" in situacao
+
+    def test_situacao_motor_problema_em_viavel_marca_warning(self):
+        """Lote viável + laudo analisado + motor_ok=False: Situação ganha
+        sufixo ' ⚠ motor'. Custo de retífica costuma subestimar e revenda fica
+        mais difícil — operador precisa ver antes do lance.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LM1", lance_atual=12000))
+            session.add(_avaliacao("LM1", preco_max=20000))
+            laudo = _laudo("LM1")
+            laudo.severidade_geral = "leve"
+            laudo.motor_ok = False
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "motor" in situacao
+
+    def test_situacao_estrutural_E_motor_combina_warnings(self):
+        """ESTRUTURAL + motor_ok=False juntos viram ' ⚠ ESTRUTURAL + motor'.
+        Caso patológico mas possível — operador vê ambos os sintomas.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LB1", lance_atual=5000))
+            session.add(_avaliacao("LB1", preco_max=12000))
+            laudo = _laudo("LB1")
+            laudo.severidade_geral = "estrutural"
+            laudo.motor_ok = False
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "ESTRUTURAL" in situacao
+        assert "motor" in situacao
+
+    def test_situacao_warning_nao_dispara_em_inviavel(self):
+        """Lote inviável (✗ Caro demais) NÃO ganha sufixo ⚠ ESTRUTURAL/motor
+        — display já oculta Lucro/ROI e operador não vai dar lance, não há
+        risco de surpresa. Mantém a Situação curta. Paridade com `_check_*_em_viavel`
+        no audit (que também só disparam em viáveis).
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LI1", lance_atual=40000))
+            session.add(_avaliacao("LI1", preco_max=30000))  # inviável
+            laudo = _laudo("LI1")
+            laudo.severidade_geral = "estrutural"
+            laudo.motor_ok = False
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Caro demais" in situacao
+        assert "ESTRUTURAL" not in situacao
+        assert "motor" not in situacao
+
+    def test_situacao_warning_nao_dispara_em_laudo_nao_analisado(self):
+        """Laudo NÃO CAPTURADO (confidence<0.6) já oculta tudo no display —
+        Situação fica '⚠ LAUDO NÃO CAPTURADO: ...', sem sufixo ESTRUTURAL
+        (paridade P5e — display oculta números, audit espelha).
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LN1", lance_atual=8000))
+            session.add(_avaliacao("LN1", preco_max=15000))
+            laudo = _laudo("LN1")
+            laudo.severidade_geral = "estrutural"
+            laudo.motor_ok = False
+            laudo.confidence = 0.55  # fallback _laudo_sem_pdf — não analisado
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "LAUDO NÃO CAPTURADO" in situacao
+        assert "ESTRUTURAL" not in situacao
+        assert "motor" not in situacao
+
     def test_exportar_inviavel_oculta_lucro_e_roi(self):
         """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro nem
         ROI alvo — esses números pressupõem comprar pelo preço-alvo (que é menor

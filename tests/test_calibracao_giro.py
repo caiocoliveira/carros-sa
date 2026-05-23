@@ -245,6 +245,23 @@ def test_faixa_de_idade_thresholds():
     assert faixa_de_idade(2030, 2026) == FaixaIdade.NOVO
 
 
+def test_faixa_de_idade_default_usa_ano_atual_em_runtime():
+    """Guard contra regressão do hardcoded `ano_referencia=2026`.
+
+    Default antes era literal 2026 — silenciosamente miscalibrava carros 2023
+    em jan/2027 (idade real 4 → MEDIO; com hardcode idade 3 → NOVO). Agora
+    resolve via `datetime.now().year` quando não passa o arg.
+    """
+    from datetime import datetime
+    ano = datetime.now().year
+    # Carro do ano atual = NOVO (idade 0)
+    assert faixa_de_idade(ano) == FaixaIdade.NOVO
+    # Carro de 4 anos atrás = MEDIO
+    assert faixa_de_idade(ano - 4) == FaixaIdade.MEDIO
+    # Carro de 10 anos atrás = VELHO
+    assert faixa_de_idade(ano - 10) == FaixaIdade.VELHO
+
+
 def test_faixa_idade_aplica_sub_bucket_quando_tem_dados(session_isolada):
     """Quando faixa NOVO tem ≥3 amostras, calibração usa APENAS elas (não todas)."""
     session_isolada.add(Empresa(id="emp1", nome="x", config_yaml_path="x"))

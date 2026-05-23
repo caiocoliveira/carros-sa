@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import datetime
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -157,7 +158,7 @@ def bucket_modelo(
     modelo: str,
     categoria: CategoriaVeiculo,
     ano: Optional[int] = None,
-    ano_referencia: int = 2026,
+    ano_referencia: Optional[int] = None,
     yaml_path: Optional[str] = None,
 ) -> BucketPopularidade:
     """Devolve bucket relativo do modelo dentro da sua categoria.
@@ -182,8 +183,11 @@ def bucket_modelo(
             break
 
     if posicao == -1:
-        # Fora do ranking: NICHO por default; ILIQUIDO se também for ≥10 anos
-        if ano is not None and (ano_referencia - ano) >= 10:
+        # Fora do ranking: NICHO por default; ILIQUIDO se também for ≥10 anos.
+        # `ano_referencia` lazy default = ano atual em runtime (era hardcoded 2026,
+        # virava silenciosamente stale em jan/2027).
+        ref = ano_referencia if ano_referencia is not None else datetime.now().year
+        if ano is not None and (ref - ano) >= 10:
             return BucketPopularidade.ILIQUIDO
         return BucketPopularidade.NICHO
 

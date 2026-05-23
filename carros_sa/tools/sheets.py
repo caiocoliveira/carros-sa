@@ -242,6 +242,32 @@ def _laudo_motivo_legivel(motivo: Optional[str]) -> str:
     return " + ".join(legiveis) if legiveis else motivo
 
 
+def _sufixo_warning_operacional(row: dict) -> str:
+    """Sufixo ' ⚠ ESTRUTURAL / motor' quando lote viável com laudo analisado tem
+    severidade ESTRUTURAL ou motor com problema.
+
+    Cross-checks `_check_severidade_estrutural_em_viavel` e
+    `_check_motor_problema_em_viavel` em audit.py já flagam, mas operador focado
+    em ROI alto raramente roda audit antes de cada lance — antecipa o aviso
+    visualmente na própria coluna "Situação". Não suprime números (laudo é
+    confiável, decisão é dele), só sinaliza.
+
+    Não dispara em:
+      - lote inviável (display já mostra "✗ Caro demais")
+      - laudo NÃO CAPTURADO (display já mostra "⚠ LAUDO NÃO CAPTURADO"
+        e oculta números — paridade P5e)
+    """
+    if not row.get("viavel") or not row.get("laudo_analisado"):
+        return ""
+    warnings = []
+    severidade = str(row.get("severidade") or "").lower()
+    if severidade == "estrutural":
+        warnings.append("ESTRUTURAL")
+    if row.get("motor_ok_bool") is False:
+        warnings.append("motor")
+    return f" ⚠ {' + '.join(warnings)}" if warnings else ""
+
+
 def _lucro_absoluto_efetivo(av: AvaliacaoLote, lance_atual: Optional[int]) -> int:
     """Lucro absoluto pelo cenário REAL (entrada por `max(lance_atual, preco_alvo)`).
 
@@ -421,6 +447,15 @@ class SheetsExporter:
                 else None
             )
 
+            # severidade / motor_ok pra warning visual em "Situação" — operador
+            # focado em ROI alto pode dar lance em lote viável com laudo ESTRUTURAL
+            # ou motor problema sem ver o aviso (que existia só em audit, fora do
+            # fluxo natural). Esses cross-checks `_check_severidade_estrutural_em_viavel`
+            # e `_check_motor_problema_em_viavel` continuam reportando — display
+            # passa a antecipar visualmente.
+            severidade = laudo.severidade_geral if laudo else None
+            motor_ok_bool = laudo.motor_ok if laudo else None
+
             rows.append({
                 "lote_id": av.lote_id,
                 "marca": lote.marca,
@@ -435,6 +470,8 @@ class SheetsExporter:
                 "lance_atual": lote.lance_atual or 0,
                 "preco_max": av.preco_max,
                 "fipe": av.fipe,
+                "severidade": severidade,
+                "motor_ok_bool": motor_ok_bool,
                 # Mediana de mercado: dado real do Webmotors via cache populado
                 # pelo cron `carros-sa webmotors-coletar` (workstream G, 2026-05-12).
                 # Sem amostra → `webmotors_n_anuncios=0/None` faz o display mostrar
@@ -517,9 +554,9 @@ class SheetsExporter:
                 # Antes deste ramo `✗ Caro demais` saía sem sufixo e o
                 # glossário ficava inconsistente.
                 base = "✓ Viável" if r["viavel"] else "✗ Caro demais"
-                situacao = f"{base} (laudo: {motivo_legivel})"
+                situacao = f"{base} (laudo: {motivo_legivel}){_sufixo_warning_operacional(r)}"
             elif r["viavel"]:
-                situacao = "✓ Viável"
+                situacao = f"✓ Viável{_sufixo_warning_operacional(r)}"
             else:
                 situacao = "✗ Caro demais"
             # URL → HYPERLINK clicável com label curto ("Abrir anúncio")
@@ -796,8 +833,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export.",
-                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro e ROI ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export. Sufixo ' ⚠ ESTRUTURAL' aparece em lotes viáveis com severidade=ESTRUTURAL no laudo (coluna B/C, longarina, monobloco reparados — operador real costuma descartar categoricamente). Sufixo ' ⚠ motor' em viáveis com motor_ok=False (motor não-original ou com problema — custo de retífica subestimável; revenda mais difícil mesmo após reparo). Combinam: ' ⚠ ESTRUTURAL + motor'.",
+                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro e ROI ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito. Sufixos ⚠ ESTRUTURAL / ⚠ motor antecipam visualmente os cross-checks operacionais do audit (`_check_severidade_estrutural_em_viavel`, `_check_motor_problema_em_viavel`) — operador focado em ROI raramente roda audit antes de cada lance, e esses lotes podem 'passar' pelo precificador via fator_risco saturado em laudos com lance baixo.",
             ],
             [
                 "Marca",

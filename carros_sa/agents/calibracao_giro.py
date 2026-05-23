@@ -47,7 +47,13 @@ class FaixaIdade(str, Enum):
     VELHO = "velho"
 
 
-def faixa_de_idade(ano_veiculo: int, ano_referencia: int = 2026) -> FaixaIdade:
+def faixa_de_idade(ano_veiculo: int, ano_referencia: Optional[int] = None) -> FaixaIdade:
+    # Default lazy = ano atual. Hardcoded 2026 silenciosamente miscalibrava
+    # carros 2023 em jan/2027 (idade real 4 → MEDIO; com hardcode idade 3 → NOVO),
+    # afetando calibração via Arrematado + prior de dias_giro. Resolvendo em runtime
+    # tira o bug latente.
+    if ano_referencia is None:
+        ano_referencia = datetime.now().year
     idade = max(ano_referencia - ano_veiculo, 0)
     if idade <= 3:
         return FaixaIdade.NOVO
@@ -162,7 +168,7 @@ def calibrar_dias_giro(
     session: Optional[Session],
     fallback: int,
     faixa_idade: Optional[FaixaIdade] = None,
-    ano_referencia: int = 2026,
+    ano_referencia: Optional[int] = None,
 ) -> int:
     """Devolve dias_giro calibrado pra (empresa, categoria[, faixa_idade]).
 
@@ -178,6 +184,9 @@ def calibrar_dias_giro(
     """
     if session is None:
         return fallback
+
+    if ano_referencia is None:
+        ano_referencia = datetime.now().year
 
     if faixa_idade is not None:
         por_faixa = _calibrar_nivel(empresa_id, categoria, session, faixa_idade, ano_referencia)

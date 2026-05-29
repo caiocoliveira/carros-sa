@@ -456,6 +456,44 @@ diverso), ou (b) ter uma camada de fallback explícita pronta. "Vendor X é o
 único que existe" é premissa não-validada — viola RC2 (fornecedor instável
 tratado como API estável).
 
+### RC11. Fetch que devolve placeholder vazio "válido" é o passo anterior do mesmo loop
+
+Sintoma irmão de RC10. Onde RC10 cobre "extrator competente diz: olhei e não
+achei nada útil", RC11 cobre "fetch nem entregou conteúdo pro extrator olhar".
+A camada de fetch retorna placeholder válido — string vazia, lista vazia,
+dict vazio — e a camada seguinte trata como "input legítimo sem sinal" em vez
+de "fetch falhou silenciosamente". Próxima rodada do cron faz exatamente a
+mesma chamada, recebe o mesmo placeholder, persiste o mesmo "nada".
+
+Caso de referência (2026-05-29, DD5):
+- **`coletar_detalhe` em `scraper_autoavaliar.py`** chamava
+  `page.evaluate("() => document.body.innerText")` uma única vez logo após
+  `goto + wait_for_timeout(1500)`. Em SPA pesada / redirect por sessão
+  expirada / Cloudflare challenge / throttle, esse evaluate pegava body
+  ANTES da renderização e devolvia `""`. `_laudo_existe_no_body("")` é False
+  → passadas 5-7 (Acessar pra kuruma) E passada 8 (LLM fallback DD4) NÃO
+  disparavam → lote ia pra `_laudo_sem_pdf` (confidence 0.55) → após 3
+  ciclos do retry diário, circuit-breaker (II) congelava → "⚠ LAUDO NÃO
+  CAPTURADO" perpétuo. 23 lotes do snapshot 2026-05-13 afetados — DD4
+  cobriu vendor fora do template, DD5 cobre o caso anterior (página nem
+  renderizou pra dar uma chance ao DD4).
+
+**Antídoto operacional:** distinguir "fetch respondeu OK + conteúdo plausível"
+de "fetch respondeu OK mas conteúdo claramente abaixo do mínimo esperado".
+Heurística simples (< 200 chars numa página de 20-50KB; lista vazia quando
+a fixture sempre teve N≥3 itens; dict sem nenhuma chave esperada) dispara
+retry no mesmo endpoint antes de qualquer camada seguinte consumir. Espelha
+o backoff que JÁ existe pra códigos de erro (15s/30s/60s em 429 do
+`baixar_pdf`) — só estende pro caso "200 OK com body vazio".
+
+**Antídoto estrutural:** todo fetch que pode receber resposta sintaticamente
+válida mas semanticamente vazia precisa de um gate de "sanidade mínima" antes
+de devolver pra próxima camada. "Confiar que respostas 200 OK são úteis" é
+premissa não-validada — falha em SPA, redirect transparente, anti-bot
+soft-block, edge cache stale. Combinado com RC10, fecha as duas pontas:
+RC11 garante que o extrator recebe input plausível; RC10 garante que o
+extrator não condena lote quando o input plausível ainda é insuficiente.
+
 ### RC7. Pressa em fechar o workstream
 
 ROADMAP trata `✅` como métrica de sucesso visível. Isso cria incentivo

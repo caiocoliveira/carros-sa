@@ -66,24 +66,35 @@ class FakePage:
     """Stub mínimo de Playwright Page que simula a sequência de extração.
 
     `eval_responses` é uma lista de funções que respondem ao próximo evaluate()
-    — uma função por chamada. Cada função recebe o JS string e retorna o que o
-    browser retornaria. Permite testar exatamente quantas passadas foram feitas.
+    de extração (passada NÃO-body_text) — uma função por chamada.
+
+    `reload_body_texts` é uma lista de body_texts a aplicar em cada `reload()`
+    chamado. Default vazio = `reload` é no-op pro body_text (mantém o atual).
+    Usado pra simular a retry de body_text curto no `coletar_detalhe`.
     """
 
     body_text: str
     eval_responses: List[Callable[[str], Any]]
+    reload_body_texts: List[str] = field(default_factory=list)
     gotos: List[str] = field(default_factory=list)
+    reloads: int = 0
     waits_ms: List[int] = field(default_factory=list)
     _eval_idx: int = 0
 
     async def goto(self, url: str, wait_until: Optional[str] = None, timeout: Optional[int] = None) -> None:
         self.gotos.append(url)
 
+    async def reload(self, wait_until: Optional[str] = None, timeout: Optional[int] = None) -> None:
+        if self.reloads < len(self.reload_body_texts):
+            self.body_text = self.reload_body_texts[self.reloads]
+        self.reloads += 1
+
     async def wait_for_timeout(self, ms: int) -> None:
         self.waits_ms.append(ms)
 
     async def evaluate(self, js: str) -> Any:
-        # 1ª chamada é sempre body.innerText
+        # Toda chamada de body.innerText devolve o body_text ATUAL (pode ter
+        # mudado via reload entre chamadas).
         if "document.body.innerText" in js:
             return self.body_text
         # demais: consome eval_responses em ordem
@@ -194,6 +205,67 @@ class TestColetarDetalhe:
         assert url is None
         # Só consumiu até a 5ª — passadas 6-7 (Acessar) NÃO rodaram.
         assert page._eval_idx == 5
+
+    async def test_body_text_vazio_dispara_reload_e_recupera(self):
+        """DD5: body_text inicialmente vazio (renderização atrasada / redirect)
+        dispara reload, segunda passagem traz conteúdo e fluxo segue normal.
+
+        Sem o retry, _laudo_existe_no_body retornaria False e passadas 5-8
+        (Acessar + LLM) NÃO disparariam — lote viraria "⚠ LAUDO NÃO CAPTURADO"
+        no próximo cron, e o ciclo se repete indefinidamente.
+        """
+        page = FakePage(
+            body_text="",  # 1ª evaluate: página vazia
+            reload_body_texts=[_BODY_TEMPLATE_LAUDO_APROVADO],
+            # após reload, body_text vira o template completo, e a 1ª passada
+            # de extração já acha a URL (caminho feliz pós-reload).
+            eval_responses=[lambda js: _URL_VALIDA],
+        )
+        body, url = await coletar_detalhe(page, "https://b2b.autoavaliar.com.br/x")
+        assert url == _URL_VALIDA
+        assert body == _BODY_TEMPLATE_LAUDO_APROVADO
+        assert page.reloads == 1, "deveria fazer 1 reload pra puxar body_text"
+
+    async def test_body_text_vazio_em_todas_tentativas_retorna_sem_url(self):
+        """Caso pessimista: 1ª passada + 2 reloads continuam com body_text vazio.
+
+        Página deve ter dado throttle / Cloudflare contínuo. Retorna ("", None)
+        sem queimar as passadas extras (não tem como `_laudo_existe_no_body`
+        passar; passadas 5-8 não disparam — comportamento correto).
+        """
+        page = FakePage(
+            body_text="",
+            reload_body_texts=["", ""],  # ambos reloads também vazios
+            eval_responses=[
+                lambda js: None,    # 1: extract → None
+                lambda js: False,   # 2: ABRIR_MODAL → False
+                lambda js: None,    # 3: extract → None
+                lambda js: False,   # 4: ABRIR_MODAL → False
+                lambda js: None,    # 5: extract → None
+            ],
+        )
+        body, url = await coletar_detalhe(page, "https://b2b.autoavaliar.com.br/x")
+        assert url is None
+        assert body == ""
+        assert page.reloads == 2, "esgotou os 2 retries antes de desistir"
+        # Passadas 5-8 (Acessar + LLM) NÃO devem rodar — _laudo_existe_no_body
+        # devolve False corretamente quando body_text segue vazio.
+        assert page._eval_idx <= 5
+
+    async def test_body_text_curto_mas_acima_do_minimo_nao_dispara_reload(self):
+        """Body_text >=200 chars (página real renderizou OK) NÃO dispara reload.
+
+        Garantia de que o gate `_MIN_BODY_TEXT_BYTES=200` só intervém em casos
+        anômalos — caminho normal (~20-50KB) passa direto.
+        """
+        body_minimo_aceitavel = "x" * 200 + _BODY_TEMPLATE_LAUDO_APROVADO
+        page = FakePage(
+            body_text=body_minimo_aceitavel,
+            eval_responses=[lambda js: _URL_VALIDA],
+        )
+        body, url = await coletar_detalhe(page, "https://b2b.autoavaliar.com.br/x")
+        assert url == _URL_VALIDA
+        assert page.reloads == 0, "body acima do mínimo não deveria reloadar"
 
     async def test_laudo_existe_mas_acessar_tambem_falha_retorna_none(self):
         """Caso pessimista: laudo existe no AA mas mesmo o trigger 'Acessar' falha.

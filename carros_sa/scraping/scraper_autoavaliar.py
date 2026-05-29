@@ -659,6 +659,26 @@ async def coletar_detalhe(page, url: str, llm_client=None) -> tuple[str, Optiona
 
     body_text: str = await page.evaluate("() => document.body.innerText")
 
+    # body_text curto/vazio = página não renderizou (SPA pendente, redirect
+    # por sessão expirada, Cloudflare challenge, throttle, iframe não-carregado).
+    # Sem retry, `_laudo_existe_no_body` devolve False, as passadas 5-8 (trigger
+    # "Acessar" + LLM fallback) NÃO disparam mesmo em lote com laudo, e o lote
+    # cai em `_laudo_sem_pdf` (confidence 0.55) — circuit-breaker (workstream II)
+    # depois congela → "⚠ LAUDO NÃO CAPTURADO" perpétuo. Padrão DD5 (follow-up
+    # de DD4) que afetava 23 lotes do snapshot 2026-05-13. Página real do AA
+    # tem 20-50KB; <200 chars é claramente vazio/erro. 2 retries com reload +
+    # wait crescente espelham o padrão de baixar_pdf (15s/30s/60s pra 429).
+    _MIN_BODY_TEXT_BYTES = 200
+    for tentativa, espera_ms in enumerate([3000, 6000]):
+        if len(body_text or "") >= _MIN_BODY_TEXT_BYTES:
+            break
+        try:
+            await page.reload(wait_until="networkidle", timeout=30000)
+            await page.wait_for_timeout(espera_ms)
+            body_text = await page.evaluate("() => document.body.innerText")
+        except Exception:
+            pass
+
     async def _extrair_valido() -> Optional[str]:
         u = await page.evaluate(_EXTRACT_PDF_URL_JS)
         return u if (u and is_laudo_pdf_url(u)) else None

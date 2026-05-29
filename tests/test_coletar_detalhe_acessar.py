@@ -252,6 +252,40 @@ class TestColetarDetalhe:
         # devolve False corretamente quando body_text segue vazio.
         assert page._eval_idx <= 5
 
+    async def test_reload_que_levanta_excecao_nao_quebra_fluxo(self):
+        """RC3 / DD5: se `page.reload()` levantar (rede caiu, networkidle timeout,
+        página fechou pelo throttle), o `except Exception` engole + loga, próxima
+        tentativa tem chance, e no fim retorna ('', None) graciosamente — não
+        propaga a exception nem corrompe state.
+
+        Sem este guard, qualquer refactor futuro que troque `except: log` por
+        `raise` quebraria silenciosamente o pipeline inteiro (cada lote individual
+        rola pra exception path do `_pipeline_lote` em `orquestrador.py:609`).
+        """
+        @dataclass
+        class FakePageReloadExplode(FakePage):
+            async def reload(self, wait_until: Optional[str] = None, timeout: Optional[int] = None) -> None:
+                self.reloads += 1
+                raise TimeoutError("networkidle timeout simulado")
+
+        page = FakePageReloadExplode(
+            body_text="",
+            eval_responses=[
+                lambda js: None,    # 1: extract → None
+                lambda js: False,   # 2: ABRIR_MODAL → False
+                lambda js: None,    # 3: extract → None
+                lambda js: False,   # 4: ABRIR_MODAL → False
+                lambda js: None,    # 5: extract → None
+            ],
+        )
+        body, url = await coletar_detalhe(page, "https://b2b.autoavaliar.com.br/x")
+        assert url is None
+        assert body == ""
+        # Tentou os 2 reloads (não desistiu na 1ª exception)
+        assert page.reloads == 2
+        # Passadas 5-8 NÃO devem rodar — body segue vazio, _laudo_existe_no_body False
+        assert page._eval_idx <= 5
+
     async def test_body_text_curto_mas_acima_do_minimo_nao_dispara_reload(self):
         """Body_text >=200 chars (página real renderizou OK) NÃO dispara reload.
 

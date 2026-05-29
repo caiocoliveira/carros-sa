@@ -672,12 +672,23 @@ async def coletar_detalhe(page, url: str, llm_client=None) -> tuple[str, Optiona
     for tentativa, espera_ms in enumerate([3000, 6000]):
         if len(body_text or "") >= _MIN_BODY_TEXT_BYTES:
             break
+        # Loga ANTES do retry pra (a) DD5-FU1 ter contagem visível no cron stderr
+        # e (b) detectar regressão silenciosa do AA — se virar caminho frequente
+        # (>30% dos lotes), operador vê no log e investiga antes de degradar UX.
+        _log.warning(
+            "DD5 body_text curto (%d chars) em %s — reload tentativa %d/2",
+            len(body_text or ""), url[:80], tentativa + 1,
+        )
         try:
             await page.reload(wait_until="networkidle", timeout=30000)
             await page.wait_for_timeout(espera_ms)
             body_text = await page.evaluate("() => document.body.innerText")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Reload com exception (rede caiu, networkidle timeout, página fechou)
+            # NÃO interrompe — próxima tentativa pode ter sorte, e no pior caso
+            # caímos no fluxo normal de "body vazio → _laudo_existe_no_body False".
+            # Mas logamos: sem isso, regressão silenciosa em fix-RC3 reaparece.
+            _log.warning("DD5 reload tentativa %d levantou: %s", tentativa + 1, exc)
 
     async def _extrair_valido() -> Optional[str]:
         u = await page.evaluate(_EXTRACT_PDF_URL_JS)

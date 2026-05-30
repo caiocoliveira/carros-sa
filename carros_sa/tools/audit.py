@@ -136,34 +136,13 @@ CHECKS: Dict[str, Validator] = {
     ),
     # FIPE pode ser '—' em registros pré-workstream K (campo nullable). Quando
     # presente, deve ser inteiro positivo — valor zero ou negativo indica falha
-    # de scraping/cache do client FIPE.
-    #
-    # Cross-field: `preco_giro_fipe` é `FIPE × f_km × 0.95` desde refactor
-    # FIPE-only de 2026-05-08. Pelo clamp do f_km ∈ [0.75, 1.15], o ratio
-    # máximo natural é 1.0925. Threshold _PRECO_GIRO_FIPE_RATIO_MAX = 1.10 só
-    # dispara se alguém reintroduzir mediana sem cap ou bypass do clamp —
-    # vira guard de regressão. Pré-refactor a fórmula era mediana × f_km com
-    # cap 1.20×FIPE, e este check existia pra detectar mediana inflada.
-    # Threshold ±25% é largo de propósito: f_km contribui no máximo ±15%,
-    # então gap >25% praticamente exige outra fonte de erro.
+    # de scraping/cache do client FIPE. O cross-field `preco_giro_fipe > FIPE × 1.13`
+    # vive em `_check_preco_giro_acima_fipe` (ALL_CHECKS) — sanidade da célula
+    # individual fica aqui, cross-field como função independente (P5d).
     "FIPE (R$)": lambda v, r: (
         "FIPE não-positivo — provável falha do client FIPE ou cache stale"
         if isinstance(v, (int, float)) and v <= 0
-        else (
-            # Sinaliza quando preco_giro_fipe (âncora de revenda usada no
-            # precificador) está acima do max natural FIPE × 1.13. Antes do
-            # refactor FIPE-only servia pra detectar mediana × f_km saturando;
-            # hoje só dispara se alguém reintroduzir mediana no precificador
-            # sem cap, ou aumentar `_FATOR_MAX` (em ajuste_km.py) acima de 1.19.
-            # Mantido como guard de regressão.
-            f"preco_giro_fipe R$ {r.get('preco_giro_fipe')} > FIPE × {_PRECO_GIRO_FIPE_RATIO_MAX:.2f} (FIPE={v}) — checar mediana e _FATOR_MAX em ajuste_km.py"
-            if (
-                isinstance(v, (int, float)) and v > 0
-                and r.get("preco_giro_fipe") is not None
-                and r["preco_giro_fipe"] > int(v * _PRECO_GIRO_FIPE_RATIO_MAX)
-            )
-            else None
-        )
+        else None
     ),
     # Mediana de mercado é coluna informativa (refactor FIPE-only de 2026-05-08).
     # Não entra no cálculo do Lance Máximo. Aceita "—" (registros antigos com
@@ -476,26 +455,31 @@ def _check_columns(row: Dict[str, Any]) -> List[CheckResult]:
 
 
 def _check_preco_giro_acima_fipe(row: Dict[str, Any]) -> List[CheckResult]:
-    """preco_giro > FIPE × `_PRECO_GIRO_FIPE_RATIO_MAX` (1.13) sinaliza regressão.
+    """preco_giro_fipe > FIPE × `_PRECO_GIRO_FIPE_RATIO_MAX` (1.13) sinaliza regressão.
 
-    Refactor FIPE-only de 2026-05-08: preco_giro = FIPE × f_km × 0.95, com
+    Refactor FIPE-only de 2026-05-08: preco_giro_fipe = FIPE × f_km × 0.95, com
     f_km ∈ [0.75, 1.15] → max natural = 1.0925×FIPE. Threshold em 1.13 deixa
     margem ergonômica de ~3.5pp. Em produção saudável este check NUNCA dispara.
     Mantido como guard de regressão: se aparecer, é porque alguém reintroduziu
     webmotors_mediana no cálculo OU bumpou `_FATOR_MAX` em ajuste_km.py além
     de 1.19. Antes do refactor, era detector de mediana inflada (similares
     poluídos do Auto Avaliar saturando 1.20×FIPE).
+
+    Checa `preco_giro_fipe` (campo persistido em AvaliacaoLote — referência
+    canônica do precificador FIPE-only). Em produção `preco_giro == preco_giro_fipe`,
+    mas a checagem usa o campo decomposto pra continuar valendo se um dia a
+    composição mudar (ex.: workstream G.3 reativando mediana ponderada).
     """
-    pg = row.get("preco_giro")
+    pg_fipe = row.get("preco_giro_fipe")
     fipe = row.get("fipe")
-    if pg and fipe and pg > fipe * _PRECO_GIRO_FIPE_RATIO_MAX:
-        ratio_pct = round((pg / fipe) * 100, 1)
-        threshold_pct = round(_PRECO_GIRO_FIPE_RATIO_MAX * 100, 1)
+    if pg_fipe and fipe and pg_fipe > fipe * _PRECO_GIRO_FIPE_RATIO_MAX:
+        ratio_pct = round((pg_fipe / fipe) * 100, 1)
         return [(
             "Preço-Giro vs FIPE",
-            f"preco_giro {ratio_pct}% da FIPE — f_km saturando ou mediana inflada "
-            f"(esperado <{threshold_pct}%)",
-            pg,
+            f"preco_giro_fipe R$ {pg_fipe} = {ratio_pct}% da FIPE (={fipe}) > FIPE × "
+            f"{_PRECO_GIRO_FIPE_RATIO_MAX:.2f} — f_km saturando ou mediana inflada "
+            "(checar mediana e _FATOR_MAX em ajuste_km.py)",
+            pg_fipe,
         )]
     return []
 
@@ -546,6 +530,11 @@ def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
     # NÃO CAPTURADO" e oculta Lance Máximo. Audit não deve sinalizar zona
     # apertada num lote cuja Lance Máximo o operador não vê (LESSONS.md/P5c).
     if not row.get("laudo_analisado"):
+        return []
+    # `preco_alvo <= 0` (capa do precificador quando custos+margem-alvo excedem
+    # preco_giro) é coberto por `_check_preco_alvo_zerado_em_viavel` com mensagem
+    # mais específica. Pular aqui evita ruído duplicado da mesma raiz.
+    if preco_alvo <= 0:
         return []
     if lance_atual > preco_alvo and lance_atual < preco_max:
         return [(
@@ -714,6 +703,40 @@ def _check_mediana_distante_fipe(row: Dict[str, Any]) -> List[CheckResult]:
     return []
 
 
+def _check_preco_alvo_zerado_em_viavel(row: Dict[str, Any]) -> List[CheckResult]:
+    """`preco_alvo == 0` num lote viável = margem-alvo da empresa é inalcançável.
+
+    Cenário patológico encontrado em simulação (2026-05-30): FIPE muito baixa
+    (Ka antigo, Mobi velho) onde reforma + frete + custo_op + margem-alvo já
+    excedem o preco_giro. O precificador capa `preco_alvo` em 0 (via `max(...,0)`),
+    mas o lote ainda exibe "✓ Viável" quando lance_atual < preco_max — o teto
+    absoluto só respeita a margem MÍNIMA (10% em UDI), não a margem-alvo.
+
+    Operacionalmente: comprar esse lote significa entrar com margem
+    estritamente mínima absoluta da empresa (sem espaço pra surpresa de
+    oficina). Qualquer custo não previsto na reforma quebra o ROI. Operador
+    desavisado vê "Viável + ROI positivo + lance baixo" e pode dar lance.
+
+    Dispara só pra lote viável + laudo analisado — paridade P5c (em inviáveis
+    e laudo NÃO CAPTURADO o display já oculta números). Não duplica com
+    `_check_zona_apertada` (que exige `lance > alvo > 0`); aqui alvo é
+    estritamente 0.
+    """
+    if not row.get("viavel") or not row.get("laudo_analisado"):
+        return []
+    preco_alvo = row.get("preco_alvo")
+    if preco_alvo is not None and preco_alvo <= 0:
+        return [(
+            "Lance Máximo (R$)",
+            f"preco_alvo zerado em lote 'Viável' — custos+margem-alvo excedem "
+            f"preco_giro (R$ {row.get('preco_giro')}); o lote só respeita "
+            f"margem mínima absoluta da empresa. FIPE muito baixa ou "
+            f"reforma/custos altos vs valor de revenda. Conferir antes do lance.",
+            row.get("preco_max"),
+        )]
+    return []
+
+
 def _check_margem_no_teto(row: Dict[str, Any]) -> List[CheckResult]:
     """Margem efetiva ≥ 49% sinaliza fatores risco × liquidez perto do teto.
 
@@ -740,6 +763,7 @@ ALL_CHECKS: List[CheckFn] = [
     _check_columns,
     _check_preco_giro_acima_fipe,
     _check_preco_alvo_gt_preco_max,
+    _check_preco_alvo_zerado_em_viavel,
     _check_zona_apertada,
     _check_lance_maximo_acima_fipe,
     _check_reforma_pesada,

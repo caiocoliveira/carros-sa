@@ -14,6 +14,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# uv lockfile — gerado on-demand pelo `uv pip install`. Não versionamos
+# porque o ambiente reproduzível é o pyproject.toml + `uv venv --python 3.12`
+# (ver CLAUDE.md/Setup); versionar uv.lock fixaria hashes do ambiente local
+# da sessão (potencialmente Python 3.11 vs 3.12), poluindo o repo.
+uv.lock
 
 # Dados locais (PoC)
 *.db

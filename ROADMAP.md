@@ -4,7 +4,26 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry** — 602/602 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado** — 608/608 testes passando
+
+### Revisão diária 2026-05-30 — preco_alvo zerado + duplicação CHECKS×ALL_CHECKS ✅
+- **Branch:** `claude/trusting-gates-QOinS` (PR #100)
+- **Motivação:** Pedido do operador "revise código, encontre bugs, atue autônomo". Simulação canônica de 14 cenários (gold + edge cases + patológicos) expôs:
+  1. **Cenário 13 (FIPE muito baixa, R$10k Ka 2010)**: precificador capava `preco_alvo` em 0 via `max(..., 0)` quando custos+margem-alvo > preco_giro. Mas `preco_max` continuava positivo (margem mínima absoluta de 10%). Display: "✓ Viável + ROI 17% + Lucro R$1.5k + lance R$1k" — mascarava que margem-alvo é inalcançável. Qualquer surpresa de oficina quebra o ROI.
+  2. **Duplicação `CHECKS["FIPE (R$)"]` × `_check_preco_giro_acima_fipe`**: mesmo problema (preco_giro_fipe > FIPE × 1.13) disparava 2× com labels diferentes. Operador via dois warnings da mesma raiz. Também P5d (if/else aninhado no validator misturando 2 condições).
+- **Solução cirúrgica:**
+  - `_check_preco_alvo_zerado_em_viavel` em ALL_CHECKS — mensagem específica "custos+margem-alvo excedem preco_giro".
+  - `_check_zona_apertada` defere quando `preco_alvo <= 0` (defere ao check mais específico).
+  - `CHECKS["FIPE (R$)"]` simplificado pra só sanidade individual (`FIPE > 0`). Cross-field consolidado em `_check_preco_giro_acima_fipe` (operando sobre `preco_giro_fipe`).
+- **Cobertura:** 3 testes guard em `TestAuditCrossCheck`: dispara em viável com preco_alvo=0, não dispara em caso normal, não dispara em inviável (paridade P5c).
+- **Impacto:** próximo cron audit vai sinalizar lotes com FIPE baixa onde margem-alvo é inalcançável — operador conferia antes do lance. Sem regressão em produção saudável (preco_alvo=0 é caso raro).
+- **Padrões registrados em CLAUDE.md:**
+  - Duplicação entre `CHECKS` (dict por coluna) e `ALL_CHECKS` (cross-field) gera ruído de 2× warning pra mesma raiz — preferir consolidar em ALL_CHECKS quando ≥2 condições semanticamente independentes coexistem na mesma coluna (P5d).
+  - Quando precificador **capa valor em 0** via `max(..., 0)` num campo que o display lê numericamente, perguntar "esse 0 silenciosamente vira display enganoso?". Se sim, adicionar audit check pra caso patológico.
+- **Follow-ups (não-bloqueantes, sugeridos pela revisão arquitetural do PR #100):**
+  - **DD7-FU1 — Métrica `pct_lotes_com_preco_alvo_zerado` no audit `--strict`:** se >5% dos viáveis caírem nesse caso, é sinal de mismatch entre `margem.base` da empresa e mix real de FIPE (operador deveria recalibrar margem-alvo).
+  - **DD7-FU2 — Sufixo visual `⚠ margem-alvo inalcançável` em `_sufixo_warning_operacional`:** análogo a `⚠ ESTRUTURAL`/`⚠ motor`. Hoje o aviso só vive no audit log; operador focado em ROI raramente roda audit antes do lance. Padrão simétrico ao registrado em sheets.py:837.
+  - **DD7-FU3 — Catalogar `max(..., 0)` no precificador:** hoje só `preco_alvo` e `preco_max`. Se workstream G.3 reintroduzir um terceiro (ex.: `preco_giro_aa` ponderado), aplicar check análogo. Grep proativo já registrado em CLAUDE.md.
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual + LLM textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML, **coleta noturna Webmotors live (workstream G — 2026-05-12) com cache 24h, retry/Cloudflare-detect e display honesto ("—" quando sem amostra real)**.
 

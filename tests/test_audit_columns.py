@@ -365,6 +365,59 @@ class TestAuditCrossCheck:
             f"Esperava aviso de zona apertada em {violacoes}"
         )
 
+    def test_preco_alvo_zerado_em_viavel_sinalizado(self):
+        """preco_alvo=0 num lote viável = margem-alvo da empresa inalcançável.
+
+        Cenário patológico: FIPE baixa onde reforma+frete+custo_op+margem-alvo
+        excedem o preco_giro. Precificador capa preco_alvo em 0 mas o teto
+        (preco_max) ainda permite lance pela margem MÍNIMA. Display mostra
+        "✓ Viável + ROI positivo + lance baixo" — operador desavisado pode
+        dar lance sem perceber que entra estritamente no piso da margem.
+        Detectado por audit pra sinalizar lote economicamente patológico.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=1_000))
+            # preco_alvo zerado + preco_max positivo (margem mínima só)
+            av = _avaliacao("L001", preco_max=1_500)
+            av.preco_alvo = 0
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert any("preco_alvo zerado" in v for v in violacoes), (
+            f"Esperava aviso preco_alvo zerado em {violacoes}"
+        )
+
+    def test_preco_alvo_positivo_nao_dispara_zerado(self):
+        """preco_alvo > 0 num lote viável é o caso normal — não sinaliza."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=20_000))
+            session.add(_avaliacao("L001", preco_max=30_000))
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("preco_alvo zerado" in v for v in violacoes), (
+            f"Não esperava preco_alvo zerado em caso normal: {violacoes}"
+        )
+
+    def test_preco_alvo_zerado_em_inviavel_nao_sinaliza(self):
+        """Lote inviável (lance > preco_max) NÃO dispara — display já oculta
+        números, paridade P5c."""
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("L001", lance_atual=10_000))  # > preco_max=1500
+            av = _avaliacao("L001", preco_max=1_500)
+            av.preco_alvo = 0
+            session.add(av)
+            session.add(_laudo("L001"))
+            session.commit()
+        violacoes = audit(engine)
+        assert not any("preco_alvo zerado" in v for v in violacoes), (
+            f"Não esperava preco_alvo zerado em lote inviável (display oculta): {violacoes}"
+        )
+
     def test_lance_abaixo_do_alvo_nao_dispara_zona_apertada(self):
         engine = _engine_mem()
         with Session(engine) as session:

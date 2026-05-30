@@ -20,6 +20,10 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 - **Padrões registrados em CLAUDE.md:**
   - Duplicação entre `CHECKS` (dict por coluna) e `ALL_CHECKS` (cross-field) gera ruído de 2× warning pra mesma raiz — preferir consolidar em ALL_CHECKS quando ≥2 condições semanticamente independentes coexistem na mesma coluna (P5d).
   - Quando precificador **capa valor em 0** via `max(..., 0)` num campo que o display lê numericamente, perguntar "esse 0 silenciosamente vira display enganoso?". Se sim, adicionar audit check pra caso patológico.
+- **Follow-ups (não-bloqueantes, sugeridos pela revisão arquitetural do PR #100):**
+  - **DD7-FU1 — Métrica `pct_lotes_com_preco_alvo_zerado` no audit `--strict`:** se >5% dos viáveis caírem nesse caso, é sinal de mismatch entre `margem.base` da empresa e mix real de FIPE (operador deveria recalibrar margem-alvo).
+  - **DD7-FU2 — Sufixo visual `⚠ margem-alvo inalcançável` em `_sufixo_warning_operacional`:** análogo a `⚠ ESTRUTURAL`/`⚠ motor`. Hoje o aviso só vive no audit log; operador focado em ROI raramente roda audit antes do lance. Padrão simétrico ao registrado em sheets.py:837.
+  - **DD7-FU3 — Catalogar `max(..., 0)` no precificador:** hoje só `preco_alvo` e `preco_max`. Se workstream G.3 reintroduzir um terceiro (ex.: `preco_giro_aa` ponderado), aplicar check análogo. Grep proativo já registrado em CLAUDE.md.
 
 Cobertura atual: scraper Auto Avaliar (listagem + detalhe + laudo PDF), extrator de laudo (vision + textual + LLM textual), precificador FIPE-only com `f_km`, EstimadorReforma LLM, calibração econômica (Polo Track 2024 real + 32 históricos Reinaldo), exportador Google Sheets com 18 colunas + glossário, audit estrito como gate diário (paridade total com display), multi-tenancy por YAML, **coleta noturna Webmotors live (workstream G — 2026-05-12) com cache 24h, retry/Cloudflare-detect e display honesto ("—" quando sem amostra real)**.
 

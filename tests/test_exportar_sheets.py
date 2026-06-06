@@ -720,15 +720,23 @@ class TestSheetsExporterQuery:
         assert "motor" in situacao
 
     def test_situacao_warning_nao_dispara_em_inviavel(self):
-        """Lote inviável (✗ Caro demais) NÃO ganha sufixo ⚠ ESTRUTURAL/motor
-        — display já oculta Lucro/ROI e operador não vai dar lance, não há
-        risco de surpresa. Mantém a Situação curta. Paridade com `_check_*_em_viavel`
-        no audit (que também só disparam em viáveis).
+        """Lote inviável (✗ Caro demais) NÃO ganha NENHUM sufixo da família
+        operacional — display já oculta Lucro/ROI e operador não vai dar lance,
+        não há risco de surpresa. Paridade com `_check_*_em_viavel` no audit
+        (que também só disparam em viáveis). Cobre os 4 sufixos: ESTRUTURAL,
+        motor, reforma pesada, margem-alvo inalcançável — qualquer um vazando
+        em inviável seria regressão da paridade P5c.
         """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("LI1", lance_atual=40000))
-            session.add(_avaliacao("LI1", preco_max=30000))  # inviável
+            # inviável (lance 40k > max 30k) + ESTRUTURAL + motor + reforma 40%
+            # + preco_alvo=0 — todos os 4 gatilhos da família ativos, NENHUM deve
+            # vazar.
+            av = _avaliacao("LI1", preco_giro=20000, preco_max=30000)
+            av.reforma_estimada = 8000  # 40% — gatilho reforma pesada
+            av.preco_alvo = 0            # gatilho margem-alvo inalcançável
+            session.add(av)
             laudo = _laudo("LI1")
             laudo.severidade_geral = "estrutural"
             laudo.motor_ok = False
@@ -751,16 +759,23 @@ class TestSheetsExporterQuery:
         assert "Caro demais" in situacao
         assert "ESTRUTURAL" not in situacao
         assert "motor" not in situacao
+        assert "reforma pesada" not in situacao
+        assert "margem-alvo" not in situacao
 
     def test_situacao_warning_nao_dispara_em_laudo_nao_analisado(self):
         """Laudo NÃO CAPTURADO (confidence<0.6) já oculta tudo no display —
-        Situação fica '⚠ LAUDO NÃO CAPTURADO: ...', sem sufixo ESTRUTURAL
-        (paridade P5e — display oculta números, audit espelha).
+        Situação fica '⚠ LAUDO NÃO CAPTURADO: ...', sem NENHUM sufixo
+        operacional (paridade P5e — display oculta números, audit espelha).
+        Cobre os 4 sufixos: ESTRUTURAL, motor, reforma pesada, margem-alvo
+        inalcançável — todos devem ficar suprimidos junto com os números.
         """
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("LN1", lance_atual=8000))
-            session.add(_avaliacao("LN1", preco_max=15000))
+            av = _avaliacao("LN1", preco_giro=20000, preco_max=15000)
+            av.reforma_estimada = 8000  # 40% — gatilho reforma pesada
+            av.preco_alvo = 0            # gatilho margem-alvo inalcançável
+            session.add(av)
             laudo = _laudo("LN1")
             laudo.severidade_geral = "estrutural"
             laudo.motor_ok = False
@@ -784,6 +799,151 @@ class TestSheetsExporterQuery:
         assert "LAUDO NÃO CAPTURADO" in situacao
         assert "ESTRUTURAL" not in situacao
         assert "motor" not in situacao
+        assert "reforma pesada" not in situacao
+        assert "margem-alvo" not in situacao
+
+    def test_situacao_reforma_pesada_em_viavel_marca_warning(self):
+        """Lote viável + laudo analisado + reforma > 30% do preco_giro: Situação
+        ganha sufixo ' ⚠ reforma pesada'. Paridade com `_check_reforma_pesada`
+        (audit.py) — mesma constante de 30%. Operador focado em ROI alto deve
+        ver o aviso antes do lance: capital de reforma alto vs revenda + risco
+        de surpresa na oficina podem tornar o investimento inviável post-hoc.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LR1", lance_atual=5000))
+            # reforma 8k de giro 20k = 40% (acima do threshold 30%)
+            av = _avaliacao("LR1", preco_giro=20000, preco_max=12000)
+            av.reforma_estimada = 8000
+            session.add(av)
+            session.add(_laudo("LR1"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "reforma pesada" in situacao
+
+    def test_situacao_reforma_no_threshold_30pct_nao_marca(self):
+        """Reforma exatamente em 30% do preco_giro NÃO dispara — threshold é
+        estritamente '>30%' (mesmo que `_check_reforma_pesada` no audit). Guard
+        contra regressão de fronteira: se mudarem o threshold no audit sem
+        replicar aqui, o teste alerta.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LR2", lance_atual=5000))
+            av = _avaliacao("LR2", preco_giro=20000, preco_max=12000)
+            av.reforma_estimada = 6000  # exatamente 30%
+            session.add(av)
+            session.add(_laudo("LR2"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "reforma pesada" not in situacao
+
+    def test_situacao_margem_alvo_inalcancavel_em_viavel_marca_warning(self):
+        """Lote viável + laudo analisado + preco_alvo<=0 (margem-alvo
+        inalcançável): Situação ganha sufixo ' ⚠ margem-alvo inalcançável'.
+        Paridade com `_check_preco_alvo_zerado_em_viavel` no audit.
+
+        Cenário: FIPE muito baixa (Ka antigo, Mobi velho) onde reforma + frete
+        + custo_op + margem-alvo já excedem preco_giro. O precificador capa
+        preco_alvo em 0 mas preco_max continua positivo (margem MÍNIMA
+        absoluta da empresa, ex.: 10%). Operador desavisado vê 'Viável +
+        ROI positivo + lance baixo' e pode dar lance — qualquer surpresa
+        de oficina quebra o ROI.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LM2", lance_atual=500))
+            av = _avaliacao("LM2", preco_giro=8000, preco_max=1500)
+            av.preco_alvo = 0
+            session.add(av)
+            session.add(_laudo("LM2"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "margem-alvo inalcançável" in situacao
+
+    def test_situacao_combina_multiplos_warnings(self):
+        """Os 4 sufixos da família coexistindo viram
+        ' ⚠ ESTRUTURAL + motor + reforma pesada + margem-alvo inalcançável'.
+        Cobre o pior caso operacional onde TODOS os sintomas convivem na
+        mesma linha (P5d — antes if/elif aninhado escondia red flags).
+
+        Ordering do join " + " é parte do contrato visual: glossário documenta
+        exatamente "ESTRUTURAL + motor + reforma pesada + margem-alvo
+        inalcançável" nessa ordem. Sufixos checados via `in` (não assert exato)
+        porque a sequência depende da implementação de `_sufixo_warning_operacional`.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LX1", lance_atual=5000))
+            av = _avaliacao("LX1", preco_giro=20000, preco_max=12000)
+            av.reforma_estimada = 8000  # 40% — reforma pesada
+            av.preco_alvo = 0            # margem-alvo inalcançável
+            session.add(av)
+            laudo = _laudo("LX1")
+            laudo.severidade_geral = "estrutural"
+            laudo.motor_ok = False
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "ESTRUTURAL" in situacao
+        assert "motor" in situacao
+        assert "reforma pesada" in situacao
+        assert "margem-alvo" in situacao
 
     def test_exportar_inviavel_oculta_lucro_e_roi(self):
         """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro nem

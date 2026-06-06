@@ -242,20 +242,36 @@ def _laudo_motivo_legivel(motivo: Optional[str]) -> str:
     return " + ".join(legiveis) if legiveis else motivo
 
 
-def _sufixo_warning_operacional(row: dict) -> str:
-    """Sufixo ' ⚠ ESTRUTURAL / motor' quando lote viável com laudo analisado tem
-    severidade ESTRUTURAL ou motor com problema.
+# Threshold pra `⚠ reforma pesada` — espelha `_check_reforma_pesada` em audit.py
+# (mesma fórmula, mesma constante). Quando audit muda o threshold, atualizar aqui
+# também — paridade explícita display↔audit (P5c).
+_REFORMA_PESADA_PCT_GIRO = 0.30
 
-    Cross-checks `_check_severidade_estrutural_em_viavel` e
-    `_check_motor_problema_em_viavel` em audit.py já flagam, mas operador focado
-    em ROI alto raramente roda audit antes de cada lance — antecipa o aviso
-    visualmente na própria coluna "Situação". Não suprime números (laudo é
-    confiável, decisão é dele), só sinaliza.
+
+def _sufixo_warning_operacional(row: dict) -> str:
+    """Sufixo ' ⚠ <warnings>' antecipando cross-checks operacionais do audit
+    em lotes viáveis com laudo analisado.
+
+    Warnings cobertos (espelham checks em audit.py — paridade explícita P5c):
+      - 'ESTRUTURAL': severidade=ESTRUTURAL → `_check_severidade_estrutural_em_viavel`
+      - 'motor': motor_ok=False → `_check_motor_problema_em_viavel`
+      - 'reforma pesada': reforma > 30% preco_giro → `_check_reforma_pesada`
+      - 'margem-alvo inalcançável': preco_alvo<=0 → `_check_preco_alvo_zerado_em_viavel`
+
+    Audit já flaga, mas operador focado em ROI alto raramente roda audit antes
+    de cada lance — antecipa visualmente na coluna "Situação". Não suprime
+    números (laudo é confiável, decisão é dele), só sinaliza.
 
     Não dispara em:
       - lote inviável (display já mostra "✗ Caro demais")
       - laudo NÃO CAPTURADO (display já mostra "⚠ LAUDO NÃO CAPTURADO"
         e oculta números — paridade P5e)
+
+    Padrão genérico: cada cross-check em audit que pinta lote viável como
+    "passou pelo precificador mas operador deveria conferir" precisa de
+    propagação visual aqui — caso contrário aviso só existe em log do cron
+    e operador não vê na hora do lance. Quando audit ganhar check novo nessa
+    família, refletir aqui também (testes guard em test_exportar_sheets.py).
     """
     if not row.get("viavel") or not row.get("laudo_analisado"):
         return ""
@@ -265,6 +281,20 @@ def _sufixo_warning_operacional(row: dict) -> str:
         warnings.append("ESTRUTURAL")
     if row.get("motor_ok_bool") is False:
         warnings.append("motor")
+    # Reforma pesada (>30% preco_giro) — mesmo threshold do audit. Capital
+    # empatado em reforma é alto vs revenda; surpresa na oficina pode tornar
+    # o investimento inviável post-hoc. Operador deve abrir o laudo.
+    reforma = row.get("reforma_estimada") or 0
+    preco_giro = row.get("preco_giro") or 0
+    if reforma > 0 and preco_giro > 0 and (reforma / preco_giro) > _REFORMA_PESADA_PCT_GIRO:
+        warnings.append("reforma pesada")
+    # Margem-alvo inalcançável (`preco_alvo <= 0`): custos+margem-alvo excedem
+    # preco_giro; lote só respeita margem MÍNIMA absoluta da empresa. Qualquer
+    # surpresa de oficina quebra o ROI. Cenário típico: FIPE muito baixa
+    # (Ka antigo, Mobi velho) OU reforma/custos altos vs valor de revenda.
+    preco_alvo = row.get("preco_alvo")
+    if preco_alvo is not None and preco_alvo <= 0:
+        warnings.append("margem-alvo inalcançável")
     return f" ⚠ {' + '.join(warnings)}" if warnings else ""
 
 
@@ -483,6 +513,12 @@ class SheetsExporter:
                 "webmotors_n_anuncios": av.webmotors_n_anuncios,
                 "roi_alvo": round(roi_alvo, 1),
                 "lucro": lucro,
+                # preco_giro + preco_alvo consumidos por `_sufixo_warning_operacional`
+                # pra antecipar `⚠ reforma pesada` (espelha `_check_reforma_pesada`
+                # do audit, threshold 30% preco_giro) e `⚠ margem-alvo inalcançável`
+                # (espelha `_check_preco_alvo_zerado_em_viavel`, preco_alvo=0).
+                "preco_giro": av.preco_giro,
+                "preco_alvo": av.preco_alvo,
                 "reforma_estimada": av.reforma_estimada,
                 "reforma_racional": av.reforma_racional,
                 "url": lote.url,
@@ -833,8 +869,8 @@ class SheetsExporter:
             [
                 "Situação",
                 "Derivado",
-                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export. Sufixo ' ⚠ ESTRUTURAL' aparece em lotes viáveis com severidade=ESTRUTURAL no laudo (coluna B/C, longarina, monobloco reparados — operador real costuma descartar categoricamente). Sufixo ' ⚠ motor' em viáveis com motor_ok=False (motor não-original ou com problema — custo de retífica subestimável; revenda mais difícil mesmo após reparo). Combinam: ' ⚠ ESTRUTURAL + motor'.",
-                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro e ROI ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito. Sufixos ⚠ ESTRUTURAL / ⚠ motor antecipam visualmente os cross-checks operacionais do audit (`_check_severidade_estrutural_em_viavel`, `_check_motor_problema_em_viavel`) — operador focado em ROI raramente roda audit antes de cada lance, e esses lotes podem 'passar' pelo precificador via fator_risco saturado em laudos com lance baixo.",
+                "✓ Viável se Lance Máximo > Lance Atual, senão ✗ Caro demais. ⚠ LAUDO NÃO CAPTURADO: <motivo> quando o laudo está incompleto. Motivos vêm do auditor (`verificar_laudo_completo`): 'PDF ausente' (scraper não baixou), 'extração fraca' (PDF baixado mas vision/textual não consolidaram avarias — confidence<0.6), 'URL inválida' (raw_json tem URL que não passa em is_laudo_pdf_url), ou combinação ('PDF ausente + URL inválida'). Quando o laudo FOI extraído (numéricos válidos) mas algum sinal lateral falhou (PDF sumiu OU URL stale), o sufixo aparece em ambos os ramos: '✓ Viável (laudo: <motivo>)' E '✗ Caro demais (laudo: <motivo>)' — simetria pra que filtros por '✗' também enxerguem o estado parcial. Lotes encerrados são filtrados antes do export. Sufixos operacionais em lotes viáveis (combinam com ' + '): ' ⚠ ESTRUTURAL' em severidade=ESTRUTURAL (coluna B/C, longarina, monobloco reparados — operador real costuma descartar categoricamente); ' ⚠ motor' em motor_ok=False (motor não-original ou com problema — custo de retífica subestimável; revenda mais difícil mesmo após reparo); ' ⚠ reforma pesada' quando reforma > 30% do preco_giro (capital empatado alto vs revenda, risco de surpresa de oficina); ' ⚠ margem-alvo inalcançável' quando preco_alvo<=0 (custos+margem-alvo excedem preco_giro, lote só respeita margem MÍNIMA absoluta da empresa — qualquer surpresa quebra ROI).",
+                "Resumo de uma célula do que o operador pode/deve fazer + razão exata quando algo está incompleto. Substitui o antigo '⚠ LAUDO NÃO CAPTURADO' genérico que obrigava o operador a abrir log do cron. Em '⚠ LAUDO NÃO CAPTURADO' os números (Lance Máximo, Lucro, ROI, Reforma) ficam '—' até o retry rodar. Em '✗ Caro demais' Lucro e ROI ficam '—'; Lance Máximo, FIPE e Reforma continuam visíveis. O cron diário (triagem→limpar_decoys→retry→audit --strict) tenta fechar todos os 3 sinais antes do próximo export; o que sobrar aparece aqui com motivo explícito. Sufixos ⚠ ESTRUTURAL / ⚠ motor / ⚠ reforma pesada / ⚠ margem-alvo inalcançável antecipam visualmente cross-checks operacionais do audit (`_check_severidade_estrutural_em_viavel`, `_check_motor_problema_em_viavel`, `_check_reforma_pesada`, `_check_preco_alvo_zerado_em_viavel`) — operador focado em ROI raramente roda audit antes de cada lance, e esses lotes podem 'passar' pelo precificador via fator_risco saturado em laudos com lance baixo ou via FIPE muito baixa onde margem-alvo é matematicamente inalcançável.",
             ],
             [
                 "Marca",

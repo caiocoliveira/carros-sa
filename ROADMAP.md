@@ -4,7 +4,32 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado** — 608/608 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display** — 612/612 testes passando
+
+### Revisão diária 2026-06-06 — sufixos operacionais completos no display (DD7-FU2) ✅
+- **Branch:** `claude/trusting-gates-wpiJN`
+- **Motivação:** Pedido do operador "revise código, encontre bugs, atue autônomo + analisa relação entre colunas (faz sentido Lance Máximo > FIPE? preco_giro_fipe muito diferente da FIPE?)". Simulação canônica de **15 cenários** (gold Polo Track + f_km no teto/piso + ESTRUTURAL conf alta + mediana inflada n>=5 + zona apertada + inviável + dias_giro otimista + km=None + motor problema + reforma pesada + transferência interestadual + FIPE muito baixa + laudo conf baixa + boundary lance==max).
+- **Análise por linha (resposta direta às perguntas do operador):**
+  - **`Lance Máximo > FIPE`?** NÃO em produção saudável. Por construção FIPE-only desde 2026-05-08: `preco_max ≤ preco_giro × (1 − margem_min)` = `FIPE × 1.0925 × 0.90 ≈ 0.98×FIPE`. Audit threshold 1.05×FIPE mantido como guard de regressão. **Validado em 15 cenários — max observado: 92% FIPE (Cenário 2, Corolla km ultra-baixa).**
+  - **`preco_giro_fipe > FIPE`?** SIM até ~9% (`FIPE × 1.15 × 0.95 = FIPE × 1.0925`) quando `f_km > 1` (lote com km baixa vs mercado). É econômico: carro mais bem cuidado vale mais que mediana. Cenário 2 e 8: `preco_giro_fipe = 109.2% FIPE`. **Não é bug — design FIPE-only embute essa premissa.**
+  - **Coerência por linha:** todos os 15 cenários passam `capital_efetivo × ROI ≈ Lucro` (mental math do operador). `score_efetivo` cai em zona apertada (Cenário 6: intrinsic 54%/efetivo 29%) e em inviáveis vira negativo (Cenário 3, 7) — display suprime corretamente.
+  - **Cross-checks operacionais:** identificado gap entre audit (flag em log) e display (sufixos só ESTRUTURAL/motor). Operador focado em ROI alto raramente roda audit antes do lance → DD7-FU2 do ROADMAP (2026-05-30) virou prioridade.
+- **Solução cirúrgica (DD7-FU2 entregue + bônus):**
+  - `_sufixo_warning_operacional` em sheets.py estendido com 2 warnings novos:
+    - `⚠ reforma pesada` quando `reforma_estimada / preco_giro > 30%` (espelha `_check_reforma_pesada` em audit.py com constante explícita `_REFORMA_PESADA_PCT_GIRO=0.30` — paridade declarada).
+    - `⚠ margem-alvo inalcançável` quando `preco_alvo <= 0` (espelha `_check_preco_alvo_zerado_em_viavel` em audit.py).
+  - `_query` de sheets.py adiciona `preco_giro` e `preco_alvo` ao row dict (consumidos pelo sufixo).
+  - Glossário "Situação" atualizado documentando os 4 sufixos da família (ESTRUTURAL, motor, reforma pesada, margem-alvo inalcançável) e que combinam com " + ".
+- **Cobertura:** 4 testes novos em `TestSheetsExporterSufixoWarning`: `test_situacao_reforma_pesada_em_viavel_marca_warning` (40% gira), `test_situacao_reforma_no_threshold_30pct_nao_marca` (boundary estrito), `test_situacao_margem_alvo_inalcancavel_em_viavel_marca_warning` (preco_alvo=0), `test_situacao_combina_multiplos_warnings` (ESTRUTURAL + motor + reforma pesada juntos). **612/612 verde** (608 baseline + 4 novos).
+- **Impacto:** próxima exportação Google Sheets mostra "✓ Viável ⚠ reforma pesada" e "✓ Viável ⚠ margem-alvo inalcançável" pra lotes que antes só apareciam alertados em log do cron. Operador focado em ROI alto vê o aviso direto na coluna Situação, decide se compra ciente do risco. Sem regressão em produção saudável (lotes calibrados não disparam nenhum sufixo).
+- **Padrões registrados em CLAUDE.md:**
+  - Cross-checks operacionais em `audit.py::ALL_CHECKS` formam uma família — toda vez que ALL_CHECKS ganha membro novo dessa família, `_sufixo_warning_operacional` PRECISA ganhar warning correspondente (LESSONS.md/P5h).
+  - Threshold de display que espelha threshold de audit = constante explícita comentada em AMBOS os arquivos com referência cruzada, NÃO copiar o número (paridade P5b).
+  - Simular cenário onde campo é "quase-zero" (não exatamente 0) expõe gap entre check ESTRITO no audit e display ENGANOSO — Cenário 11 (preco_alvo=144 = 0.7% giro) escapava do `_check_preco_alvo_zerado_em_viavel` mas era coberto indiretamente por `⚠ reforma pesada` neste cenário. Registrar pendência para revisão futura.
+- **Follow-ups (não-bloqueantes, identificados na simulação mas fora de escopo):**
+  - **DD8-FU1 — Extrair `_REFORMA_PESADA_PCT_GIRO` como constante explícita em audit.py:** hoje a constante 0.30 está embutida no corpo de `_check_reforma_pesada` como literal. Espelha em sheets.py com constante nomeada. Pra fechar a paridade explícita (teste guard `assert audit._REFORMA_PESADA_PCT_GIRO == sheets._REFORMA_PESADA_PCT_GIRO`), audit precisa extrair também. Trivial mas cirurgicamente fora de escopo desta sessão.
+  - **DD8-FU2 — `_check_preco_alvo_quase_zero` para preco_alvo<2% preco_giro:** Cenário 11 da simulação (Ka 2017, reforma 35% giro, severidade GRAVE) tinha preco_alvo=144 num giro de 21.470. Threshold estrito `<= 0` deixa escapar. Hoje cobre por `⚠ reforma pesada`, mas se reforma fosse pequena e preco_alvo virasse quase-zero por custo_op altíssimo, nenhum check capturaria. Aguardar caso real antes de implementar.
+  - **DD7-FU1 — Métrica `pct_lotes_com_preco_alvo_zerado` no audit `--strict`:** continua válido. Não implementado nesta sessão (escopo). Se >5% dos viáveis caírem nesse caso, sinal de mismatch entre `margem.base` e mix real de FIPE.
 
 ### Revisão diária 2026-05-30 — preco_alvo zerado + duplicação CHECKS×ALL_CHECKS ✅
 - **Branch:** `claude/trusting-gates-QOinS` (PR #100)

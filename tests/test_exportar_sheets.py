@@ -785,6 +785,142 @@ class TestSheetsExporterQuery:
         assert "ESTRUTURAL" not in situacao
         assert "motor" not in situacao
 
+    def test_situacao_reforma_pesada_em_viavel_marca_warning(self):
+        """Lote viável + laudo analisado + reforma > 30% do preco_giro: Situação
+        ganha sufixo ' ⚠ reforma pesada'. Paridade com `_check_reforma_pesada`
+        (audit.py) — mesma constante de 30%. Operador focado em ROI alto deve
+        ver o aviso antes do lance: capital de reforma alto vs revenda + risco
+        de surpresa na oficina podem tornar o investimento inviável post-hoc.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LR1", lance_atual=5000))
+            # reforma 8k de giro 20k = 40% (acima do threshold 30%)
+            av = _avaliacao("LR1", preco_giro=20000, preco_max=12000)
+            av.reforma_estimada = 8000
+            session.add(av)
+            session.add(_laudo("LR1"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "reforma pesada" in situacao
+
+    def test_situacao_reforma_no_threshold_30pct_nao_marca(self):
+        """Reforma exatamente em 30% do preco_giro NÃO dispara — threshold é
+        estritamente '>30%' (mesmo que `_check_reforma_pesada` no audit). Guard
+        contra regressão de fronteira: se mudarem o threshold no audit sem
+        replicar aqui, o teste alerta.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LR2", lance_atual=5000))
+            av = _avaliacao("LR2", preco_giro=20000, preco_max=12000)
+            av.reforma_estimada = 6000  # exatamente 30%
+            session.add(av)
+            session.add(_laudo("LR2"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "reforma pesada" not in situacao
+
+    def test_situacao_margem_alvo_inalcancavel_em_viavel_marca_warning(self):
+        """Lote viável + laudo analisado + preco_alvo<=0 (margem-alvo
+        inalcançável): Situação ganha sufixo ' ⚠ margem-alvo inalcançável'.
+        Paridade com `_check_preco_alvo_zerado_em_viavel` no audit.
+
+        Cenário: FIPE muito baixa (Ka antigo, Mobi velho) onde reforma + frete
+        + custo_op + margem-alvo já excedem preco_giro. O precificador capa
+        preco_alvo em 0 mas preco_max continua positivo (margem MÍNIMA
+        absoluta da empresa, ex.: 10%). Operador desavisado vê 'Viável +
+        ROI positivo + lance baixo' e pode dar lance — qualquer surpresa
+        de oficina quebra o ROI.
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LM2", lance_atual=500))
+            av = _avaliacao("LM2", preco_giro=8000, preco_max=1500)
+            av.preco_alvo = 0
+            session.add(av)
+            session.add(_laudo("LM2"))
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "Viável" in situacao
+        assert "margem-alvo inalcançável" in situacao
+
+    def test_situacao_combina_multiplos_warnings(self):
+        """ESTRUTURAL + motor + reforma pesada juntos viram
+        ' ⚠ ESTRUTURAL + motor + reforma pesada'. Cobre o caso patológico
+        onde múltiplos sintomas coexistem na mesma linha (P5d — antes
+        if/elif aninhado escondia red flags).
+        """
+        engine = _engine_mem()
+        with Session(engine) as session:
+            session.add(_lote("LX1", lance_atual=5000))
+            av = _avaliacao("LX1", preco_giro=20000, preco_max=12000)
+            av.reforma_estimada = 8000  # 40% — reforma pesada
+            session.add(av)
+            laudo = _laudo("LX1")
+            laudo.severidade_geral = "estrutural"
+            laudo.motor_ok = False
+            session.add(laudo)
+            session.commit()
+
+        mock_ws = MagicMock()
+        mock_sh = MagicMock()
+        mock_sh.worksheet.return_value = mock_ws
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_sh
+
+        with patch("gspread.service_account", return_value=mock_gc):
+            exporter = _exporter()
+            with Session(engine) as session:
+                exporter.exportar("uberlandia_mg", session)
+
+        rows = mock_ws.update.call_args_list[0][0][0]
+        situacao = rows[2][HEADER.index("Situação")]
+        assert "ESTRUTURAL" in situacao
+        assert "motor" in situacao
+        assert "reforma pesada" in situacao
+
     def test_exportar_inviavel_oculta_lucro_e_roi(self):
         """Lote '✗ Caro demais' (lance > preco_max) NÃO deve mostrar Lucro nem
         ROI alvo — esses números pressupõem comprar pelo preço-alvo (que é menor

@@ -494,6 +494,38 @@ soft-block, edge cache stale. Combinado com RC10, fecha as duas pontas:
 RC11 garante que o extrator recebe input plausível; RC10 garante que o
 extrator não condena lote quando o input plausível ainda é insuficiente.
 
+### RC12. Garantia de fronteira feita 1× no início NÃO se sustenta em runs longos
+
+Sintoma: um setup feito antes do loop principal (login, cookies, rate-limit
+warm-up, idempotência key) silencia falhas iniciais, mas o estado degrada
+durante o run. As próximas N iterações observam o estado quebrado e tratam
+como "input vazio legítimo". Cron exit-1 com causa cascateada que parece
+ser outra coisa.
+
+Caso de referência (2026-06-12, DD8):
+- **Cookies do Auto Avaliar têm TTL ~1h, cron roda ~2h.** `garantir_autenticado`
+  roda 1× no início. ~1h depois, todo `page.goto(lote.url)` é redirecionado
+  pra `/login` → `body.innerText` vira ~186 chars (tela de login). DD5 (RC11)
+  detecta body curto e tenta `page.reload()` — mas reload re-fetcha a MESMA
+  tela de login, devolvendo os mesmos 186. Lote cai em `_laudo_sem_pdf`,
+  audit reporta `pdf_ausente + cache<0.6 + url_invalida` em cascata, próximo
+  cron repete, circuit-breaker (II) congela após 3 ciclos. 78/113 lotes
+  (69%) viraram "⚠ LAUDO NÃO CAPTURADO" perpétuo em 4 dias.
+
+**Antídoto operacional:** detectar sinal de boundary-broken na camada QUE
+CONSOME a fronteira, não na camada que ESTABELECE. `coletar_detalhe` é
+quem faz `goto + observa redirect`; é o ponto certo pra ver "minha goto
+caiu em /login" e re-estabelecer. Reload tunelado pelo placeholder vazio
+(DD5/RC11) não basta porque persiste o estado quebrado.
+
+**Antídoto estrutural:** todo run de duração ≥ TTL da fronteira (sessão,
+token, cookie) precisa de **detecção de boundary-broken in-loop**. Critério:
+mesma sinalização usada na validação inicial (DD8 reusa
+`_url_indica_login_redirect`, que espelha `sessao_valida`). Sem essa
+paridade, drift entre as duas detecções vira bug de longo prazo.
+Complementa RC11 (placeholder vazio transitório): RC11 era fetch
+soft-failing, RC12 é estado de fronteira invalidado.
+
 ### RC7. Pressa em fechar o workstream
 
 ROADMAP trata `✅` como métrica de sucesso visível. Isso cria incentivo

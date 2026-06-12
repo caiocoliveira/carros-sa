@@ -303,8 +303,12 @@ async def login(page, email: str, password: str) -> None:
     # Aguarda navegação pós-login
     await page.wait_for_timeout(3000)
 
-    # Verifica se saiu da página de login
-    if "/login" in page.url or "/entrar" in page.url or "dados-invalidos" in page.url:
+    # Verifica se saiu da página de login. Critério canônico via
+    # `_url_indica_login_redirect` — mesmo helper usado por `sessao_valida`
+    # e DD8 `_reauth_se_login_redirect`. Antes era inline (P5b) e faltava
+    # `logout`: drift latente que `login()` se tornaria o 3º chamador
+    # esquecido se o critério evoluísse.
+    if _url_indica_login_redirect(page.url):
         raise RuntimeError(
             f"Login falhou — URL pós-submit: {page.url}. "
             "Verifique AUTOAVALIAR_EMAIL e AUTOAVALIAR_PASSWORD no .env"

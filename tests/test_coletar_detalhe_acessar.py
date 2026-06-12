@@ -21,8 +21,56 @@ import pytest
 from carros_sa.scraping import scraper_autoavaliar
 from carros_sa.scraping.scraper_autoavaliar import (
     _laudo_existe_no_body,
+    _url_indica_login_redirect,
     coletar_detalhe,
 )
+
+
+class TestUrlIndicaLoginRedirect:
+    """DD8 helper — espelha o critério usado por `sessao_valida`. Sem o
+    mesmo critério nos 2 lugares, a detecção mid-run divergia da inicial.
+    """
+
+    def test_login_path(self):
+        assert _url_indica_login_redirect("https://b2b.autoavaliar.com.br/login") is True
+
+    def test_login_com_query(self):
+        assert (
+            _url_indica_login_redirect(
+                "https://b2b.autoavaliar.com.br/login?redirect=/avaliacoes/x"
+            )
+            is True
+        )
+
+    def test_entrar_path(self):
+        assert _url_indica_login_redirect("https://b2b.autoavaliar.com.br/entrar") is True
+
+    def test_logout_no_path(self):
+        assert _url_indica_login_redirect("https://b2b.autoavaliar.com.br/logout") is True
+
+    def test_dados_invalidos(self):
+        assert (
+            _url_indica_login_redirect(
+                "https://b2b.autoavaliar.com.br/login?erro=dados-invalidos"
+            )
+            is True
+        )
+
+    def test_url_real_de_lote_nao_dispara(self):
+        # A URL é avaliacoes/<group>/<id> — não contém /login.
+        assert (
+            _url_indica_login_redirect(
+                "https://b2b.autoavaliar.com.br/avaliacoes/kuruma/22647779/hyundai-hb20s"
+            )
+            is False
+        )
+
+    def test_listagem_nao_dispara(self):
+        assert _url_indica_login_redirect("https://b2b.autoavaliar.com.br/avaliacoes") is False
+
+    def test_vazio_e_none(self):
+        assert _url_indica_login_redirect("") is False
+        assert _url_indica_login_redirect(None) is False
 
 
 # =============================================================================
@@ -71,22 +119,44 @@ class FakePage:
     `reload_body_texts` é uma lista de body_texts a aplicar em cada `reload()`
     chamado. Default vazio = `reload` é no-op pro body_text (mantém o atual).
     Usado pra simular a retry de body_text curto no `coletar_detalhe`.
+
+    `goto_body_texts` é análogo pra `goto()` — útil pra modelar "AA redirecionou
+    pro login e devolveu body curto" no goto inicial e "depois de re-auth + nova
+    goto, AA devolve a página real". Default vazio = goto não toca body_text.
+
+    `url` reflete o que `page.url` retornaria no Playwright real. DD8
+    (`_reauth_se_login_redirect`) consulta esse atributo pra decidir se a
+    sessão expirou. Cada goto/reload pode atualizar a url via `goto_urls` /
+    `reload_urls` (paralelo aos body_texts) — sem isso, fica fixo.
     """
 
     body_text: str
     eval_responses: List[Callable[[str], Any]]
     reload_body_texts: List[str] = field(default_factory=list)
+    goto_body_texts: List[str] = field(default_factory=list)
+    goto_urls: List[str] = field(default_factory=list)
+    reload_urls: List[str] = field(default_factory=list)
     gotos: List[str] = field(default_factory=list)
     reloads: int = 0
     waits_ms: List[int] = field(default_factory=list)
+    url: str = ""
     _eval_idx: int = 0
 
     async def goto(self, url: str, wait_until: Optional[str] = None, timeout: Optional[int] = None) -> None:
+        idx = len(self.gotos)
         self.gotos.append(url)
+        if idx < len(self.goto_body_texts):
+            self.body_text = self.goto_body_texts[idx]
+        if idx < len(self.goto_urls):
+            self.url = self.goto_urls[idx]
+        else:
+            self.url = url
 
     async def reload(self, wait_until: Optional[str] = None, timeout: Optional[int] = None) -> None:
         if self.reloads < len(self.reload_body_texts):
             self.body_text = self.reload_body_texts[self.reloads]
+        if self.reloads < len(self.reload_urls):
+            self.url = self.reload_urls[self.reloads]
         self.reloads += 1
 
     async def wait_for_timeout(self, ms: int) -> None:
@@ -300,6 +370,97 @@ class TestColetarDetalhe:
         body, url = await coletar_detalhe(page, "https://b2b.autoavaliar.com.br/x")
         assert url == _URL_VALIDA
         assert page.reloads == 0, "body acima do mínimo não deveria reloadar"
+
+    async def test_body_curto_com_login_redirect_dispara_reauth_e_recupera(self, monkeypatch):
+        """DD8: body_text curto + page.url contém /login → re-auth in-place +
+        re-nav resgata. Cenário em produção 2026-06-08+: cookies do AA
+        expiraram mid-run, todos os requests subsequentes redirecionaram pra
+        /login (body ~186 chars). DD5 sozinho reloadia a página de login e
+        devolvia os mesmos 186 indefinidamente. DD8 detecta o redirect,
+        chama `garantir_autenticado` lendo credenciais do env, re-navega pra
+        URL original — body completo volta.
+        """
+        # Estado mutável compartilhado: a flag conta quantas re-auths rodaram.
+        reauth_chamadas: List[int] = []
+
+        async def fake_garantir(page, email: str, password: str) -> None:
+            reauth_chamadas.append(1)
+            # Após re-auth, marca que a próxima goto vai trazer body real.
+            page._dd8_reauth_ok = True
+
+        monkeypatch.setenv("AUTOAVALIAR_EMAIL", "test@example.com")
+        monkeypatch.setenv("AUTOAVALIAR_PASSWORD", "x")
+        monkeypatch.setattr(scraper_autoavaliar, "garantir_autenticado", fake_garantir)
+
+        # 1ª goto cai em login redirect; após re-auth, 2ª goto trazm body real.
+        page = FakePage(
+            body_text="x" * 100,  # short < 200
+            goto_body_texts=["x" * 100, _BODY_TEMPLATE_LAUDO_APROVADO],
+            goto_urls=[
+                "https://b2b.autoavaliar.com.br/login",
+                "https://b2b.autoavaliar.com.br/avaliacoes/kuruma/123/x",
+            ],
+            eval_responses=[lambda js: _URL_VALIDA],
+        )
+        body, url = await coletar_detalhe(
+            page, "https://b2b.autoavaliar.com.br/avaliacoes/kuruma/123/x"
+        )
+        assert url == _URL_VALIDA, "re-auth + re-nav deveria recuperar URL"
+        assert body == _BODY_TEMPLATE_LAUDO_APROVADO
+        assert len(reauth_chamadas) == 1, "re-auth deveria rodar 1× (recuperou na 1ª)"
+        # 2 gotos: inicial (redirect login) + pós-reauth (URL real).
+        assert len(page.gotos) == 2
+        # Reload NÃO deveria rodar porque o caminho DD8 (continue) recuperou.
+        assert page.reloads == 0
+
+    async def test_body_curto_sem_login_redirect_segue_com_reload(self):
+        """Defesa: DD8 NÃO dispara quando body curto não é por login expirado
+        (SPA pendente, throttle transitório, iframe lento). Caminho DD5
+        original (reload) continua sendo o fluxo padrão.
+        """
+        page = FakePage(
+            body_text="",  # vazio mas page.url é a URL normal do lote
+            url="https://b2b.autoavaliar.com.br/avaliacoes/saga/789/x",
+            reload_body_texts=[_BODY_TEMPLATE_LAUDO_APROVADO],
+            eval_responses=[lambda js: _URL_VALIDA],
+        )
+        body, url = await coletar_detalhe(
+            page, "https://b2b.autoavaliar.com.br/avaliacoes/saga/789/x"
+        )
+        assert url == _URL_VALIDA
+        # Reload original (DD5) rodou — não foi nem 1 goto extra do DD8.
+        assert page.reloads == 1
+        assert len(page.gotos) == 1
+
+    async def test_body_curto_com_login_redirect_mas_sem_credenciais_segue_reload(
+        self, monkeypatch
+    ):
+        """Graceful: DD8 falha branda quando credenciais ausentes (testing local,
+        env mal configurado). Caímos no caminho DD5 original — reload —
+        sem propagar exceção. Pior caso: continua "⚠ LAUDO NÃO CAPTURADO"
+        como antes, mas o pipeline NÃO quebra.
+        """
+        monkeypatch.delenv("AUTOAVALIAR_EMAIL", raising=False)
+        monkeypatch.delenv("AUTOAVALIAR_PASSWORD", raising=False)
+
+        page = FakePage(
+            body_text="x" * 100,
+            goto_urls=["https://b2b.autoavaliar.com.br/login"],  # 1ª goto cai em login
+            reload_body_texts=["", ""],  # reloads também ficam curtos
+            eval_responses=[
+                lambda js: None,    # 1: extract → None
+                lambda js: False,   # 2: ABRIR_MODAL → False
+                lambda js: None,    # 3: extract → None
+                lambda js: False,   # 4: ABRIR_MODAL → False
+                lambda js: None,    # 5: extract → None
+            ],
+        )
+        body, url = await coletar_detalhe(
+            page, "https://b2b.autoavaliar.com.br/avaliacoes/x/1/x"
+        )
+        # Sem credenciais → DD8 retorna False → reload normal roda → continua curto.
+        assert url is None
+        assert page.reloads == 2, "reload DD5 padrão segue rodando como antes"
 
     async def test_laudo_existe_mas_acessar_tambem_falha_retorna_none(self):
         """Caso pessimista: laudo existe no AA mas mesmo o trigger 'Acessar' falha.

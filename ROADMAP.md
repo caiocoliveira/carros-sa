@@ -4,7 +4,39 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display** — 612/612 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display + DD8 re-auth in-place em sessão expirada mid-run** — 623/623 testes passando
+
+### DD8 — Re-auth in-place em `coletar_detalhe` destrava lotes quando cookie AA expira mid-run (2026-06-12) ✅
+- **Branch:** `claude/amazing-goldberg-o6cssc`
+- **Motivação:** Operador pediu (7ª vez) "todo carro tem laudo baixado, revisado e link na planilha — se não, identificar razão e resolver pra nunca mais acontecer." Diagnóstico via logs do GitHub Actions: cron `triagem.yml` falhou **4 dias consecutivos** (2026-06-08, 09, 10, 11). Último run (2026-06-11 18:50 UTC): audit reportou **78/113 lotes ativos incompletos (69%)** — 77 sem PDF + 78 cache<0.6 + 77 URL inválida (TRÊS dimensões falhando em cascata). Log do scraper:
+  - **`DD5 body_text curto (186 chars)`** repetindo em DEZENAS de URLs (kuruma, saga, gruposanmarco, motominas, grupobmveiculos) — padrão estável (sempre 186 chars, não transitório).
+  - **`AnthropicTextClient falhou: 401 invalid x-api-key`** em todos os calls — fallback LLM quebrado, Gemini 503 sem rede de segurança.
+  - **`GeminiTextClient: retry em 15s após ServerError`** em cascata.
+- **Causa raiz:** `garantir_autenticado` roda UMA VEZ no início do script (`reprocessar_lotes_do_db.py` / `triagem_diaria.py`). Durante o run de ~2h, cookies do Auto Avaliar expiram (validade típica ~1h em produção). A partir desse momento, todo `page.goto(lote.url)` é redirecionado pra `/login` → `body.innerText` vira ~186 chars (a tela de login curta). DD5 (2026-05-29) tenta `page.reload()` quando body curto — mas reload **re-fetcha a MESMA tela de login**, devolvendo os mesmos 186 chars. Lote cai em `_laudo_sem_pdf` (confidence 0.55) → próximo cron repete → circuit-breaker (II) congela após 3 ciclos → "⚠ LAUDO NÃO CAPTURADO" perpétuo. DD5 cobriu SPA pendente/Cloudflare transitório; DD8 cobre **sessão expirada estável** (cookie morto).
+- **Solução cirúrgica:**
+  - Novo helper `_url_indica_login_redirect(url)` em [`scraper_autoavaliar.py`](carros_sa/scraping/scraper_autoavaliar.py) — espelha o critério de `sessao_valida` (`/login`, `/entrar`, `logout`, `dados-invalidos`). Sem o mesmo critério nos dois lugares, detecção mid-run divergiria da inicial.
+  - Novo `_reauth_se_login_redirect(page)`: detecta `page.url` em login, lê `AUTOAVALIAR_EMAIL`/`AUTOAVALIAR_PASSWORD` do `.env`, chama `garantir_autenticado`. Falha branda quando credenciais ausentes (testing local) ou auth falha — caller fall-back pro DD5 reload.
+  - Dentro do loop DD5 em `coletar_detalhe`: ANTES do `page.reload()`, tenta DD8 re-auth + re-goto na URL original. Caminho feliz (~99% dos lotes): URL não bate em `/login` → `_reauth_se_login_redirect` retorna False imediato → flow DD5 padrão. Caminho patológico (sessão expirou): re-auth + re-nav → body real volta.
+- **Cobertura:** 11 testes novos em [`tests/test_coletar_detalhe_acessar.py`](tests/test_coletar_detalhe_acessar.py):
+  - `TestUrlIndicaLoginRedirect` (8 testes — login/entrar/logout/dados-invalidos/listagem/lote/vazio/None).
+  - `TestColetarDetalhe::test_body_curto_com_login_redirect_dispara_reauth_e_recupera` — cenário golden: cookie expirou, re-auth recupera.
+  - `test_body_curto_sem_login_redirect_segue_com_reload` — defesa: DD8 NÃO dispara em SPA pendente (URL é a do lote, não /login) → fluxo DD5 puro.
+  - `test_body_curto_com_login_redirect_mas_sem_credenciais_segue_reload` — graceful: env mal configurado → DD8 retorna False → DD5 segue como antes (sem regressão). **623/623 verde** (612 baseline + 11 novos).
+- **Impacto esperado próximo cron:**
+  - Lotes em `tentativas < MAX_TENTATIVAS_EXTRACAO (=3)`: DD8 destrava sozinho na próxima passagem do retry diário.
+  - Lotes em `tentativas >= 3` (circuit-breaker congelou nos 4 dias de falha): operador precisa rodar `workflow_dispatch reset_circuit_breaker=true` UMA VEZ pós-merge pra destravar — DD6 já entregou a checkbox, basta usar.
+- **Ações operacionais imediatas pós-merge:**
+  - **OP1 — Rodar workflow_dispatch com `reset_circuit_breaker=true` UMA VEZ** após este merge. Destrava os ~78 lotes congelados nos 4 dias de cron quebrado. Sem isso, DD8 não os alcança (filtro `_filtrar_laudo_pendente` em `reprocessar_lotes_do_db.py` exclui lotes com `tentativas>=3`).
+  - **OP2 — Rotacionar `ANTHROPIC_API_KEY` em GitHub Settings → Secrets** (401 invalid x-api-key em todos os calls). Não bloqueia DD8 (Gemini Flash continua sendo o caminho principal), mas tira o fallback LLM. Quando Gemini 503ar de novo, EstimadorReformaLLM cai pro determinístico (aceitável) mas extrator camada 4 e passada 8 (URL fallback) perdem rede.
+- **Padrão genérico (LESSONS.md/RC12):** **Garantia de fronteira (autenticação, rate-limit, idempotência) feita UMA VEZ no início do run NÃO se sustenta em runs longos.** Cookies AA têm validade ~1h; cron roda 2h+. Defesa contra "sessão expirou mid-run": detectar sinal de boundary-broken na CAMADA QUE CONSOME o boundary (`coletar_detalhe` que faz goto + observa redirect), e re-estabelecer a fronteira in-place. Reload tunelado (DD5) não basta porque re-fetcha o estado quebrado. Complementa RC11 (DD5 — "fetch que devolveu placeholder vazio"): RC11 era fetch transitório, RC12 é estado de sessão perdido.
+- **Limitações conhecidas:**
+  - Se Cloudflare bloqueia o re-login (IP queimado, rate-limit), DD8 falha em cascata. Falha branda — `_reauth_se_login_redirect` retorna False, DD5 reload roda, lote cai em `_laudo_sem_pdf` como antes. Operador detecta via audit `--strict` + decide trocar IP / rotar cookie.
+  - `_MIN_BODY_TEXT_BYTES=200` continua heurístico. Se a tela de login do AA virar exatamente ≥200 chars (refactor de UX), DD8 nunca dispara. Mitigação: validar empiricamente no 1º cron pós-merge (DD5-FU4 continua válido) + adicionar `_log.info("DD8 sessão recuperada")` pra contagem.
+  - Não há métrica `pct_lotes_via_dd8` — sem ela, regressão silenciosa (AA mudar comportamento de redirect) fica invisível. Follow-up: contar warns "DD8 sessão expirada" no cron stderr artifact + alertar quando >50%.
+- **Follow-ups (não-bloqueantes):**
+  - **DD8-FU1 — Métrica `pct_lotes_via_dd8` no audit `--strict`:** sem contagem, drift do AA em redirect (mudar pra HTTP 403 em vez de 302 → /login) fica invisível.
+  - **DD8-FU2 — `--max-sessao-vida-segundos N` em `triagem_diaria.py`:** re-autenticar proativamente a cada N (~50min, abaixo do TTL típico de 1h do cookie AA) em vez de esperar quebrar. Reduz % de lotes que entram no caminho DD8 (caminho está OK, mas a proatividade é mais barata que reativo). Esperar 1-2 ciclos pra validar se DD8 reativo é suficiente.
+  - **DD8-FU3 — Saúde do secret `ANTHROPIC_API_KEY`:** adicionar smoke-test no início do workflow (`anthropic.messages.create(max_tokens=1)`) que falha fast com mensagem clara quando key inválida. Hoje o erro só aparece N vezes no log do run, fácil de perder.
 
 ### Revisão diária 2026-06-06 — sufixos operacionais completos no display (DD7-FU2) ✅
 - **Branch:** `claude/trusting-gates-wpiJN`

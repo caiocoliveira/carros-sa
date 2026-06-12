@@ -303,8 +303,12 @@ async def login(page, email: str, password: str) -> None:
     # Aguarda navegação pós-login
     await page.wait_for_timeout(3000)
 
-    # Verifica se saiu da página de login
-    if "/login" in page.url or "/entrar" in page.url or "dados-invalidos" in page.url:
+    # Verifica se saiu da página de login. Critério canônico via
+    # `_url_indica_login_redirect` — mesmo helper usado por `sessao_valida`
+    # e DD8 `_reauth_se_login_redirect`. Antes era inline (P5b) e faltava
+    # `logout`: drift latente que `login()` se tornaria o 3º chamador
+    # esquecido se o critério evoluísse.
+    if _url_indica_login_redirect(page.url):
         raise RuntimeError(
             f"Login falhou — URL pós-submit: {page.url}. "
             "Verifique AUTOAVALIAR_EMAIL e AUTOAVALIAR_PASSWORD no .env"
@@ -321,14 +325,28 @@ async def sessao_valida(page) -> bool:
         await page.goto(LISTAGEM_URL, wait_until="domcontentloaded", timeout=10000)
         await page.wait_for_timeout(1000)
         url = page.url
-        return (
-            "/login" not in url
-            and "/entrar" not in url
-            and "logout" not in url
-            and "dados-invalidos" not in url
-        )
+        return _url_indica_login_redirect(url) is False
     except Exception:
         return False
+
+
+def _url_indica_login_redirect(url: Optional[str]) -> bool:
+    """True quando page.url aponta pra tela de login/logout/erro-de-credencial.
+
+    Centraliza o critério usado por `sessao_valida` e pelo DD8
+    (`_reauth_se_login_redirect`). Sem esse mesmo critério nos dois lugares,
+    a detecção de "sessão expirou mid-run" em `coletar_detalhe` divergia da
+    validação inicial — operador via DD5 "body curto" em cascata sem que
+    o DD8 disparasse re-auth.
+    """
+    if not url:
+        return False
+    return (
+        "/login" in url
+        or "/entrar" in url
+        or "logout" in url
+        or "dados-invalidos" in url
+    )
 
 
 async def garantir_autenticado(page, email: str, password: str) -> None:
@@ -341,6 +359,47 @@ async def garantir_autenticado(page, email: str, password: str) -> None:
 
     # Cookies expirados ou inexistentes — faz login de novo
     await login(page, email, password)
+
+
+async def _reauth_se_login_redirect(page) -> bool:
+    """DD8: detecta sessão expirada mid-run e re-autentica in-place.
+
+    Quando os cookies do Auto Avaliar expiram durante o run, todos os
+    `page.goto(lote.url)` subsequentes são redirecionados pra `/login` e
+    `body.innerText` vira a tela de login (~186 chars). O fix DD5 (reload em
+    body curto) NÃO recupera nesse caso — `page.reload()` re-fetcha a mesma
+    tela de login. Sem DD8, o lote cai em `_laudo_sem_pdf` com
+    `body_text=186`, `pdf_url=None` → audit reporta
+    `pdf_ausente + cache<0.6 + url_invalida` em cascata. Cron 2026-06-08+
+    falhou 4 dias seguidos com 78/113 lotes ativos nesse estado.
+
+    Estratégia: ao detectar `/login` em `page.url`, chama
+    `garantir_autenticado` lendo credenciais do `.env` direto — evita
+    propagar email/password por todas as assinaturas até `coletar_detalhe`.
+    Caller é responsável por re-navegar pra URL original após retorno True.
+
+    Retorna False quando (a) URL não aponta pra login, (b) credenciais
+    ausentes no env, ou (c) re-auth falhou — nesse caso o caller segue
+    com o fluxo padrão DD5 (reload).
+    """
+    import logging as _logging
+    import os
+    _log = _logging.getLogger(__name__)
+
+    url_atual = page.url if hasattr(page, "url") else ""
+    if not _url_indica_login_redirect(url_atual):
+        return False
+    email = os.environ.get("AUTOAVALIAR_EMAIL")
+    password = os.environ.get("AUTOAVALIAR_PASSWORD")
+    if not email or not password:
+        _log.warning("DD8 login redirect detectado mas credenciais ausentes no env")
+        return False
+    try:
+        await garantir_autenticado(page, email, password)
+        return True
+    except Exception as exc:
+        _log.warning("DD8 garantir_autenticado falhou: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +738,24 @@ async def coletar_detalhe(page, url: str, llm_client=None) -> tuple[str, Optiona
             "DD5 body_text curto (%d chars) em %s — reload tentativa %d/2",
             len(body_text or ""), url[:80], tentativa + 1,
         )
+        # DD8: antes do reload, checa se o body curto é por sessão expirada
+        # (page.url redirecionou pra /login). reload re-fetcha a MESMA tela
+        # de login (mesmos 186 chars) — só re-auth + re-nav recupera. Sem
+        # essa defesa, cron de 2026-06-08+ acumulou 78/113 lotes "incompletos"
+        # quando o cookie AA expirou mid-run. Em runs saudáveis NÃO dispara
+        # (URL não bate em /login), custo zero no caminho feliz.
+        if await _reauth_se_login_redirect(page):
+            _log.warning(
+                "DD8 sessão expirada — re-autenticada, re-navegando %s (tentativa %d/2)",
+                url[:80], tentativa + 1,
+            )
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(espera_ms)
+                body_text = await page.evaluate("() => document.body.innerText")
+                continue
+            except Exception as exc:
+                _log.warning("DD8 re-nav após re-auth levantou: %s", exc)
         try:
             await page.reload(wait_until="networkidle", timeout=30000)
             await page.wait_for_timeout(espera_ms)

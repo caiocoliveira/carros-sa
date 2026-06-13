@@ -983,21 +983,26 @@ class TestAuditEstruturalEmViavel:
 
 
 class TestAuditMedianaDistanteFipe:
-    """Mediana de mercado muito distante da FIPE = sinal informativo de
-    similares poluídos do AA (>1.20×FIPE) ou sample fraca (<0.70×FIPE).
-    Não afeta cálculo desde refactor FIPE-only de 2026-05-08, só sinaliza.
+    """Mediana Webmotors muito distante da FIPE = sinal informativo de
+    amostra com outlier / defasagem da FIPE (>1.20×FIPE) ou anúncios antigos
+    no cache / depreciação real (<0.70×FIPE). Não afeta cálculo desde
+    refactor FIPE-only de 2026-05-08, só sinaliza.
+
+    Fonte da mediana mudou em 2026-05-12 (workstream G): vem do Webmotors
+    live (cache `anuncio_webmotors`), não mais dos similares do Auto Avaliar.
+    Mensagens do check refletem essa mudança.
     """
 
     def test_mediana_acima_de_fipe_x_120_dispara(self):
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))
-            # FIPE 50k, mediana 65k = 130% > 120% → similares poluídos suspeito
+            # FIPE 50k, mediana 65k = 130% > 120% → amostra com outlier ou defasagem FIPE
             session.add(_avaliacao("L001", fipe=50_000, webmotors_mediana=65_000))
             session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
-        assert any("Mediana" in v and "similares poluídos" in v for v in violacoes), (
+        assert any("Mediana" in v and "outlier" in v for v in violacoes), (
             f"Esperava flag de mediana >120% FIPE: {violacoes}"
         )
 
@@ -1005,12 +1010,12 @@ class TestAuditMedianaDistanteFipe:
         engine = _engine_mem()
         with Session(engine) as session:
             session.add(_lote("L001"))
-            # FIPE 50k, mediana 30k = 60% < 70% → sample fraca
+            # FIPE 50k, mediana 30k = 60% < 70% → anúncios antigos / sample ruidosa
             session.add(_avaliacao("L001", fipe=50_000, webmotors_mediana=30_000))
             session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
-        assert any("Mediana" in v and "sample fraca" in v for v in violacoes), (
+        assert any("Mediana" in v and ("antigos" in v or "ruidosa" in v) for v in violacoes), (
             f"Esperava flag de mediana <70% FIPE: {violacoes}"
         )
 
@@ -1023,7 +1028,7 @@ class TestAuditMedianaDistanteFipe:
             session.add(_laudo("L001"))
             session.commit()
         violacoes = audit(engine)
-        assert not any("Mediana" in v and ("similares poluídos" in v or "sample fraca" in v) for v in violacoes), (
+        assert not any("Mediana" in v and ("outlier" in v or "antigos" in v or "ruidosa" in v) for v in violacoes), (
             f"Mediana 97% FIPE não deveria flag: {violacoes}"
         )
 

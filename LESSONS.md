@@ -526,6 +526,73 @@ paridade, drift entre as duas detecções vira bug de longo prazo.
 Complementa RC11 (placeholder vazio transitório): RC11 era fetch
 soft-failing, RC12 é estado de fronteira invalidado.
 
+### RC13. Mensagens de erro/audit operator-facing fossilizam a causa raiz antiga depois de migração de fonte
+
+Sintoma: workstream X muda a fonte de um sinal (ex.: similares do Auto Avaliar
+→ Webmotors live na mediana de mercado). Cálculo migra, persistência migra,
+display migra. Mas a **mensagem do audit / log** que aciona quando o sinal
+está extremo continua nomeando a fonte ANTIGA. Operador lê "provável similares
+poluídos do AA" e vai debugar AA — onde nem rola mais consulta.
+
+Caso de referência (2026-06-13):
+- **`_check_mediana_distante_fipe`** em `audit.py` ainda dizia "provável
+  similares poluídos do AA (modelo errado entre similares)" quase 1 mês
+  depois do workstream G ter movido a mediana pra Webmotors live (2026-05-12).
+  Tests do check também asseguravam a string "similares poluídos" no output.
+- Quando o cron disparasse o aviso, levaria o operador a investigar `avaliador_mercado`
+  procurando bug em similares do AA — código que nem é mais chamado pra essa
+  finalidade. Causa raiz real (amostra pequena com outlier, FIPE defasada,
+  anúncios stale no cache) ficava obscurecida.
+
+**Antídoto operacional:** quando workstream desliga / move fonte de um sinal,
+fazer um grep do nome da fonte velha em **mensagens de erro, docstrings de
+checks e tests de string** ANTES de declarar `✅`. Lista canônica de lugares
+onde a string vaza no codebase saudável: `audit.py::ALL_CHECKS` (mensagens
+do operador), `sheets.py::_write_glossario_sheet` (doc do operador),
+docstrings de funções tocadas, tests que `assert "..." in violacao`. Se a
+string aparece em algum deles, atualizar pra refletir a fonte nova **mais a
+classe de causas plausíveis na fonte nova** (Webmotors live ≠ Auto Avaliar
+similares — outliers regionais, defasagem FIPE, anúncios stale no cache).
+
+**Antídoto estrutural:** mensagens operator-facing devem evitar nomear a
+fonte do sinal quando possível ("Mediana de mercado R$ X é Y% da FIPE…"),
+ou referenciar a fonte por papel ("amostra de mercado") em vez de produto
+específico. Caso contrário cada migração exige hunt-and-replace propenso a
+ficar pra trás.
+
+### RC14. Test pollution via `asyncio.get_event_loop()` em código de teste síncrono mistura mal com pytest-asyncio AUTO mode
+
+Sintoma: 6 testes síncronos que drivam corrotinas via
+`asyncio.get_event_loop().run_until_complete(...)` rodavam verdes em
+isolamento, mas falhavam com `RuntimeError: There is no current event loop`
+quando rodavam DEPOIS de testes async em outro arquivo. Baseline ficava
+vermelho em CI, mas dev local que rodava só um arquivo via `-k` nunca via.
+
+Causa raiz: pytest-asyncio em AUTO mode (`asyncio_default_test_loop_scope=function`)
+cria um event loop fresh por teste async **E fecha o loop** ao terminar.
+Quando o próximo teste é síncrono e chama `asyncio.get_event_loop()`, em
+Python 3.12 isso levanta `RuntimeError` em vez de criar um novo (era warning
+em 3.10/3.11, virou erro). O loop default não existe mais.
+
+Caso de referência (2026-06-13):
+- `tests/test_scraper_paginacao.py::_run` usava
+  `asyncio.get_event_loop().run_until_complete(coro)`. Rodando solo: passa
+  (test_scraper_paginacao é o primeiro a tocar asyncio). Rodando depois de
+  `test_webmotors_live.py` (que tem testes async puros): falha em 6/6 porque
+  o loop ficou closed.
+- Fix: trocar por `asyncio.run(coro)` — cria loop novo a cada chamada,
+  imune ao estado global. Patch de 2 linhas.
+
+**Antídoto operacional:** ao escrever teste síncrono que driva corrotina,
+SEMPRE usar `asyncio.run(coro)`, nunca `asyncio.get_event_loop().run_until_complete(...)`.
+O segundo é semantically "use o loop atual" — só funciona se ALGUÉM
+estabeleceu um. Em ambientes pytest-asyncio AUTO, esse "alguém" é o
+plugin, que fecha o loop ao terminar.
+
+**Antídoto estrutural:** rodar `make test` (suite inteira na ordem default)
+antes de declarar baseline verde — nunca confiar em `-k` ou rodar arquivo
+isolado. Test pollution só aparece na ordem real de execução.
+
 ### RC7. Pressa em fechar o workstream
 
 ROADMAP trata `✅` como métrica de sucesso visível. Isso cria incentivo

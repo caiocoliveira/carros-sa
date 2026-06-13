@@ -66,7 +66,14 @@ def _card(lote_id: str, timer: Optional[str] = "00:20:00:00") -> Dict[str, Any]:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # `asyncio.get_event_loop()` em Python 3.12 levanta RuntimeError quando o
+    # loop default foi fechado por um teste async anterior (pytest-asyncio AUTO
+    # mode com `asyncio_default_test_loop_scope=function` recicla o loop). Estes
+    # testes são síncronos mas drivam corrotinas — `asyncio.run` cria um loop
+    # novo a cada chamada, independente do estado global. Antes dava
+    # "RuntimeError: There is no current event loop" quando rodava após
+    # test_webmotors_live.py no mesmo processo.
+    return asyncio.run(coro)
 
 
 class TestPaginacao:

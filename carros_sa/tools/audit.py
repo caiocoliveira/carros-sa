@@ -666,15 +666,26 @@ def _check_mediana_distante_fipe(row: Dict[str, Any]) -> List[CheckResult]:
     """`webmotors_mediana > FIPE × 1.20` ou `< FIPE × 0.70` = sinal informativo.
 
     Mediana é coluna informativa (refactor FIPE-only de 2026-05-08), não entra
-    no cálculo de Lance Máximo. MAS quando muito divergente da FIPE, indica:
-    - **>1.20×FIPE**: similares poluídos do AA (Tiggo 7 listado entre Tiggo 2,
-      Airtrek vs Outlander, Ka descontinuado vs seminovos europeus). Operador
-      olha mediana alta e pode achar que é "carro premium em alta" — falso.
-    - **<0.70×FIPE**: similares vencidos (anúncios antigos com preço pré-2024)
-      ou sample muito ruidosa. Sinaliza dado fraco sem afetar cálculo.
+    no cálculo de Lance Máximo. Fonte da mediana mudou em 2026-05-12 (workstream G):
+    anúncios reais do Webmotors via cache `anuncio_webmotors`, populado pelo
+    cron `carros-sa webmotors-coletar`. Similares do Auto Avaliar foram
+    descontinuados nessa rota porque exigiam cap defensivo `FIPE×1.20` pra
+    mascarar outliers categóricos (ver workstream G).
+
+    Causas plausíveis das extremidades, no contexto Webmotors:
+    - **>1.20×FIPE**: amostra pequena com outlier (ex.: black plate ou versão
+      premium misturada com a base), prêmio regional (Civic preto raro), OU
+      defasagem da FIPE (tabela atualiza mensalmente, mercado spike entre
+      atualizações). Coluna é informativa mas vale conferir os anúncios na URL
+      do Webmotors antes de assumir "carro em alta".
+    - **<0.70×FIPE**: anúncios antigos ainda em cache (TTL 24h normalmente,
+      mas anúncios sumidos do estoque ficam até serem marcados via
+      `marcar_anuncios_sumidos`), sample muito ruidosa, ou veículo realmente
+      desvalorizado bem abaixo da FIPE (depreciação acelerada por motivo
+      específico — Ka descontinuado, recall do modelo, etc.).
 
     Threshold ±20-30% deliberadamente largo: mediana é REFERÊNCIA, não cálculo;
-    sinaliza só extremos. Workstream G (Webmotors live) vai estreitar isso.
+    sinaliza só extremos.
     """
     mediana = row.get("webmotors_mediana")
     fipe = row.get("fipe")
@@ -687,17 +698,19 @@ def _check_mediana_distante_fipe(row: Dict[str, Any]) -> List[CheckResult]:
     if ratio > 1.20:
         return [(
             "Mediana mercado (R$)",
-            f"Mediana de mercado R$ {mediana} é {ratio:.0%} da FIPE — provável "
-            "similares poluídos do AA (modelo errado entre similares). Coluna é "
-            "informativa, não afeta Lance Máximo (FIPE-only desde 2026-05-08), "
-            "mas vale conferir manualmente.",
+            f"Mediana Webmotors R$ {mediana} é {ratio:.0%} da FIPE (n={n} anúncios) — "
+            "amostra pequena com outlier, prêmio regional, ou defasagem da FIPE "
+            "(mercado spike entre atualizações). Coluna é informativa, não afeta "
+            "Lance Máximo (FIPE-only desde 2026-05-08), mas vale conferir os "
+            "anúncios reais antes de decidir.",
             mediana,
         )]
     if ratio < 0.70:
         return [(
             "Mediana mercado (R$)",
-            f"Mediana de mercado R$ {mediana} é {ratio:.0%} da FIPE — sample fraca "
-            "(anúncios antigos ou outliers). Não afeta cálculo (FIPE-only).",
+            f"Mediana Webmotors R$ {mediana} é {ratio:.0%} da FIPE (n={n} anúncios) — "
+            "anúncios antigos no cache, sample ruidosa, ou depreciação acelerada "
+            "real do modelo. Não afeta cálculo (FIPE-only).",
             mediana,
         )]
     return []

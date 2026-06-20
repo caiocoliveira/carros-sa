@@ -4,7 +4,26 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display + DD8 re-auth in-place em sessão expirada mid-run** — 623/623 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display + DD8 re-auth in-place em sessão expirada mid-run + docstrings precificador/audit limpos pós-G live** — 629/629 testes passando
+
+### Revisão diária 2026-06-20 — limpeza pós-workstream G (docstrings stale + imports inline) ✅
+- **Branch:** `claude/trusting-gates-e1wfrn`
+- **Motivação:** Pedido "revise e corrija autonomamente". Simulação canônica de **15 cenários** (gold Polo Track + f_km teto/piso + ESTRUTURAL conf alta/baixa + zona apertada + inviável + mediana inflada + km=None + motor problema + reforma pesada + interestadual + FIPE muito baixa + boundary lance==max + tudo péssimo). Validou: (a) `Lance Máximo > FIPE`? NÃO em produção saudável — max observado 96.9% (Cenário 6 inviável). (b) `preco_giro_fipe > FIPE`? Sim até 109.3% (Cenário 2 f_km no teto) = `1.15 × 0.95` — design FIPE-only, threshold audit 1.13 mantém margem ergonômica. (c) Coerência `capital_ef × score_ef ≈ Lucro` passou em todos os 15. (d) Sufixos operacionais (⚠ ESTRUTURAL, ⚠ motor, ⚠ reforma pesada, ⚠ margem-alvo inalcançável) dispararam corretamente nos cenários esperados.
+- **Achados em revisão preventiva:**
+  1. **Docstring do `precificador.py` stale**: linhas 18-27 (módulo) e 124-139 (função `precificar`) mencionavam "Webmotors live ainda não está conectado (workstream G)" — workstream G está LIVE desde 2026-05-12 (cron noturno popula `anuncio_webmotors` via `carros-sa webmotors-coletar`). Mensagem confunde próximo Claude/operador lendo o código procurando entender o estado atual da mediana. Padrão RC13 (CLAUDE.md): mensagens fossilizam fonte antiga após workstream migrar a origem.
+  2. **Dead import em `audit.py`**: `_lucro_absoluto_no_alvo` importado no topo mas NUNCA usado no módulo (única referência é `_lucro_absoluto_efetivo` em `_build_rows`). Sobra do refactor de 2026-05-10 (P5f — paridade ROI×Lucro pelo basis efetivo).
+  3. **Imports inline em `audit.py::_build_rows`**: `_score_roi_efetivo` e `_km_por_ano` (ambos de `carros_sa.tools.sheets`) importados DENTRO do loop por linha, sem ciclo nem dependência opcional justificando. Provavelmente sobra de evolução incremental.
+- **Solução cirúrgica:**
+  - `precificador.py`: docstring do módulo + comentário em `precificar` atualizados pra refletir Workstream G LIVE — mediana vem do Webmotors live com placeholder neutro quando sem amostra; workstream G.3 (reativar mediana no precificador) mencionado como bloco aguardando ≥1 semana de cron acumulando dados.
+  - `audit.py`: remove `_lucro_absoluto_no_alvo` do import; consolida `_score_roi_efetivo` e `_km_por_ano` no topo. Reduz superfície de evolução.
+- **Cobertura:** sem testes novos (mudanças são docstring/import — comportamento intocado). `make test` continua **629/629 verde** (mesma baseline pré-revisão).
+- **Impacto:** próximo Claude lendo `precificador.py` entende em ≤30s o estado atual (Webmotors live populando, FIPE-only intencional, G.3 bloqueado). Auditoria de paridade explícita (cli/sheets/audit) fica mais leve sem dead import. Sem regressão em produção.
+- **Padrões registrados em CLAUDE.md:**
+  - Imports inline dentro de loops raramente são intencionais (apenas 3 casos legítimos: ciclo declarado, lazy load pesado, try/except opcional). Grep `from carros_sa\..* import` no corpo de funções antes de declarar revisão ✅ (custo: 5 min; reduz superfície bugs + facilita rastrear deps).
+  - RC13 confirmado por nova ocorrência: mensagens stale de workstream G sobreviveram em docstring de `precificador.py` mesmo após o módulo `avaliador_mercado.py` ter sido limpo em 2026-05-12. Grep `workstream G\|webmotors live\|não está conectado` em docstrings + comments antes de fechar PR de workstream que ligue/desligue uma fonte.
+- **Follow-ups (não-bloqueantes, identificados na simulação mas fora de escopo):**
+  - **OBS-FU1 — `webmotors_p25` ainda persistido em `SinalMercado` mas não consumido**: registrado em ROADMAP linha 883 desde 2026-05-08. Candidato a deprecar quando workstream G.3 ligar (vai querer pesos diferentes na ponderação). Não tocar agora — contrato em `models.py` é imutável sem coordenação.
+  - **OBS-FU2 — `preco_giro_aa` sempre None pós-FIPE-only**: campo persistido em `Avaliacao` + `AvaliacaoLote` + lido por `audit._build_rows` (registro em row dict, sem uso downstream). Mesmo motivo de OBS-FU1: dead field em contrato imutável.
 
 ### DD8 — Re-auth in-place em `coletar_detalhe` destrava lotes quando cookie AA expira mid-run (2026-06-12) ✅
 - **Branch:** `claude/amazing-goldberg-o6cssc`

@@ -15,15 +15,19 @@ Sobre a âncora única (FIPE × 0.95):
 - FIPE é tabulada com base em revenda de seminovos em concessionária. Loja
   pequena vende com leve desconto vs FIPE em condições normais — daí o ajuste
   conservador de 0.95.
-- `webmotors_mediana` e `auto_avaliar_ref` continuam exibidos na planilha como
-  REFERÊNCIA informativa (col "Mediana mercado"), mas NÃO entram no cálculo.
-  Operador vê os dois sinais lado a lado e contextualiza a decisão da máquina.
-- Histórico: até 2026-05-08 o âncora era `webmotors_mediana × f_km` com 3 caps
+- `webmotors_mediana` continua exibido na planilha como REFERÊNCIA informativa
+  (col "Mediana mercado"), mas NÃO entra no cálculo. Operador vê FIPE e mediana
+  lado a lado e contextualiza a decisão da máquina. Desde workstream G (LIVE
+  2026-05-12), a mediana vem do cache `anuncio_webmotors` (Webmotors live,
+  populado pelo cron `carros-sa webmotors-coletar`, TTL 24h); sem amostra fresh
+  o display mostra "—" e o sistema persiste `FIPE` como placeholder neutro.
+- Histórico: até 2026-05-08 a âncora era `webmotors_mediana × f_km` com 3 caps
   em série tentando consertar similares poluídos do Auto Avaliar (Tiggo 7 vs
-  Tiggo 2, Airtrek vs Outlander, Ka descontinuado). Como Webmotors live ainda
-  não está conectado (workstream G), `webmotors_mediana` era na prática
-  `FIPE × 0.97` com ruído — o sistema já era FIPE-driven mascarado. Refactor
-  removeu mediana do cálculo e deixou os 2 sinais de mercado como display.
+  Tiggo 2, Airtrek vs Outlander, Ka descontinuado). Workstream G descontinuou
+  AA como fonte de mediana e migrou pro Webmotors live. Reativar mediana no
+  precificador (workstream G.3 — ponderação `FIPE × β + mediana × (1-β)`)
+  bloqueia em ≥1 semana de cron acumulando amostra estável; por enquanto
+  segue FIPE-only.
 - `webmotors_p25` continua em `SinalMercado` mas não é consumido (legado).
 
 Invariantes esperados (validados pelo audit):
@@ -121,22 +125,25 @@ def precificar(
     #    do lote vs km mediana de mercado. FIPE × 0.95 reflete o desconto típico
     #    da revenda em loja pequena (a tabela é calibrada com concessionária).
     #
-    #    Histórico do design: até 2026-05-08 a âncora era `webmotors_mediana × f_km`
-    #    com cap n<5 no avaliador (1.20×FIPE) + cap final no precificador
-    #    (1.20×FIPE). A "mediana" vinha de `similares_precos` extraídos do
-    #    Auto Avaliar — mas frequentemente era poluída por outliers categóricos
-    #    (Tiggo 7 entre Tiggo 2, Airtrek entre Outlander, Ka descontinuado vs
-    #    seminovos europeus) e elevava o lance máximo acima da FIPE. Os 3 caps
-    #    em série mascaravam a fonte do ruído sem removê-la. Com Webmotors live
-    #    ainda não conectado (workstream G), `webmotors_mediana` era literalmente
-    #    `FIPE × 0.97` em maior parte dos casos — então o sistema já era
-    #    FIPE-driven, só com camadas extras de incerteza.
+    #    `webmotors_mediana` continua persistido em `Avaliacao` como campo de
+    #    REFERÊNCIA exibido na planilha (col "Mediana mercado") — operador
+    #    compara FIPE × mediana lado a lado, sistema decide com FIPE. Desde
+    #    workstream G (LIVE 2026-05-12), a mediana vem do Webmotors live via
+    #    cache populado pelo cron noturno; sem amostra real, o display mostra
+    #    "—" (paridade sheets/audit) e o sistema persiste `FIPE` como placeholder
+    #    neutro. Workstream G.3 (reativar mediana no precificador via
+    #    `FIPE × β + mediana × (1-β)`) bloqueia em ≥1 semana de cron acumulando
+    #    amostra estável.
     #
-    #    `webmotors_mediana` e `auto_avaliar_ref` continuam persistidos em
-    #    `Avaliacao` como campos de REFERÊNCIA exibidos na planilha (col
-    #    "Mediana mercado") — operador vê os dois lado a lado, sistema decide
-    #    com FIPE. Quando workstream G ligar Webmotors live, reativa-se a
-    #    mediana com ponderação dependente de `n_anuncios_competidores`.
+    #    Histórico (pré-2026-05-08): a âncora era `webmotors_mediana × f_km` com
+    #    cap n<5 no avaliador (1.20×FIPE) + cap final no precificador (1.20×FIPE).
+    #    A "mediana" vinha de `similares_precos` extraídos do Auto Avaliar —
+    #    frequentemente poluída por outliers categóricos (Tiggo 7 entre Tiggo 2,
+    #    Airtrek entre Outlander, Ka descontinuado vs seminovos europeus) e
+    #    elevava o lance máximo acima da FIPE. Os 3 caps em série mascaravam a
+    #    fonte do ruído sem removê-la. Workstream G removeu AA como fonte e
+    #    migrou pro Webmotors live; FIPE-only mata categoricamente Lance Máximo
+    #    > FIPE no design atual.
     f_km = fator_km(lote.km, mercado.webmotors_km_mediana)
     _AJUSTE_FIPE_REVENDA = 0.95
     preco_giro_fipe = int(round(mercado.fipe * f_km * _AJUSTE_FIPE_REVENDA))

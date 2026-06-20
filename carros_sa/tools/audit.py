@@ -23,7 +23,12 @@ from sqlmodel import Session, select
 
 from carros_sa.models import AvaliacaoLote, LaudoCache, Lote
 from carros_sa.tools.laudo_audit import verificar_laudo_completo
-from carros_sa.tools.sheets import HEADER, _lucro_absoluto_efetivo, _lucro_absoluto_no_alvo
+from carros_sa.tools.sheets import (
+    HEADER,
+    _km_por_ano,
+    _lucro_absoluto_efetivo,
+    _score_roi_efetivo,
+)
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
 
@@ -308,7 +313,6 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
         # `roi_anualizado` foi removido do audit em 2026-05-16 (workstream II):
         # ranking passou de ROI anualizado pra LUCRO ABSOLUTO em todas as views
         # (sheets/cli/audit), e nenhuma coluna exibe a versão anual.
-        from carros_sa.tools.sheets import _score_roi_efetivo
         score_efetivo = _score_roi_efetivo(av, lote.lance_atual)
         roi_alvo = score_efetivo * 100
         lucro = _lucro_absoluto_efetivo(av, lote.lance_atual)
@@ -353,7 +357,6 @@ def _build_rows(session: Session, sample_size: int) -> List[Dict[str, Any]]:
 
         loja_raw = (lote.raw_json or {}).get("loja") if isinstance(lote.raw_json, dict) else None
 
-        from carros_sa.tools.sheets import _km_por_ano
         km_por_ano = _km_por_ano(lote.km, lote.ano, agora.year)
 
         rows.append({

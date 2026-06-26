@@ -69,11 +69,20 @@ jobs:
         run: |
           mkdir -p .state data/laudos_pdfs
           git fetch origin state/db:refs/remotes/origin/state/db 2>/dev/null || echo "state/db branch não existe ainda"
-          if git show origin/state/db:carros_sa.db > /tmp/db.new 2>/dev/null; then
+          # Persistência gzipada desde 2026-06-26: o DB cru ultrapassou 100MB
+          # (limite hard do GitHub) e push pra state/db falhava por
+          # `pre-receive hook declined` há 10 dias. Gzip dá ~8x compressão
+          # (DB 101MB → ~13MB), bem dentro do limite. Tenta `.gz` primeiro,
+          # cai pro `carros_sa.db` cru pra rodar 1x num branch legacy.
+          if git show origin/state/db:carros_sa.db.gz > /tmp/db.gz 2>/dev/null; then
+            gunzip -c /tmp/db.gz > carros_sa.db
+            rm -f /tmp/db.gz
+            echo "DB restaurado de carros_sa.db.gz ($(stat -c%s carros_sa.db) bytes descomprimidos)"
+          elif git show origin/state/db:carros_sa.db > /tmp/db.new 2>/dev/null; then
             mv /tmp/db.new carros_sa.db
-            echo "DB restaurado ($(stat -c%s carros_sa.db) bytes)"
+            echo "DB restaurado de carros_sa.db legacy ($(stat -c%s carros_sa.db) bytes)"
           else
-            rm -f /tmp/db.new
+            rm -f /tmp/db.gz /tmp/db.new
             echo "Sem DB prévio — pipeline começa do zero"
           fi
           if git show origin/state/db:autoavaliar_cookies.json > /tmp/ck.new 2>/dev/null; then
@@ -171,8 +180,20 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          BLOB_DB=$(git hash-object -w carros_sa.db)
-          TREE_INPUT="$(printf '100644 blob %s\tcarros_sa.db' "$BLOB_DB")"
+          # Gzip do DB antes do hash-object: o blob na branch state/db precisa
+          # ficar abaixo do limite hard de 100MB do GitHub (pre-receive declined
+          # em 2026-06-14+). gzip dá ~8x compressão consistente em SQLite —
+          # 101MB → 13MB. VACUUM antes ajuda a comprimir (recupera páginas
+          # fragmentadas) e mantém o WAL liberado. Custo: ~3s; ganho: state/db
+          # push volta a funcionar e o cron para de perder estado entre runs.
+          # isolation_level=None: sqlite3 do Python abre transação implícita em
+          # cada execute(), o que faz VACUUM falhar com "cannot VACUUM from
+          # within a transaction". autocommit corrige.
+          .venv/bin/python -c "import sqlite3, os; c = sqlite3.connect(os.environ['CARROS_SA_DB'], isolation_level=None); c.execute('VACUUM'); c.close()" || echo "VACUUM falhou — segue com DB não-compactado"
+          gzip -c carros_sa.db > /tmp/carros_sa.db.gz
+          echo "DB cru: $(stat -c%s carros_sa.db) bytes / gz: $(stat -c%s /tmp/carros_sa.db.gz) bytes"
+          BLOB_DB=$(git hash-object -w /tmp/carros_sa.db.gz)
+          TREE_INPUT="$(printf '100644 blob %s\tcarros_sa.db.gz' "$BLOB_DB")"
           if [ -s "$AUTOAVALIAR_COOKIES_PATH" ]; then
             BLOB_CK=$(git hash-object -w "$AUTOAVALIAR_COOKIES_PATH")
             TREE_INPUT="$TREE_INPUT"$'\n'"$(printf '100644 blob %s\tautoavaliar_cookies.json' "$BLOB_CK")"

@@ -4,7 +4,31 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display + DD8 re-auth in-place em sessão expirada mid-run + docstrings precificador/audit limpos pós-G live** — 629/629 testes passando
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display + DD8 re-auth in-place em sessão expirada mid-run + docstrings precificador/audit limpos pós-G live + state/db persistido gzipado pra fugir do limite hard de 100MB do GitHub** — 629/629 testes passando
+
+### DD9 — gzip de carros_sa.db destrava push pra state/db (DB cresceu além do limite hard de 100MB) (2026-06-26) ✅
+- **Branch:** `claude/amazing-goldberg-da0zao`
+- **Motivação:** Operador (8ª vez) "garantir que todo carro tem laudo baixado, revisado e link na planilha". Diagnóstico via GitHub Actions runs de `triagem.yml`: cron falha (ou cancela em 4h timeout) há **10 dias seguidos** (desde ~2026-06-16). Logs do run 28119085008 (2026-06-24) mostram pipeline rodando normalmente — 84 lotes exportados, audit reportando 84.7% completo (13/85 incompletos) — mas o passo "Persiste DB + cookies + PDFs em state/db" sempre quebra:
+  ```
+  remote: error: File carros_sa.db is 101.29 MB; this exceeds GitHub's file size limit of 100.00 MB
+  remote: error: GH001: Large files detected. You may want to try Git Large File Storage
+  ![remote rejected] state/db (pre-receive hook declined)
+  ```
+- **Causa raiz:** `carros_sa.db` cresceu organicamente — 10.012 lotes no DB + `LaudoCache` + `AvaliacaoLote` + `AnuncioWebmotors` populado nightly pelo cron G desde 2026-05-12. Passou de 100MB em ~2026-06-14. GitHub rejeita o push do blob; **state/db carrega a versão de 10 dias atrás**. Cada cron restaurava o estado velho, scrapeava+avaliava o dia, tentava persistir, falhava, e a próxima run repetia. Estado de circuit-breaker, PDFs novos e LaudoCache recentes nunca persistiam — em prática, o cron virou stateless.
+- **Solução cirúrgica em `.github/workflows/triagem.yml`:**
+  1. Push: VACUUM + gzip do DB antes do `git hash-object`. Blob vira `carros_sa.db.gz` (~13MB em vez de 101MB, gzip dá 8× em SQLite). VACUUM com `isolation_level=None` (default abre transação implícita e VACUUM falha "cannot VACUUM from within a transaction").
+  2. Restore: tenta `carros_sa.db.gz` primeiro, cai pro `carros_sa.db` cru como fallback pra rodar 1× num branch legacy (a state/db atual ainda tem o blob velho cru de 2026-06-14).
+- **Verificação:** smoke local validou gzip/gunzip roundtrip preserva integridade do SQLite + VACUUM com autocommit roda OK. `make test` continua **629/629 verde** (mudança é só YAML, comportamento Python intocado).
+- **Impacto esperado próximo cron:** state/db push volta a funcionar → estado persiste de novo → circuit-breaker, PDFs e LaudoCache acumulam corretamente. Pipeline já estava rodando OK (84.7% completo); o problema era só perder o trabalho a cada run. Os 13 lotes incompletos do último run (11 com `pdf_ausente/cache_baixa/url_invalida` da vendor "saga" + 2 com cache fraco mas PDF presente) devem destravar nos próximos 2-3 ciclos conforme o circuit-breaker volta a permitir retry com estado preservado.
+- **Padrão genérico (LESSONS.md/RC15 — registrar após merge):** persistência via git branch órfã + git plumbing tem um limite hard de 100MB por blob. Quando o blob é um SQLite (ou qualquer artifact que cresce organicamente), planejar compressão (gzip 8× em SQLite, melhor com VACUUM antes) ou TTL/sharding antes de chegar perto do limite. Sintoma observável: pre-receive declined em push estável, cron "falha" mas pipeline roda OK no log — o estado não persiste e o erro fica no último passo. Sem `if: always()` + retry visível, o operador só descobre olhando audit reportar tudo do zero a cada run.
+- **Limitações conhecidas:**
+  - Após este merge, a 1ª run vai restaurar do `carros_sa.db` cru velho (10 dias atrás) — perda já consumada. Pipeline vai re-scraper os lotes novos. A partir da 2ª run, `carros_sa.db.gz` no state/db é o caminho normal.
+  - Se o DB crescer pra >800MB (gzip cap 100MB / 8 = ~800MB cru), precisa pruning de `AnuncioWebmotors` antigos ou outra estratégia. Hoje é ~100MB e cresce ~10MB/mês — espaço de 6-7 anos.
+  - VACUUM é caro (~3s + I/O). Custo aceitável no fim do run.
+- **Follow-ups (não-bloqueantes):**
+  - **DD9-FU1 — DD8 não dispara em saga vendor (body=186 chars mas URL não muda).** Log do run 28119085008 mostra DD5 reload em loop pra 11 lotes saga com body=186 chars sem nenhuma mensagem DD8. Hipótese: SPA mostra UI de "sessão expirada" sem mudar page.url. Investigar com 1 run pós-merge — se persistir, capturar amostra do body de 186 chars no log e adicionar heurística de content-based detection (palavras "Entrar"/"senha" no body curto). Não bloqueia este PR — state persistido já é progresso.
+  - **DD9-FU2 — Pruning de `anuncio_webmotors` antigos.** Cron G acumula desde 2026-05-12; rows antigas viram histórico. Adicionar `--prune-older-than 90d` ao cron G ou job separado. Ataca o crescimento do DB pela raiz.
+  - **DD9-FU3 — Alerta proativo quando DB > 80% do cap gzipado.** Antes do prox bug silencioso, logar warn no fim do run ("DB gzipado X% do limite"). 80MB de cap, alertar em 64MB.
 
 ### Revisão diária 2026-06-20 — limpeza pós-workstream G (docstrings stale + imports inline) ✅
 - **Branch:** `claude/trusting-gates-e1wfrn`

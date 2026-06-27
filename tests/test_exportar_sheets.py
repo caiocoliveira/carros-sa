@@ -226,6 +226,50 @@ class TestLucroAbsolutoEfetivo:
         assert _lucro_absoluto_efetivo(av, 100000) == 0
 
 
+class TestSeveridadeStr:
+    """Helper `_severidade_str` coerce string OU enum pra lowercase consistente.
+
+    Em produção `LaudoCache.severidade_geral: str` (orquestrador grava `.value`).
+    Mas se um caller futuro passar `LaudoEstruturado.severidade_geral` (enum
+    `SeveridadeAvaria`) direto no row dict, `str(SeveridadeAvaria.ESTRUTURAL)`
+    devolve `"SeveridadeAvaria.ESTRUTURAL"` — em lowercase NÃO bate `"estrutural"`
+    e o sufixo `⚠ ESTRUTURAL` silenciosamente some. Helper protege contra esse bug
+    latente em sheets._sufixo_warning_operacional + audit._check_severidade_*.
+    """
+
+    def test_aceita_string_lowercase(self):
+        from carros_sa.tools.sheets import _severidade_str
+        assert _severidade_str("estrutural") == "estrutural"
+        assert _severidade_str("ESTRUTURAL") == "estrutural"
+
+    def test_aceita_enum_SeveridadeAvaria(self):
+        from carros_sa.models import SeveridadeAvaria
+        from carros_sa.tools.sheets import _severidade_str
+        # CRÍTICO: str(SeveridadeAvaria.ESTRUTURAL) devolve "SeveridadeAvaria.ESTRUTURAL"
+        # (default __str__ do Enum). Helper precisa usar .value pra bater "estrutural".
+        assert _severidade_str(SeveridadeAvaria.ESTRUTURAL) == "estrutural"
+        assert _severidade_str(SeveridadeAvaria.LEVE) == "leve"
+        assert _severidade_str(SeveridadeAvaria.GRAVE) == "grave"
+
+    def test_none_devolve_string_vazia(self):
+        from carros_sa.tools.sheets import _severidade_str
+        assert _severidade_str(None) == ""
+
+    def test_sufixo_warning_aceita_enum_em_severidade(self):
+        """Regressão: passar enum direto no row dict (caso latente) ainda dispara
+        sufixo ⚠ ESTRUTURAL. Sem o helper, sufixo some silenciosamente.
+        """
+        from carros_sa.models import SeveridadeAvaria
+        from carros_sa.tools.sheets import _sufixo_warning_operacional
+        row = {
+            "viavel": True, "laudo_analisado": True,
+            "severidade": SeveridadeAvaria.ESTRUTURAL,
+            "motor_ok_bool": True, "reforma_estimada": 1000,
+            "preco_giro": 50000, "preco_alvo": 30000,
+        }
+        assert " ⚠ ESTRUTURAL" in _sufixo_warning_operacional(row)
+
+
 class TestSheetsExporterQuery:
     def test_exportar_retorna_n_linhas(self):
         engine = _engine_mem()

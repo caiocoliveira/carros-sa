@@ -946,6 +946,47 @@ class TestAuditMotorProblema:
         )
 
 
+class TestSeveridadeStrCoerce:
+    """`_severidade_str` coerce enum + string pra mesma forma lowercase.
+
+    `LaudoCache.severidade_geral` é `str` no schema (orquestrador grava `.value`),
+    então o caminho de produção sempre passa string. Mas o helper é chamado por
+    `_check_severidade_estrutural_em_viavel` (audit) e `_sufixo_warning_operacional`
+    (sheets) — duas defesas em camadas. Se um dia algum caller passar enum direto
+    (vindo de `LaudoEstruturado`), `str(SeveridadeAvaria.ESTRUTURAL)` devolve
+    `"SeveridadeAvaria.ESTRUTURAL"`, NÃO bate `"estrutural"`, e o warning some
+    silenciosamente. Test guard contra esse bug latente.
+    """
+
+    def test_check_estrutural_aceita_enum(self):
+        from carros_sa.models import SeveridadeAvaria
+        from carros_sa.tools.audit import _check_severidade_estrutural_em_viavel
+        row = {
+            "viavel": True, "laudo_analisado": True,
+            "severidade": SeveridadeAvaria.ESTRUTURAL,
+            "reforma_estimada": 1000,
+        }
+        out = _check_severidade_estrutural_em_viavel(row)
+        assert len(out) == 1
+        assert "ESTRUTURAL" in out[0][1]
+
+    def test_check_reforma_zero_aceita_enum(self):
+        """CHECKS["Reforma (R$)"] cross-check: reforma=0 + severidade ≥ média
+        é contradição. Quando severidade vem como enum, helper coerce pra string
+        e o set lookup continua funcionando.
+        """
+        from carros_sa.models import SeveridadeAvaria
+        from carros_sa.tools.audit import CHECKS
+        row = {
+            "severidade": SeveridadeAvaria.ESTRUTURAL,
+            "laudo_analisado": True,
+            "reforma_estimada": 0,
+        }
+        motivo = CHECKS["Reforma (R$)"](0, row)
+        assert motivo is not None
+        assert "severidade" in motivo.lower()
+
+
 class TestAuditEstruturalEmViavel:
     """Lote viável + laudo analisado + severidade=ESTRUTURAL = red flag explícito.
 

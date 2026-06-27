@@ -28,6 +28,7 @@ from carros_sa.tools.sheets import (
     _km_por_ano,
     _lucro_absoluto_efetivo,
     _score_roi_efetivo,
+    _severidade_str,
 )
 
 SITUACOES_VALIDAS = {"✓ Viável", "✗ Caro demais"}
@@ -198,7 +199,7 @@ CHECKS: Dict[str, Validator] = {
                 # estrutural, falso conforto.
                 f"Reforma R$ 0 com severidade '{r.get('severidade')}' "
                 f"(esperado >0 quando severidade ≥ média)"
-                if v == 0 and str(r.get("severidade") or "").lower() in _SEVERIDADES_QUE_EXIGEM_REFORMA
+                if v == 0 and _severidade_str(r.get("severidade")) in _SEVERIDADES_QUE_EXIGEM_REFORMA
                 else None
             )
         )
@@ -653,7 +654,7 @@ def _check_severidade_estrutural_em_viavel(row: Dict[str, Any]) -> List[CheckRes
     """
     if not row.get("viavel") or not row.get("laudo_analisado"):
         return []
-    severidade = str(row.get("severidade") or "").lower()
+    severidade = _severidade_str(row.get("severidade"))
     if severidade == "estrutural":
         return [(
             "Reforma (R$)",

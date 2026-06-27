@@ -1,12 +1,22 @@
 """Precificador — Python puro, sem LLM.
 
-Fórmula efetiva (espelha o código abaixo):
-    f_km             = fator_km(km_lote, webmotors_km_mediana)            # ∈ [0.75, 1.15]
-    preco_giro_fipe  = FIPE × f_km × 0.95                                 # âncora única
-    preco_giro       = preco_giro_fipe                                    # FIPE-only desde 2026-05-08
-    margem_min       = margem_base × fator_risco × fator_liquidez
-    preco_alvo_lance = (preco_giro − reforma − frete − custo_op − margem_min×preco_giro − taxa_fixa)
-                      / (1 + taxa_pct)
+Fórmula efetiva (espelha o código abaixo). Duas margens distintas — não confundir:
+    f_km            = fator_km(km_lote, webmotors_km_mediana)            # ∈ [0.75, 1.15]
+    preco_giro_fipe = FIPE × f_km × 0.95                                 # âncora única
+    preco_giro      = preco_giro_fipe                                    # FIPE-only desde 2026-05-08
+
+    # Margem CALIBRADA por risco/liquidez — entra no preco_alvo. Capada em 50%
+    # (_MARGEM_TETO) e respeitando piso minima_absoluta da empresa.
+    margem_calibrada = clamp(margem_base × fator_risco × fator_liquidez, minima_absoluta, 0.50)
+
+    # preco_alvo usa margem CALIBRADA (caso médio — "se entrarmos bem, ganhamos isso")
+    preco_alvo_lance = (preco_giro − reforma − frete − custo_op − margem_calibrada×preco_giro − taxa_fixa)
+                       / (1 + taxa_pct)
+
+    # preco_max usa margem MÍNIMA ABSOLUTA da empresa — teto inegociável (acima disso
+    # nem a margem mínima é respeitada). Sempre preco_max > preco_alvo por construção.
+    preco_max_lance  = (preco_giro − reforma − frete − custo_op − minima_absoluta×preco_giro − taxa_fixa)
+                       / (1 + taxa_pct)
 
 Fator_risco e fator_liquidez são derivados do laudo + sinal de mercado; bounds
 vêm da config da empresa (empresas mais exigentes usam bounds mais altos).
@@ -31,10 +41,13 @@ Sobre a âncora única (FIPE × 0.95):
 - `webmotors_p25` continua em `SinalMercado` mas não é consumido (legado).
 
 Invariantes esperados (validados pelo audit):
-- `preco_max ≤ preco_giro × (1 − margem_min)` por construção (resolve a circularidade
-  da taxa de leilão).
-- `preco_giro_fipe / FIPE ≤ 1.15` (máximo do f_km) → `preco_max < FIPE` mesmo
-  com custos zero. Inviável Lance Máximo > FIPE no design FIPE-only.
+- `preco_alvo ≤ preco_max` (margem_calibrada ≥ minima_absoluta sempre — o `max(...)`
+  no clamp garante). Equivalente: usar minima_absoluta no teto e a calibrada no alvo
+  → teto sempre acima do alvo. Audit `_check_preco_alvo_gt_preco_max` guarda.
+- `preco_giro_fipe / FIPE ≤ 1.15 × 0.95 = 1.0925` (máximo do f_km × ajuste revenda) →
+  `preco_max < FIPE` mesmo com custos zero e margem mínima. Inviável Lance Máximo >
+  FIPE no design FIPE-only. Audit `_check_preco_giro_acima_fipe` (threshold 1.13) +
+  `_check_lance_maximo_acima_fipe` (preco_max > FIPE × 1.05) guardam regressão.
 """
 
 from __future__ import annotations

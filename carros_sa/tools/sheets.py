@@ -248,6 +248,27 @@ def _laudo_motivo_legivel(motivo: Optional[str]) -> str:
 _REFORMA_PESADA_PCT_GIRO = 0.30
 
 
+def _severidade_str(sev) -> str:
+    """Coerce severidade pra string lowercase, aceitando enum ou string.
+
+    Em produção `LaudoCache.severidade_geral: str` (orquestrador grava `.value`),
+    então o caminho normal é só `str(sev).lower()`. Mas se algum caller futuro
+    passar `LaudoEstruturado.severidade_geral` (enum `SeveridadeAvaria`) direto
+    no row dict — caminho hoje não usado mas latente — `str(SeveridadeAvaria.ESTRUTURAL)`
+    devolve `"SeveridadeAvaria.ESTRUTURAL"` (default do Enum), não o `.value`. Em
+    lowercase vira `"severidadeavaria.estrutural"`, NÃO bate `"estrutural"` e o
+    sufixo/warning silenciosamente some — bug invisível.
+
+    `hasattr(sev, "value")` cobre o Enum sem trigger de `__getattr__` em strings.
+    Espelhado em audit.py via mesma função pra paridade total.
+    """
+    if sev is None:
+        return ""
+    if hasattr(sev, "value"):
+        sev = sev.value
+    return str(sev).lower()
+
+
 def _sufixo_warning_operacional(row: dict) -> str:
     """Sufixo ' ⚠ <warnings>' antecipando cross-checks operacionais do audit
     em lotes viáveis com laudo analisado.
@@ -276,7 +297,7 @@ def _sufixo_warning_operacional(row: dict) -> str:
     if not row.get("viavel") or not row.get("laudo_analisado"):
         return ""
     warnings = []
-    severidade = str(row.get("severidade") or "").lower()
+    severidade = _severidade_str(row.get("severidade"))
     if severidade == "estrutural":
         warnings.append("ESTRUTURAL")
     if row.get("motor_ok_bool") is False:

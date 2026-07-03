@@ -324,20 +324,37 @@ _RE_ENCERRADO = re.compile(
 _RE_LEILAO_ENCERRADO = re.compile(
     r"(?i)leil[aã]o\s+(encerrad[oa]|finalizad[oa]|vendid[oa])"
 )
+# Auto Avaliar redireciona pra tela "vazia" quando o lote foi arrematado
+# durante o cron — body_text ~186 chars com "Este veículo já foi vendido
+# mas confira as milhares de outras boas ofertas". O `_RE_ENCERRADO` acima
+# NÃO pega (frase >40 chars, "vendido" no meio), e como a URL não redirecionou
+# pra /login o DD8 tampouco dispara. Sem esta detecção, `flags.encerrado=False`,
+# `early_exit=None`, cache cai em `_laudo_sem_pdf` (0.50), e o lote fica
+# perpetuamente na planilha como "⚠ LAUDO NÃO CAPTURADO" — audit `--strict`
+# vai quebrar o cron por lote fantasma. Padrão observado em 3/17 incompletos
+# do snapshot 2026-07-02.
+_RE_VEICULO_VENDIDO_REDIRECT = re.compile(
+    r"(?i)este\s+ve[íi]culo\s+j[áa]\s+foi\s+vendido"
+)
 
 
 def _detectar_encerrado(body_text: str) -> bool:
     """True se o DOM/innerText indica leilão já arrematado/encerrado.
 
     Heurística conservadora: precisa de (a) badge-like match isolado OU
-    (b) frase "leilão encerrado/finalizado/vendido". Evita falso-positivo
-    em frases tipo "carro vendido sem garantia" (sem contexto de leilão)
-    exigindo que o match isolado apareça numa linha curta (<40 chars) —
-    os badges do Auto Avaliar são sempre linhas isoladas.
+    (b) frase "leilão encerrado/finalizado/vendido" OU (c) frase de
+    redirect "Este veículo já foi vendido" (página vazia pós-arremate).
+    Evita falso-positivo em frases tipo "carro vendido sem garantia"
+    (sem contexto de leilão) exigindo que o match isolado apareça numa
+    linha curta (<40 chars) — os badges do Auto Avaliar são sempre linhas
+    isoladas — e ancorando (c) na frase completa "este ... já foi vendido"
+    (não vaza em observação de anunciante que apenas cita "vendido").
     """
     if not body_text:
         return False
     if _RE_LEILAO_ENCERRADO.search(body_text):
+        return True
+    if _RE_VEICULO_VENDIDO_REDIRECT.search(body_text):
         return True
     for ln in body_text.split("\n"):
         stripped = ln.strip()

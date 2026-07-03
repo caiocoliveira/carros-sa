@@ -476,6 +476,34 @@ def test_parse_detalhe_palavra_vendido_em_observacao_nao_falso_positiva():
     assert flags.encerrado is False
 
 
+def test_parse_detalhe_redirect_veiculo_ja_vendido_marca_encerrado():
+    """Quando um lote é arrematado mid-cron o AA redireciona pra tela vazia
+    com "Este veículo já foi vendido...". Sem detectar, o pipeline salva
+    `_laudo_sem_pdf` (conf 0.50) e o lote apodrece como "⚠ LAUDO NÃO
+    CAPTURADO" na planilha — audit --strict quebra o cron.
+
+    Guarda o fix estrutural do snapshot 2026-07-02 (3/17 incompletos).
+    """
+    body_redirect = (
+        "14\n"
+        "Com a Auto Avaliar os bons negócios não param.\n"
+        "\n"
+        "Este veículo já foi vendido mas confira as milhares de outras boas ofertas"
+    )
+    assert len(body_redirect) < 200  # abaixo do threshold DD5 → sem retry salva
+    flags = parse_detalhe(body_redirect)
+    assert flags.encerrado is True
+    assert flags.early_exit == "leilao_encerrado"
+
+
+def test_parse_detalhe_frase_ja_foi_vendido_pega_variacoes_de_acento():
+    """O redirect vem com "Este veículo já foi vendido" mas queremos
+    tolerar variações sem acento ("veiculo ja foi vendido")."""
+    body = "cabecalho\nEste veiculo ja foi vendido antes.\n"
+    flags = parse_detalhe(body)
+    assert flags.encerrado is True
+
+
 class TestIsLaudoPdfUrl:
     """Defesa contra decoys observados no DOM do Auto Avaliar.
 

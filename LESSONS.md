@@ -593,6 +593,63 @@ plugin, que fecha o loop ao terminar.
 antes de declarar baseline verde — nunca confiar em `-k` ou rodar arquivo
 isolado. Test pollution só aparece na ordem real de execução.
 
+### RC16. Redirect terminal disfarçado de página válida engana retry de fetch soft-fail
+
+Sintoma: body_text volta pequeno (~200 chars) exatamente igual ao caso RC11
+(fetch soft-fail transitório) OU RC12 (sessão expirada), mas com uma
+diferença crítica — a página é o **estado terminal do recurso** e não
+volta a ser válida com reload/re-auth. O sistema entra em retry loop
+(DD5) OU faz re-auth (DD8) mas continua re-fetchando a mesma tela
+terminal. Cache cai em fallback vazio, próximo cron repete, audit
+reporta o lote como "incompleto" mas ele nunca vai completar.
+
+Caso de referência (2026-07-03, DD10):
+- **Auto Avaliar redireciona `page.goto(lote.url)` pra tela vazia com
+  ~186 chars** quando o lote é arrematado durante o cron. Body: `"14\nCom
+  a Auto Avaliar os bons negócios não param.\n\nEste veículo já foi
+  vendido mas confira as milhares de outras boas ofertas"`. `page.url`
+  NÃO muda (não é redirect pra `/login`) — DD8 (RC12) não dispara.
+  RC11 (DD5) detecta body <200 chars e faz retry+reload — reload
+  re-fetcha a MESMA tela de "vendido", mesmos 186 chars. Sai com
+  `body_text=186`, `pdf_url=None`, `flags.encerrado=False`,
+  `early_exit=None` → `_laudo_sem_pdf(0.50)` → planilha exibe "⚠ LAUDO
+  NÃO CAPTURADO" perpetuamente + audit `--strict` reporta
+  `pdf_ausente + cache_confianca_baixa + url_invalida` → cron "failed"
+  em cadeia (6 runs consecutivos).
+
+**Taxonomia consolidada (DD5/RC11 vs DD8/RC12 vs DD10/RC16):**
+
+| Cenário | body len | `page.url` bate `/login`? | Ação correta |
+|---|---|---|---|
+| **DD5/RC11** — fetch soft-fail transitório (SPA lenta, Cloudflare) | <200 | não | Reload + wait — recupera |
+| **DD8/RC12** — sessão/fronteira expirada mid-run | ~186 | **sim** | Re-auth + re-navigate |
+| **DD10/RC16** — redirect terminal (recurso indisponível) | ~186 | não | **Marcar terminal e não retry** |
+
+**Antídoto operacional:** antes de fazer retry+wait+reauth pra body
+curto, checar se o body-de-tamanho-similar tem **conteúdo específico
+que indica estado terminal** (frase-âncora tipo "já foi vendido",
+"lote removido", "página não encontrada"). Retry em estado terminal
+desperdiça 3× ciclos, mantém o lote como "incompleto" no audit e o
+próximo cron repete indefinidamente.
+
+**Antídoto estrutural:** as 3 heurísticas (`_detectar_encerrado`,
+`_reauth_se_login_redirect`, DD5 body-curto reload) precisam ser
+**ordenadas por especificidade dentro de `coletar_detalhe`**. Ordem
+correta: primeiro checa terminal (regex-âncora no body), depois
+fronteira (`/login` na URL → re-auth), só então tenta retry soft-fail.
+Hoje o fix DD10 detecta terminal em `parse_detalhe` — camada
+seguinte a `coletar_detalhe` — então o pipeline ainda gasta 2×
+reloads do DD5 antes de descobrir o terminal. Aceitável (retry perde
+~15s, mas pipeline sai cedo via `flags.encerrado` + `early_exit` e
+não gasta LLM), mas fica pendente puxar a detecção pra dentro do
+`coletar_detalhe` como short-circuit antes do retry (DD10-FU3).
+
+**Regra prática:** ao adicionar detecção de body curto novo, perguntar
+"esse conteúdo indica: (a) fetch soft-fail? (b) fronteira quebrada?
+(c) estado terminal do recurso?". Se (c), marca terminal e sai —
+NÃO reload, NÃO re-auth. Ordering matters: o check terminal deve
+acontecer antes do bloco de retry pra não desperdiçar ciclos.
+
 ### RC7. Pressa em fechar o workstream
 
 ROADMAP trata `✅` como métrica de sucesso visível. Isso cria incentivo

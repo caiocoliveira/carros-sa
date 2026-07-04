@@ -837,6 +837,25 @@ class TestAuditReformaPesada:
             f"Lote inviável não deveria disparar reforma pesada (display oculta): {violacoes}"
         )
 
+    def test_threshold_reforma_pesada_paridade_sheets_audit(self):
+        """Guarda P5c: `_REFORMA_PESADA_PCT_GIRO` idêntico em sheets.py e audit.py.
+
+        Antes de 2026-07-04 audit tinha `0.30` hardcoded no corpo de
+        `_check_reforma_pesada` enquanto sheets tinha a constante nomeada
+        `_REFORMA_PESADA_PCT_GIRO`. Drift silencioso: alguém calibrando com
+        Arrematado poderia mudar sheets sem tocar audit (ou vice-versa) e o
+        display marcaria "⚠ reforma pesada" enquanto o audit reportaria outro
+        threshold — mensagens contraditórias na mesma linha. Constante em
+        ambos + este teste guard fecha o vetor. LESSONS.md/P5b.
+        """
+        from carros_sa.tools.audit import _REFORMA_PESADA_PCT_GIRO as audit_pct
+        from carros_sa.tools.sheets import _REFORMA_PESADA_PCT_GIRO as sheets_pct
+        assert audit_pct == sheets_pct, (
+            f"Threshold `_REFORMA_PESADA_PCT_GIRO` divergiu: audit={audit_pct} "
+            f"vs sheets={sheets_pct} — recalibrar AMBOS os arquivos juntos "
+            "(paridade explícita display↔audit, LESSONS.md/P5c)."
+        )
+
 
 class TestAuditEspelhaDisplay:
     """Lotes inviáveis (lance_atual > preco_max) viram '—' em ROI/Lucro/Tese

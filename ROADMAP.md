@@ -4,7 +4,33 @@ Documento vivo. Cada sessão atualiza seu workstream ao mergear em `main`.
 
 ## Status atual (baseline)
 
-✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display + DD8 re-auth in-place em sessão expirada mid-run + docstrings precificador/audit limpos pós-G live + state/db persistido gzipado pra fugir do limite hard de 100MB do GitHub + DD10 detecção de página redirect "veículo já foi vendido" pra fechar lotes arrematados mid-cron** — 638 passed, 1 skipped
+✅ **Pipeline operacional FIPE-only + planilha calibrada + audit estrito + coerência ROI×Lucro + URL preservada em re-scrape + Webmotors live cache + LLM textual vendor-agnostic + circuit-breaker em perma-loop + paridade text_llm_client entre triagem e retry + audit detecta lote viável com preco_alvo zerado + sufixos operacionais ⚠ reforma pesada/⚠ margem-alvo inalcançável no display + DD8 re-auth in-place em sessão expirada mid-run + docstrings precificador/audit limpos pós-G live + state/db persistido gzipado pra fugir do limite hard de 100MB do GitHub + DD10 detecção de página redirect "veículo já foi vendido" pra fechar lotes arrematados mid-cron + P5b paridade "Top da rodada" ranks por LUCRO ABSOLUTO em cli.py::triagem + scripts/triagem_diaria.py + `_REFORMA_PESADA_PCT_GIRO` constante nomeada em audit.py (fim de DD8-FU1)** — 638 passed, 2 skipped
+
+### Revisão diária 2026-07-04 — DD8-FU1 (constante nomeada) + P5b ranking Top da rodada ✅
+- **Branch:** `claude/trusting-gates-8wpx17`
+- **Motivação:** Pedido "revise, corrija autônomo + analisa relação entre colunas (Lance Máximo > FIPE? preco_giro_fipe muito diferente da FIPE?)". Simulação canônica de **16 cenários** (gold Polo Track + f_km teto/piso + ESTRUTURAL conf alta + mediana inflada n=3 + zona apertada + inviável + motor problema + reforma pesada + interestadual + FIPE muito baixa + boundary lance==max + km=None + tudo péssimo + mediana <0.70 FIPE + enum severidade direto + threshold hardcoded).
+- **Análise por linha (resposta direta):**
+  - **`Lance Máximo > FIPE`?** NÃO em produção saudável. Por construção FIPE-only: `preco_max ≤ preco_giro × (1−margem_min)` = `FIPE × 1.0925 × 0.90 ≈ 0.98×FIPE`. Máx observado em 16 cenários: **91.9% FIPE** (Cenário 2 f_km no teto). Audit `_check_lance_maximo_acima_fipe` (1.05×FIPE) mantido como guard de regressão.
+  - **`preco_giro_fipe > FIPE`?** SIM até **109.2% FIPE** (Cenário 2, f_km=1.15 saturado + 0.95 ajuste revenda). Design FIPE-only embute — carro km-baixa vale mais que mediana. Threshold audit 1.13 (`_PRECO_GIRO_FIPE_RATIO_MAX`) mantém margem ergonômica de ~3.5pp.
+  - **Coerência por linha:** todos os 16 passam `capital_ef × ROI + capital_ef ≈ preco_giro` (mental math). Zona apertada capturada (Cenário 6: intrinsic 54%/efetivo 29.5%). Inviáveis viram score_efetivo negativo (display suprime).
+  - **Sufixos operacionais:** ⚠ ESTRUTURAL, ⚠ motor, ⚠ reforma pesada, ⚠ margem-alvo inalcançável disparam nos cenários esperados; combinam com " + " em Cenário 11 (Ka FIPE baixa: `⚠ reforma pesada + margem-alvo inalcançável`).
+- **Achados em revisão preventiva:**
+  1. **DD8-FU1 (aberto desde 2026-06-06):** `_REFORMA_PESADA_PCT_GIRO` era constante nomeada em `sheets.py` mas literal `0.30` embutido em `audit._check_reforma_pesada`. Drift silencioso invisível ao teste (P5b assimétrico) — recalibrar sheets sem tocar audit produzia display "⚠ reforma pesada" com audit reportando outro threshold.
+  2. **P5b violado em 2 displays:** `cli.py::triagem` linha 540 + `scripts/triagem_diaria.py` linha 123 rankeavam Top da rodada por `roi_pct` (score_roi intrinsic × 100) enquanto sheets/audit/`carros-sa top` rankeiam por LUCRO ABSOLUTO efetivo desde workstream II (2026-05-16). Operador via ordem X após triagem → abria planilha e via ordem Y — cognitive dissonance.
+- **Solução cirúrgica:**
+  - `audit.py`: nova constante `_REFORMA_PESADA_PCT_GIRO = 0.30` no topo (comentário cruzando com sheets.py); `_check_reforma_pesada` referencia constante.
+  - `sheets.py`: comentário da constante existente atualizado pra apontar audit como par explícito.
+  - `orquestrador.py::ResultadoLote`: novo campo `lucro_absoluto: Optional[int] = None`.
+  - `orquestrador.py::_pipeline_lote`: chama `_lucro_absoluto_efetivo` (duck-typed com `Avaliacao`/`AvaliacaoLote`) nos 2 return paths (short-circuit + fresh avaliação) — import inline pra evitar ciclo `orquestrador → tools.sheets → tools.laudo_audit → orquestrador`.
+  - `cli.py::triagem` + `scripts/triagem_diaria.py`: ranking por `lucro_absoluto` desc; nova coluna "Lucro (R$)" na tabela; ROI% mantido como coluna informativa.
+- **Cobertura:** 1 teste novo em `test_audit_columns.py::TestCheckReformaPesada::test_threshold_reforma_pesada_paridade_sheets_audit` (constante idêntica em runtime) + assertion adicionada em `test_orquestrador.py::TestPipelineLote::test_lote_ja_avaliado_com_laudo_ok_nao_reavalia` (valida `res.lucro_absoluto` no fixture zona apertada). **638 verde** (637 baseline + 1 novo).
+- **Impacto:** próxima triagem/cron mostra Top da rodada com mesma ordem da planilha que o operador abre em seguida. Constante `_REFORMA_PESADA_PCT_GIRO` fica calibrável com Arrematado sem risco de drift entre audit e display. Sem regressão em produção.
+- **Padrões registrados em CLAUDE.md:**
+  - Follow-ups "trivial mas fora de escopo" têm meia-vida real — resolver no MESMO PR quando forem (a) constante literal duplicada, (b) view não sincronizada com paridade P5b, (c) dead field em models.py. Antídoto operacional: grep `0\.30\|_REFORMA_PESADA_PCT_GIRO`, `sorted.*roi_pct\|sorted.*score_roi`, `roi_pct\|lucro_absoluto` em sheets/audit/cli/scripts antes de fechar revisão diária.
+- **Follow-ups (não-bloqueantes, identificados na simulação mas fora de escopo):**
+  - **OBS-FU1 (aberto):** `webmotors_p25` persistido em SinalMercado mas não consumido — deprecar quando workstream G.3 ligar.
+  - **OBS-FU2 (aberto):** `preco_giro_aa` sempre None pós-FIPE-only — dead field em contrato imutável (models.py).
+  - **DD8-FU2 (aberto):** `_check_preco_alvo_quase_zero` para preco_alvo<2% preco_giro — hoje coberto indiretamente por `⚠ reforma pesada`. Aguardar caso real.
 
 ### DD10 — página redirect "veículo já foi vendido" precisa marcar `encerrado=True` (2026-07-03) ✅
 - **Branch:** `claude/amazing-goldberg-aqqpo3`

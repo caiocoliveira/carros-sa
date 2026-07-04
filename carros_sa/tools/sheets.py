@@ -242,9 +242,11 @@ def _laudo_motivo_legivel(motivo: Optional[str]) -> str:
     return " + ".join(legiveis) if legiveis else motivo
 
 
-# Threshold pra `⚠ reforma pesada` — espelha `_check_reforma_pesada` em audit.py
-# (mesma fórmula, mesma constante). Quando audit muda o threshold, atualizar aqui
-# também — paridade explícita display↔audit (P5c).
+# Threshold pra `⚠ reforma pesada` — espelha `audit._REFORMA_PESADA_PCT_GIRO`
+# (constante nomeada em ambos os lados desde 2026-07-04 — antes era literal 0.30
+# hardcoded em `audit._check_reforma_pesada`, drift silencioso invisível).
+# Quando calibrar (com Arrematado ≥10 vendas), atualizar AMBOS: paridade
+# explícita display↔audit (P5c) com teste guard `test_reforma_pesada_paridade`.
 _REFORMA_PESADA_PCT_GIRO = 0.30
 
 

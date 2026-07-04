@@ -119,8 +119,12 @@ async def _run(empresa_id: str, horizonte_dias: int, headless: bool, sem_sheets:
         tbl.add_column("Modelo")
         tbl.add_column("Status")
         tbl.add_column("Preço-Alvo", justify="right")
+        tbl.add_column("Lucro (R$)", justify="right")
         tbl.add_column("ROI%", justify="right")
-        for r in sorted(result.lotes, key=lambda x: (x.roi_pct or 0), reverse=True):
+        # Ranking por LUCRO ABSOLUTO efetivo — paridade P5b com sheets/audit/top.
+        # Antes rankeava por `roi_pct` (intrinsic ROI), divergindo do que o
+        # operador via ao abrir a planilha logo depois. Corrigido em 2026-07-04.
+        for r in sorted(result.lotes, key=lambda x: (x.lucro_absoluto or -1), reverse=True):
             if r.erro:
                 status = f"[red]ERRO: {r.erro[:40]}[/red]"
             elif r.motivo_descarte:
@@ -134,6 +138,7 @@ async def _run(empresa_id: str, horizonte_dias: int, headless: bool, sem_sheets:
                 r.modelo[:35],
                 status,
                 f"R$ {r.preco_alvo:,}" if r.preco_alvo else "—",
+                f"R$ {r.lucro_absoluto:,}" if r.lucro_absoluto is not None else "—",
                 f"{r.roi_pct:.1f}%" if r.roi_pct is not None else "—",
             )
         console.print(tbl)

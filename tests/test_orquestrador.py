@@ -326,6 +326,21 @@ class TestPipelineLote:
 
         assert res.avaliado is True
         assert res.preco_alvo == 18000
+        # Paridade P5b: `ResultadoLote.lucro_absoluto` populado no short-circuit.
+        # Antes de 2026-07-04 o ranking do "Top da rodada" (cli.py + triagem_diaria)
+        # usava `roi_pct` (intrinsic ROI) — divergia do sheets/audit/top que rankeam
+        # por lucro absoluto (LESSONS.md/P5b). Agora carregado pelo helper canônico
+        # `_lucro_absoluto_efetivo` (basis efetivo — mesmo do sheets).
+        # Fixture: preco_giro=24000, score_roi=0.25, lance_atual (do _lote helper).
+        # lance_atual=20000 > preco_alvo=18000 → zona apertada.
+        # capital_alvo = 24000 / 1.25 = 19200; capital_ef = 19200 + (20000-18000) = 21200
+        # score_ef = (24000 - 21200) / 21200 ≈ 0.1321
+        # lucro_ef = 24000 * 0.1321 / 1.1321 ≈ 2800
+        assert res.lucro_absoluto is not None
+        assert 2500 <= res.lucro_absoluto <= 3100, (
+            f"Esperava ~R$ 2800 de lucro absoluto efetivo (zona apertada), "
+            f"obtido R$ {res.lucro_absoluto}"
+        )
 
     def test_lote_ja_avaliado_com_laudo_ok_mas_pdf_ausente_reavalia(self, tmp_path, monkeypatch):
         """Short-circuit NÃO dispara quando o PDF sumiu do disco (cenário CI).

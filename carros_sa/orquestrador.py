@@ -51,6 +51,7 @@ from carros_sa.scraping.scraper_autoavaliar import (
     coletar_listagem,
 )
 from carros_sa.tenancy import EmpresaConfig, carregar_empresa
+from carros_sa.tools.sheets import _lucro_absoluto_efetivo
 
 # UFs adjacentes a MG (para heurística de frete)
 _UFS_ADJACENTES_MG = {"SP", "RJ", "ES", "BA", "GO", "MS", "DF"}
@@ -544,9 +545,9 @@ async def _pipeline_lote(
     if ja_avaliado and laudo_ok and pdf_ok and url_ok:
         # `_lucro_absoluto_efetivo` é duck-typed (usa só .score_roi, .preco_giro,
         # .preco_alvo) — funciona tanto com AvaliacaoLote (SQLModel) quanto com
-        # Avaliacao (Pydantic). Import inline pra evitar ciclo `orquestrador →
-        # tools.sheets → tools.laudo_audit → orquestrador`.
-        from carros_sa.tools.sheets import _lucro_absoluto_efetivo
+        # Avaliacao (Pydantic). Import consolidado no topo do módulo desde
+        # 2026-07-04 (review PR #108 confirmou que não há ciclo — sheets NÃO
+        # importa orquestrador direta ou indiretamente).
         lucro_absoluto = _lucro_absoluto_efetivo(ja_avaliado, lote.lance_atual)
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=ja_avaliado.preco_alvo,
@@ -741,7 +742,6 @@ async def _pipeline_lote(
         # Paridade P5b com ranking do sheets/audit/top: Lucro absoluto EFETIVO
         # (basis score_efetivo — cai em zona apertada). Duck-typed com Avaliacao
         # (Pydantic) que tem os mesmos campos consumidos pelo helper.
-        from carros_sa.tools.sheets import _lucro_absoluto_efetivo
         lucro_absoluto = _lucro_absoluto_efetivo(avaliacao, lote_raw.lance_atual)
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=avaliacao.preco_alvo, roi_pct=roi_pct,

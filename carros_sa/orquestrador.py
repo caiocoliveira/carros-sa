@@ -469,6 +469,12 @@ class ResultadoLote:
     motivo_descarte: Optional[str] = None
     preco_alvo: Optional[int] = None
     roi_pct: Optional[float] = None
+    # Lucro absoluto EFETIVO (R$ que sobram no fim), basis `_score_roi_efetivo`
+    # — cai em zona apertada (lance > alvo). Mesma métrica que sheets, cli.top e
+    # audit rankeam (paridade P5b — LESSONS.md/P5b). Antes do fix de 2026-07-04
+    # o Top da rodada rankeava por `roi_pct` (intrinsic ROI), divergindo do que
+    # o operador via ao abrir a planilha logo depois — cognitive dissonance.
+    lucro_absoluto: Optional[int] = None
     erro: Optional[str] = None
 
 
@@ -536,9 +542,16 @@ async def _pipeline_lote(
     from carros_sa.scraping.parsers import is_laudo_pdf_url
     url_ok = is_laudo_pdf_url(url_atual)
     if ja_avaliado and laudo_ok and pdf_ok and url_ok:
+        # `_lucro_absoluto_efetivo` é duck-typed (usa só .score_roi, .preco_giro,
+        # .preco_alvo) — funciona tanto com AvaliacaoLote (SQLModel) quanto com
+        # Avaliacao (Pydantic). Import inline pra evitar ciclo `orquestrador →
+        # tools.sheets → tools.laudo_audit → orquestrador`.
+        from carros_sa.tools.sheets import _lucro_absoluto_efetivo
+        lucro_absoluto = _lucro_absoluto_efetivo(ja_avaliado, lote.lance_atual)
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
                              preco_alvo=ja_avaliado.preco_alvo,
-                             roi_pct=round(ja_avaliado.score_roi * 100, 1))
+                             roi_pct=round(ja_avaliado.score_roi * 100, 1),
+                             lucro_absoluto=lucro_absoluto)
 
     try:
         # 1. Detalhe (sleep anti-bot antes de cada request).
@@ -725,8 +738,14 @@ async def _pipeline_lote(
         session.commit()
 
         roi_pct = round(avaliacao.score_roi * 100, 1)
+        # Paridade P5b com ranking do sheets/audit/top: Lucro absoluto EFETIVO
+        # (basis score_efetivo — cai em zona apertada). Duck-typed com Avaliacao
+        # (Pydantic) que tem os mesmos campos consumidos pelo helper.
+        from carros_sa.tools.sheets import _lucro_absoluto_efetivo
+        lucro_absoluto = _lucro_absoluto_efetivo(avaliacao, lote_raw.lance_atual)
         return ResultadoLote(lote_id=lote.id, modelo=modelo_str, avaliado=True,
-                             preco_alvo=avaliacao.preco_alvo, roi_pct=roi_pct)
+                             preco_alvo=avaliacao.preco_alvo, roi_pct=roi_pct,
+                             lucro_absoluto=lucro_absoluto)
 
     except Exception as exc:
         # Log estruturado pra debug: tipo da exceção + mensagem. Imprime antes

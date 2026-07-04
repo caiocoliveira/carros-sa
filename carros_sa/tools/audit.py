@@ -66,6 +66,16 @@ _COBERTURA_REFORMA_PCT_LIMITE = 0.30
 # legitimamente sem reforma viram alto percentual.
 _COBERTURA_REFORMA_AMOSTRA_MIN = 5
 
+# Threshold pra `_check_reforma_pesada` — reforma > 30% do preco_giro sinaliza
+# lote economicamente questionável (capital de reforma alto vs. revenda + risco
+# de surpresa na oficina). Espelhado em `sheets._REFORMA_PESADA_PCT_GIRO` como
+# constante paralela (paridade explícita P5c) — quando calibrar com Arrematado
+# (≥10 vendas com `gastos_reforma_real`), atualizar AMBOS os arquivos.
+# DD8-FU1 (2026-06-06) resolvido em 2026-07-04: antes era literal 0.30 embutido
+# no corpo de `_check_reforma_pesada`, tornando drift silencioso com sheets.py
+# invisível. Agora nomeado, testável, teste guard em test_audit_columns.
+_REFORMA_PESADA_PCT_GIRO = 0.30
+
 
 # Validator retorna None se ok; string com motivo se suspeito.
 Validator = Callable[[Any, Dict[str, Any]], Optional[str]]
@@ -600,7 +610,7 @@ def _check_reforma_pesada(row: Dict[str, Any]) -> List[CheckResult]:
     if not reforma or not preco_giro or preco_giro <= 0:
         return []
     pct = reforma / preco_giro
-    if pct > 0.30:
+    if pct > _REFORMA_PESADA_PCT_GIRO:
         return [(
             "Reforma (R$)",
             f"Reforma R$ {reforma} é {pct:.0%} do preco_giro R$ {preco_giro} — "

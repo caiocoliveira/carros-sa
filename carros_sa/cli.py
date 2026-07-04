@@ -537,12 +537,19 @@ async def _run_triagem(
     )
 
     if result.lotes:
-        rankeados = sorted(result.lotes, key=lambda x: (x.roi_pct or -1), reverse=True)[:top_n]
+        # Ranking por LUCRO ABSOLUTO efetivo — mesma métrica de sheets.py,
+        # audit.py e `carros-sa top` default (paridade P5b). Antes era
+        # `roi_pct` (intrinsic ROI), divergindo do que o operador via ao abrir
+        # a planilha em seguida — cognitive dissonance corrigido em 2026-07-04.
+        rankeados = sorted(
+            result.lotes, key=lambda x: (x.lucro_absoluto or -1), reverse=True
+        )[:top_n]
         tbl = Table(title=f"Top {len(rankeados)} da rodada")
         tbl.add_column("Lote")
         tbl.add_column("Modelo")
         tbl.add_column("Status")
         tbl.add_column("Preço-Alvo", justify="right")
+        tbl.add_column("Lucro (R$)", justify="right")
         tbl.add_column("ROI%", justify="right")
         for r in rankeados:
             if r.erro:
@@ -558,6 +565,7 @@ async def _run_triagem(
                 r.modelo[:35],
                 status,
                 f"R$ {r.preco_alvo:,}" if r.preco_alvo else "—",
+                f"R$ {r.lucro_absoluto:,}" if r.lucro_absoluto is not None else "—",
                 f"{r.roi_pct:.1f}%" if r.roi_pct is not None else "—",
             )
         console.print(tbl)

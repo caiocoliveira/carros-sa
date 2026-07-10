@@ -504,6 +504,88 @@ def test_parse_detalhe_frase_ja_foi_vendido_pega_variacoes_de_acento():
     assert flags.encerrado is True
 
 
+class TestDD11RedirectAaHeader:
+    """DD11 (2026-07-10): AA tem MAIS variantes de página-vazia (~186 chars)
+    além do "vendido" que DD10 pega. Todas compartilham o header "Com a
+    Auto Avaliar os bons negócios não param.". Cron 2026-07-06 acumulou
+    56/138 (40%) incompletos + cron 07-09 timeout 4h com dezenas dessas
+    URLs presas em `_laudo_sem_pdf`/circuit-breaker.
+
+    Guarda a combinação length<400 + header AA como âncora — bulletproof
+    contra falso-positivo em página real de lote (20-50KB).
+    """
+
+    def test_body_curto_com_header_aa_sem_frase_vendido_marca_encerrado(self):
+        """Variante "genérica" (~186 chars): header AA + convite pra listagem
+        mas sem a frase específica "já foi vendido". DD10 não pegava; DD11 sim.
+        """
+        body = (
+            "14\n"
+            "Com a Auto Avaliar os bons negócios não param.\n"
+            "\n"
+            "Volte para a listagem e encontre novos veículos disponíveis"
+        )
+        assert len(body) < 400
+        # DD10 (frase "já foi vendido") NÃO bate aqui — mas DD11 sim.
+        from carros_sa.scraping.parsers import _RE_VEICULO_VENDIDO_REDIRECT
+        assert _RE_VEICULO_VENDIDO_REDIRECT.search(body) is None
+        flags = parse_detalhe(body)
+        assert flags.encerrado is True
+        assert flags.early_exit == "leilao_encerrado"
+
+    def test_body_curto_com_header_aa_sem_acento_marca_encerrado(self):
+        """Robustez a texto sem acento — mesmo padrão de tolerância do DD10."""
+        body = (
+            "5\n"
+            "Com a Auto Avaliar os bons negocios nao param.\n"
+            "Confira outros lotes"
+        )
+        flags = parse_detalhe(body)
+        assert flags.encerrado is True
+
+    def test_body_longo_com_header_aa_no_banner_nao_marca_encerrado(self):
+        """Página real de lote pode ter o marketing text num banner de rodapé.
+        Não deve marcar encerrado: length >400 falha o gate DD11 e nenhuma
+        outra regra dispara. Isolamento length+header é a proteção.
+        """
+        body = (
+            "Ford Fiesta\nANO\n2013\nKM\n80.000\nCOR\nBranco\nPLACA\nABC1234\n"
+            "STATUS DO LAUDO\nLaudo aprovado com apontamento\n"
+            + ("descrição detalhada do veículo com muitos detalhes e observações. " * 20)
+            + "\nRodapé: Com a Auto Avaliar os bons negócios não param.\n"
+        )
+        assert len(body) > 400
+        flags = parse_detalhe(body)
+        assert flags.encerrado is False
+
+    def test_body_curto_sem_header_aa_nao_marca_encerrado(self):
+        """Body curto genérico (parser sendo exercido com fixture mínima)
+        NÃO deve marcar encerrado — DD11 exige o header AA como âncora."""
+        body = "Ford Fiesta\nANO\n2013\nKM\n80.000\n"
+        assert len(body) < 400
+        flags = parse_detalhe(body)
+        assert flags.encerrado is False
+
+    def test_e_pagina_redirect_aa_vazia_helper(self):
+        """Cobertura direta do helper — length e header separados."""
+        from carros_sa.scraping.parsers import _e_pagina_redirect_aa_vazia
+        assert _e_pagina_redirect_aa_vazia("") is False
+        assert _e_pagina_redirect_aa_vazia(None) is False  # type: ignore[arg-type]
+        # Header sem length OK
+        curto_ok = "Com a Auto Avaliar os bons negócios não param."
+        assert _e_pagina_redirect_aa_vazia(curto_ok) is True
+        # Length OK sem header
+        curto_sem_header = "Alguma frase curta qualquer sem marketing text"
+        assert _e_pagina_redirect_aa_vazia(curto_sem_header) is False
+        # Length no threshold exato (400 = limite superior inclusivo)
+        header_frag = "Com a Auto Avaliar os bons negócios não param. "
+        pad = "x" * (400 - len(header_frag))
+        assert len(header_frag + pad) == 400
+        assert _e_pagina_redirect_aa_vazia(header_frag + pad) is True
+        # Length > threshold → False mesmo com header
+        assert _e_pagina_redirect_aa_vazia(header_frag + "x" * 500) is False
+
+
 class TestIsLaudoPdfUrl:
     """Defesa contra decoys observados no DOM do Auto Avaliar.
 

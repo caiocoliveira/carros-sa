@@ -337,6 +337,44 @@ _RE_VEICULO_VENDIDO_REDIRECT = re.compile(
     r"(?i)este\s+ve[íi]culo\s+j[áa]\s+foi\s+vendido"
 )
 
+# DD11 (2026-07-10): AA tem MAIS variantes de página-vazia (~186 chars) que
+# DD10 não pega — cron 2026-07-06 exportou 138 lotes / 56 incompletos (40%);
+# cron 2026-07-09 cancelou em timeout de 4h com dezenas de URLs (vendors
+# kuruma/saga/urca/lm/umuaramamotors/autojapan/trivel) devolvendo body de
+# exatamente 186 chars mesmo após DD5 reload + DD8 re-auth. DD10 filtrava
+# só a variante "Este veículo já foi vendido"; as outras variantes (lote
+# removido pelo anunciante, vendor sem lote ativo, timing race entre
+# listagem cache vs detalhe live) escapavam e caíam em `_laudo_sem_pdf`.
+# Circuit-breaker congela após 3 dias → planilha eterna com "⚠ LAUDO NÃO
+# CAPTURADO".
+#
+# Sinal ancorador comum a TODAS as variantes: o header "Com a Auto Avaliar
+# os bons negócios não param." (ver `test_parse_detalhe_redirect_veiculo
+# _ja_vendido_marca_encerrado`, corpo real capturado do snapshot 2026-07-02).
+# Página de lote real tem 20-50KB de conteúdo (specs, laudo, similares,
+# obs) — filtro length <400 elimina falso-positivo em página com banner
+# similar. Combinação length+header é bulletproof: healthy page nunca cai
+# aqui. Se um dia AA mudar o header, DD10 continua cobrindo o texto
+# específico e este check volta a ser NO-OP.
+_RE_AA_REDIRECT_HEADER = re.compile(
+    r"(?i)com\s+a\s+auto\s+avaliar\s+os\s+bons\s+neg[óo]cios\s+n[ãa]o\s+param"
+)
+_AA_REDIRECT_MAX_LEN = 400
+
+
+def _e_pagina_redirect_aa_vazia(body_text: str) -> bool:
+    """DD11: True quando body é a "página de redirect vazia" do AA.
+
+    Combina length < 400 chars (página real tem 20-50KB) com match no
+    header AA "Com a Auto Avaliar os bons negócios não param" — sinal
+    ancorador comum às variantes de redirect (arrematado, removido,
+    vendor sem lote ativo). Complementa `_RE_VEICULO_VENDIDO_REDIRECT`
+    de DD10, que só pega a variante específica de "vendido".
+    """
+    if not body_text or len(body_text) > _AA_REDIRECT_MAX_LEN:
+        return False
+    return bool(_RE_AA_REDIRECT_HEADER.search(body_text))
+
 
 def _detectar_encerrado(body_text: str) -> bool:
     """True se o DOM/innerText indica leilão já arrematado/encerrado.
@@ -355,6 +393,8 @@ def _detectar_encerrado(body_text: str) -> bool:
     if _RE_LEILAO_ENCERRADO.search(body_text):
         return True
     if _RE_VEICULO_VENDIDO_REDIRECT.search(body_text):
+        return True
+    if _e_pagina_redirect_aa_vazia(body_text):
         return True
     for ln in body_text.split("\n"):
         stripped = ln.strip()

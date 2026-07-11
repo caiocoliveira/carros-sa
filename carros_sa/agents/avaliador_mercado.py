@@ -25,8 +25,11 @@ from typing import List, Optional
 
 from sqlmodel import Session, select
 
+from carros_sa.agents.calibracao_giro import calibrar_dias_giro, faixa_de_idade
 from carros_sa.models import CategoriaVeiculo, ModeloFipeCache, SinalMercado
 from carros_sa.tools.fipe import FipeClient
+from carros_sa.tools.popularidade import ajustar_dias_giro, bucket_modelo
+from carros_sa.tools.webmotors_cache import obter_anuncios_cacheados
 
 # Heurística inicial de giro por (categoria, faixa_idade). Calibrada com
 # histórico do operador (2026-04): carros novos popularizam mais rápido;
@@ -139,7 +142,6 @@ def avaliar(
     # via `webmotors_anuncios=`. Em produção, `session` ativa o cache do DB.
     anuncios = webmotors_anuncios
     if anuncios is None and session is not None:
-        from carros_sa.tools.webmotors_cache import obter_anuncios_cacheados
         anuncios = obter_anuncios_cacheados(session, marca, modelo, ano)
 
     precos = sorted(a.preco for a in (anuncios or []) if a.preco > 0)
@@ -165,7 +167,6 @@ def avaliar(
     # Prior já discrimina por faixa_idade — Polo 2024 NOVO (25d) ≠ Polo 2018 MEDIO
     # (50d) mesmo quando cai no fallback hardcoded. Calibração com Arrematado
     # sobrescreve quando há ≥3 amostras pra (categoria, faixa).
-    from carros_sa.agents.calibracao_giro import calibrar_dias_giro, faixa_de_idade
     faixa = faixa_de_idade(ano)
     prior = _prior_dias_giro(categoria, faixa)
 
@@ -188,7 +189,6 @@ def avaliar(
     # Acionado on-demand pra todo cálculo de mercado, mas só faz sentido pra
     # categorias que aparecem no ranking (excluí UTILITARIO genérico, etc.).
     if aplicar_popularidade:
-        from carros_sa.tools.popularidade import ajustar_dias_giro, bucket_modelo
         bucket = bucket_modelo(marca, modelo, categoria, ano=ano)
         # Passa faixa_idade pra correção granular — picape velha blockbuster
         # não acelera tanto quanto picape nova blockbuster.

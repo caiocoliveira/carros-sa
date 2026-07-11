@@ -563,12 +563,13 @@ def _check_zona_apertada(row: Dict[str, Any]) -> List[CheckResult]:
 def _check_lance_maximo_acima_fipe(row: Dict[str, Any]) -> List[CheckResult]:
     """`Lance Máximo > FIPE × 1.05` é red flag econômico.
 
-    Por construção `preco_max ≤ preco_giro × (1 − margem.minima_absoluta)` —
-    chega na FIPE só com f_km saturado a 1.15 + margem mínima MUITO baixa
-    (≤10%). Quando passa, sinaliza dado quebrado: FIPE stale, mediana de
-    similares poluída ou cap defensivo do precificador (1.20×FIPE) batendo
-    com mediana inflada legítima (Webmotors n≥5 sem cap em avaliador). É
-    independente da zona apertada — pode coexistir e ambos devem aparecer.
+    Por construção (FIPE-only desde 2026-05-08) `preco_max ≤ preco_giro ×
+    (1 − margem.minima_absoluta)` = `FIPE × f_km × 0.95 × 0.90` — máx teórico
+    ~0.98×FIPE, com `f_km ∈ [0.75, 1.15]` (bounds em `carros_sa/ajuste_km.py`).
+    Guard de regressão: se este check disparar, alguém reintroduziu mediana no
+    cálculo do `preco_giro`, bumpou `_FATOR_MAX` acima de 1.15, ou o FIPE
+    persistido está stale (mercado subiu, tabela desatualizada). É independente
+    da zona apertada — pode coexistir e ambos devem aparecer.
     """
     # Paridade display: laudo NÃO analisado → Lance Máximo vira "—" na planilha
     # (operador não vê o valor). Audit não deve disparar red flag sobre número

@@ -4,7 +4,7 @@
     "value": "pt_br-0",
     "domain": "b2b.autoavaliar.com.br",
     "path": "/",
-    "expires": 1825010053.426349,
+    "expires": 1825081708.216632,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
@@ -34,7 +34,7 @@
     "value": "1B515A2095986BD525C04D9994A56AE4",
     "domain": ".c.bing.com",
     "path": "/",
-    "expires": 1824128552.430256,
+    "expires": 1824217706.087978,
     "httpOnly": false,
     "secure": true,
     "sameSite": "None"
@@ -80,14 +80,74 @@
     "sameSite": "None"
   },
   {
-    "name": "CLID",
-    "value": "a00a5a23803c4994ac6b1d166d9163c3.20260818.20270926",
-    "domain": "www.clarity.ms",
+    "name": "fr",
+    "value": "0e4KHg9BgSSSdCFDV..BqiXtH...1.0.BquBmC.AWeJelfCDcpPMuzLoFAS589Owxk",
+    "domain": ".facebook.com",
     "path": "/",
-    "expires": 1821968551.798406,
+    "expires": 1798226050.127976,
     "httpOnly": true,
     "secure": true,
     "sameSite": "None"
+  },
+  {
+    "name": "botmaker_auth",
+    "value": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ3ZWJJZCI6IklRT0s4VFI3VzQiLCJidXNpbmVzc0lkIjoiYXV0b2F2YWxpYXIiLCJjdXN0b21lcklkIjoiWVBaT1JJR0U3V0dEQlpCMVlOTVIiLCJleHAiOjE3OTgyMjYwNTV9.ZqGT0otMQa6opAt23SouFv7EWqAsS1S1N7735h16He4",
+    "domain": ".botmaker.com",
+    "path": "/",
+    "expires": 1798226055.760014,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "CLID",
+    "value": "a00a5a23803c4994ac6b1d166d9163c3.20260818.20270927",
+    "domain": "www.clarity.ms",
+    "path": "/",
+    "expires": 1822057704.594639,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "_gid",
+    "value": "GA1.3.927949881.1790521705",
+    "domain": ".autoavaliar.com.br",
+    "path": "/",
+    "expires": 1790608105,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_gat",
+    "value": "1",
+    "domain": ".autoavaliar.com.br",
+    "path": "/",
+    "expires": 1790521764,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_clck",
+    "value": "vdaqd9%5E2%5Eg9t%5E0%5E2461",
+    "domain": ".autoavaliar.com.br",
+    "path": "/",
+    "expires": 1822057704,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_fbp",
+    "value": "fb.2.1790521704857.937203376792274060",
+    "domain": ".autoavaliar.com.br",
+    "path": "/",
+    "expires": 1798297707,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
   },
   {
     "name": "SM",
@@ -100,91 +160,51 @@
     "sameSite": "None"
   },
   {
-    "name": "_gid",
-    "value": "GA1.3.1535373794.1790450050",
-    "domain": ".autoavaliar.com.br",
+    "name": "ANONCHK",
+    "value": "0",
+    "domain": ".c.clarity.ms",
     "path": "/",
-    "expires": 1790536451,
+    "expires": 1790522305.092745,
     "httpOnly": false,
-    "secure": false,
-    "sameSite": "Lax"
-  },
-  {
-    "name": "_gat",
-    "value": "1",
-    "domain": ".autoavaliar.com.br",
-    "path": "/",
-    "expires": 1790450109,
-    "httpOnly": false,
-    "secure": false,
-    "sameSite": "Lax"
-  },
-  {
-    "name": "_clck",
-    "value": "ivcju%5E2%5Eg9s%5E0%5E2460",
-    "domain": ".autoavaliar.com.br",
-    "path": "/",
-    "expires": 1821986049,
-    "httpOnly": false,
-    "secure": false,
-    "sameSite": "Lax"
-  },
-  {
-    "name": "_fbp",
-    "value": "fb.2.1790450050061.80941194936564110",
-    "domain": ".autoavaliar.com.br",
-    "path": "/",
-    "expires": 1798226052,
-    "httpOnly": false,
-    "secure": false,
-    "sameSite": "Lax"
-  },
-  {
-    "name": "fr",
-    "value": "0e4KHg9BgSSSdCFDV..BqiXtH...1.0.BquBmC.AWeJelfCDcpPMuzLoFAS589Owxk",
-    "domain": ".facebook.com",
-    "path": "/",
-    "expires": 1798226050.127976,
-    "httpOnly": true,
     "secure": true,
     "sameSite": "None"
   },
   {
     "name": "_ga",
-    "value": "GA1.1.2115152551.1790450050",
+    "value": "GA1.1.1214374177.1790521705",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1825010051.133841,
+    "expires": 1825081706.015004,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
   },
   {
     "name": "_clsk",
-    "value": "10yqvws%5E1790450051411%5E2%5E1%5Eu.clarity.ms%2Fcollect",
+    "value": "154w1dt%5E1790521706295%5E2%5E1%5Ef.clarity.ms%2Fcollect",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1790536451,
+    "expires": 1790608106,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
   },
   {
     "name": "__trf.src",
-    "value": "encoded_eyJmaXJzdF9zZXNzaW9uIjp7InZhbHVlIjoiKG5vbmUpIiwiZXh0cmFfcGFyYW1zIjp7fX0sImN1cnJlbnRfc2Vzc2lvbiI6eyJ2YWx1ZSI6Iihub25lKSIsImV4dHJhX3BhcmFtcyI6e319LCJjcmVhdGVkX2F0IjoxNzkwNDUwMDUxNDM2fQ==",
+    "value": "encoded_eyJmaXJzdF9zZXNzaW9uIjp7InZhbHVlIjoiKG5vbmUpIiwiZXh0cmFfcGFyYW1zIjp7fX0sImN1cnJlbnRfc2Vzc2lvbiI6eyJ2YWx1ZSI6Iihub25lKSIsImV4dHJhX3BhcmFtcyI6e319LCJjcmVhdGVkX2F0IjoxNzkwNTIxNzA2Mzg0fQ==",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1821986051,
+    "expires": 1822057706,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
   },
   {
     "name": "rdtrk",
-    "value": "%7B%22id%22%3A%2270568031-7635-4444-a8c1-a7cc3ab006e9%22%7D",
+    "value": "%7B%22id%22%3A%228da6a1f1-221c-415b-8653-9bb7fe40ea75%22%7D",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1821986051,
+    "expires": 1822057706,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
@@ -194,7 +214,7 @@
     "value": "-1|autoavaliar.com.br",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1790451852,
+    "expires": 1790523507,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
@@ -204,17 +224,17 @@
     "value": "0|autoavaliar.com.br",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1825010054.994243,
+    "expires": 1825081709.854792,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
   },
   {
     "name": "_gcl_au",
-    "value": "1.1.513726827.1790450050.1943129022.1790450053.1790450052.346988544.1790450053.1790450052",
+    "value": "1.1.1244158109.1790521705.1789950646.1790521708.1790521707.687066273.1790521708.1790521707",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1798226050,
+    "expires": 1798297705,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
@@ -224,54 +244,24 @@
     "value": "undefined",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1793042052,
+    "expires": 1793113707,
     "httpOnly": false,
     "secure": true,
     "sameSite": "None"
   },
   {
-    "name": "AUTOAVALIAR_lead_id",
-    "value": "b9d1f668bd0436bd1bd0771b|autoavaliar.com.br",
-    "domain": ".autoavaliar.com.br",
-    "path": "/",
-    "expires": 1825010055.994832,
-    "httpOnly": false,
-    "secure": false,
-    "sameSite": "Lax"
-  },
-  {
-    "name": "AUTOAVALIAR_lead_session_id",
-    "value": "5196bad46e02d25882a9f6c0|autoavaliar.com.br",
-    "domain": ".autoavaliar.com.br",
-    "path": "/",
-    "expires": 1790451252,
-    "httpOnly": false,
-    "secure": false,
-    "sameSite": "Lax"
-  },
-  {
-    "name": "AUTOAVALIAR_pb_block_tomorrow",
-    "value": "6917ec9686beaf6a19d67b6f|autoavaliar.com.br",
-    "domain": ".autoavaliar.com.br",
-    "path": "/",
-    "expires": 1790493252,
-    "httpOnly": false,
-    "secure": false,
-    "sameSite": "Lax"
-  },
-  {
     "name": "pbz_device",
-    "value": "c5b5ad4a-6e7f-4ccb-90ed-705c0c777571",
+    "value": "58d889ac-37ab-43cc-a9cb-e34c765ee5e2",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1821986054.997164,
+    "expires": 1822057709.857336,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
   },
   {
     "name": "pbz_588915_sess",
-    "value": "520c3bce-709b-44f4-83d7-eb937f1440df",
+    "value": "a6897a4d-ddb7-401a-a53d-023f7a767885",
     "domain": ".autoavaliar.com.br",
     "path": "/",
     "expires": -1,
@@ -280,8 +270,38 @@
     "sameSite": "Lax"
   },
   {
+    "name": "AUTOAVALIAR_lead_id",
+    "value": "120d8ccdf71ca62b928bbe11|autoavaliar.com.br",
+    "domain": ".autoavaliar.com.br",
+    "path": "/",
+    "expires": 1825081710.85542,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "AUTOAVALIAR_lead_session_id",
+    "value": "6d85bc4aa8645af08c2d5ac8|autoavaliar.com.br",
+    "domain": ".autoavaliar.com.br",
+    "path": "/",
+    "expires": 1790522907,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "AUTOAVALIAR_pb_block_tomorrow",
+    "value": "173ca739d54a1a0b8e21d568|autoavaliar.com.br",
+    "domain": ".autoavaliar.com.br",
+    "path": "/",
+    "expires": 1790564907,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
     "name": "B2B_SID",
-    "value": "nivcl98gu4fcbdt7uh0gbqilf3",
+    "value": "17isb4tupc1bq3piecuir5s0te",
     "domain": "b2b.autoavaliar.com.br",
     "path": "/",
     "expires": -1,
@@ -291,20 +311,20 @@
   },
   {
     "name": "_ga_5P52K5PB9W",
-    "value": "GS2.1.s1790450049$o1$g1$t1790450053$j56$l0$h0",
+    "value": "GS2.1.s1790521704$o1$g1$t1790521708$j56$l0$h0",
     "domain": ".autoavaliar.com.br",
     "path": "/",
-    "expires": 1825010053.673431,
+    "expires": 1825081708.454304,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
   },
   {
     "name": "TiPMix",
-    "value": "80.63713142762346",
+    "value": "57.105965723830835",
     "domain": ".dashboard.wheelio-app.com",
     "path": "/",
-    "expires": 1790453654.147678,
+    "expires": 1790525308.991273,
     "httpOnly": true,
     "secure": true,
     "sameSite": "None"
@@ -314,29 +334,19 @@
     "value": "self",
     "domain": ".dashboard.wheelio-app.com",
     "path": "/",
-    "expires": 1790453654.147763,
+    "expires": 1790525308.991335,
     "httpOnly": true,
     "secure": true,
     "sameSite": "None"
   },
   {
     "name": "pbz_588915_last_hb",
-    "value": "1790450055128",
+    "value": "1790521709986",
     "domain": ".autoavaliar.com.br",
     "path": "/",
     "expires": -1,
     "httpOnly": false,
     "secure": false,
     "sameSite": "Lax"
-  },
-  {
-    "name": "botmaker_auth",
-    "value": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ3ZWJJZCI6IklRT0s4VFI3VzQiLCJidXNpbmVzc0lkIjoiYXV0b2F2YWxpYXIiLCJjdXN0b21lcklkIjoiWVBaT1JJR0U3V0dEQlpCMVlOTVIiLCJleHAiOjE3OTgyMjYwNTV9.ZqGT0otMQa6opAt23SouFv7EWqAsS1S1N7735h16He4",
-    "domain": ".botmaker.com",
-    "path": "/",
-    "expires": 1798226055.760014,
-    "httpOnly": true,
-    "secure": true,
-    "sameSite": "None"
   }
 ]
